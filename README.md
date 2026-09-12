@@ -73,7 +73,7 @@ Verify the install:
 
 ```bash
 lightsaber-fx --version
-pytest -q                # 59 tests; the SAM2 tracking test is skipped if setup hasn't run
+pytest -q                # 129 tests; the SAM2 tracking test is skipped if setup hasn't run
 ```
 
 ---
@@ -133,6 +133,7 @@ lightsaber-fx run clip.mp4 \
   --output blue_broom.mp4 \
   --color blue \
   --intensity 0.5 \
+  --voice sith \
   --keep-intermediate
 ```
 
@@ -141,7 +142,9 @@ lightsaber-fx run clip.mp4 \
 | `--output PATH` | `final.mp4` | Written relative to the current directory. |
 | `--color` | `red` | `red`, `blue`, `green`, or any `#RRGGBB` hex value. |
 | `--intensity` | `0.35` | `0.0`–`1.0`. How strongly the blade lights up its surroundings. Values outside the range are rejected immediately. |
-| `--keep-intermediate` | off | Keep the extracted frames and masks after rendering (useful for debugging a bad track). |
+| `--blade-extend` / `--no-blade-extend` | extend on | Rebuilds the blade as a capsule extending past the tracked object's tip (what makes a bat or broom read as a blade rather than a glowing prop). `--no-blade-extend` falls back to tracing the raw tracked silhouette instead — useful for an object that isn't elongated. |
+| `--voice` | `neutral` | `neutral`, `jedi`, or `sith`. Changes the hum/swing character only — independent of `--color`, so picking red never silently changes the soundtrack. |
+| `--keep-intermediate` | off | Keep the extracted frames and masks after rendering (useful for debugging a bad track). The rendered PNG frame sequence used for the final encode is always deleted after a successful run regardless of this flag — it has no debugging value once it's been encoded. |
 
 In the picker window, note that the only way to finish is **Enter**, and the
 only way to abort is **Ctrl-C** — closing the window doesn't do it, and there's
@@ -149,13 +152,25 @@ currently no undo for a misplaced point. If you misclick, Ctrl-C and re-run.
 
 ### How long it takes
 
-Tracking dominates, and it scales with frame count. Measured on an Apple
-Silicon Mac using MPS:
+Tracking still dominates and scales with frame count, but **glow and the
+final encode are no longer negligible** — the fidelity upgrade deliberately
+traded speed for quality there (see [Tuning](#tuning)). Measured on an Apple
+Silicon Mac using MPS, 2 s / 60 frames / 640×360:
+
+| Stage | Time |
+|---|---|
+| extract | <0.1 s |
+| track | ~32 s |
+| motion | <0.1 s |
+| glow | ~16 s |
+| audio | <0.1 s |
+| mux (encode) | <0.2 s |
+| **whole pipeline** | **~54 s** |
 
 | Clip | Tracking | Whole pipeline |
 |---|---|---|
-| 2 s, 60 frames, 640×360 | ~35 s | ~1 min |
-| 10 s, 300 frames, 1280×720 | ~3 min | ~4 min |
+| 2 s, 60 frames, 640×360 | ~32 s | ~1 min |
+| 10 s, 300 frames, 1280×720 | ~3 min | ~4–5 min |
 
 On CPU, expect several times that — the CLI warns you when it falls back.
 
@@ -163,19 +178,35 @@ On CPU, expect several times that — the CLI warns you when it falls back.
 
 ## How it works
 
-`lightsaber-fx run` and the web app both call the same pipeline. Five stages:
+`lightsaber-fx run` and the web app both call the same pipeline. Six stages:
 
-1. **extract** — the clip is exploded into per-frame JPEGs.
+1. **extract** — the clip is exploded into per-frame, near-lossless JPEGs
+   (quality ~100). Everything downstream composites on these, so this stage
+   deliberately doesn't save space the way a normal JPEG export would.
 2. **track** — SAM2 takes your click points on frame 0 and propagates a mask
    for that object through every frame. This is the expensive stage.
-3. **glow** — for each frame, the mask becomes three layers screen-blended over
-   the original: a tight white-hot core, a coloured glow hugging the object,
-   and a wide soft spill that brightens nearby surfaces. The object's centre of
-   mass per frame is recorded here too.
-4. **audio** — a continuous hum, plus a whoosh placed at each frame where the
-   tracked motion exceeds the 80th percentile of its own speed, plus an
-   ignition swell at the start and a power-down at the end. All synthesized.
-5. **mux** — ffmpeg combines the rendered video and the audio into the output.
+3. **motion** — a fast, pure-numpy stage that fits each frame's mask to a
+   `BladeGeometry` (centroid, tip/hilt endpoints, axis, length, width) via
+   PCA, and writes `motion.npz`. Both later stages read it: **glow** rebuilds
+   the blade from this geometry instead of tracing the raw mask, and **audio**
+   drives swings from the blade's actual tip/angular speed instead of the
+   mask's centroid (which barely moves when a blade pivots in place).
+4. **glow** — the blade is reconstructed as a capsule (constant width,
+   rounded tip, extended past the tracked tip) rather than the raw silhouette,
+   composited in linear light as three elements — an eroded white-hot core, a
+   coloured band, and a wide exponential-falloff glow — over a plate that's
+   darkened first (so colour doesn't wash out on a bright background), plus a
+   temporal trail, directional motion blur, chromatic bloom, flicker, and an
+   approximate light wrap. Writes a lossless PNG sequence, one stage-internal
+   intermediate this pipeline is happy to spend disk and time on.
+5. **audio** — a two-layer hum (a beating oscillator pair plus a resonant
+   "dark tone", both with slow pitch drift) and a TV-interference buzz layer,
+   continuously cross-faded into a pitched-up register as the blade swings
+   faster (no discrete whoosh trigger), with an ignition swell at the start
+   and a power-down at the end. Panned in stereo by the blade's on-screen x
+   position. All synthesized, never sampled.
+6. **mux** — a single ffmpeg pass encodes the PNG sequence to H.264 and muxes
+   in the stereo audio as AAC, in one lossy generation instead of three.
 
 ---
 
@@ -185,16 +216,37 @@ Exposed directly:
 
 - **Colour and intensity** — `--color` / `--intensity` on the CLI, or the
   dropdown and slider in the web UI.
+- **Blade extension** — `--blade-extend` / `--no-blade-extend` on the CLI, or
+  the checkbox in the web UI. On (default) rebuilds the blade as an extended
+  capsule; off traces the raw tracked mask, which suits an object that isn't
+  elongated.
+- **Voice** — `--voice neutral|jedi|sith` on the CLI, or the dropdown in the
+  web UI. Changes only the hum/swing character (pitch, distortion, buzz
+  level); colour and voice are independent, so switching colour never changes
+  the sound.
+
+This is a **quality-over-speed pipeline by design**: frames are extracted at
+near-lossless JPEG quality, the glow stage composites in linear light through
+several Gaussian passes per frame, and the final encode is a single
+high-quality `libx264 -crf 16` pass rather than a fast intermediate. The glow
+and encode stages are the ones that got slower on purpose in exchange for a
+visibly cleaner result — there's no `--fast` escape hatch.
 
 Code-level, in `src/lightsaber_fx/pipeline/`:
 
-- **Glow shape** — `core_blur`, `inner_glow_blur`, and `spill_blur` are keyword
-  parameters on `render_glow()` in `glow.py` (defaults `5`, `25`, `95`). Larger
-  values bloom wider.
-- **Whoosh sensitivity** — `synthesize_audio()` in `audio.py` treats a frame as
-  a swing when its speed exceeds the 80th percentile of all positive per-frame
-  speeds (an inline `np.percentile(positive, 80)`). Raise the percentile for
-  fewer whooshes.
+- **Glow shape** — `render_glow()` in `glow.py` exposes tuning knobs for every
+  layer (capsule extension/taper, core/colour-band blur, the three-scale glow
+  falloff, Knoll darkening strength, trail decay, motion-blur gain, chromatic
+  bloom, flicker, light wrap) as keyword parameters — see the function's
+  docstring and defaults for the full list. Most are expressed as fractions of
+  the clip's own median blade width/length, not absolute pixels, so they scale
+  with the source footage.
+- **Swing sensitivity** — `synth_swing_hum()` in `audio.py` normalizes
+  `tip_speed`/`angular_speed` against their own 90th-percentile-of-positive
+  values (`_normalize_speed`'s `ref_percentile`); raise it for a swing sound
+  that only kicks in on faster motion.
+- **Encode quality** — `-crf 16` is hardcoded in `mux.py`'s `encode()`; lower
+  is higher quality (and larger) output.
 - **Model size** — `setup.py` fetches `sam2.1_hiera_small`. Larger SAM2
   checkpoints track better and run slower; switching means changing both the
   checkpoint URL and the matching config path.
@@ -228,12 +280,10 @@ You're probably on CPU. The CLI prints which device it selected, and warns when
 it falls back.
 
 **The downloaded clip won't play somewhere you shared it**
-The mux copies the video stream rather than re-encoding, which keeps the render
-fast but leaves it in a codec some players dislike. Re-encode if you need to
-share widely:
-```bash
-ffmpeg -i final.mp4 -c:v libx264 -pix_fmt yuv420p -c:a aac shareable.mp4
-```
+Output is H.264/`yuv420p` with `+faststart` and stereo AAC audio — the
+combination most players and platforms accept natively — so this shouldn't
+come up. If it does, it's worth checking the exact codec/profile with
+`ffprobe -show_streams final.mp4` before assuming it's this pipeline's fault.
 
 ---
 
@@ -259,7 +309,7 @@ the web app keeps them until you run `clean`.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                              # 59 tests
+pytest -q                              # 129 tests
 pytest tests/pipeline/test_glow.py -v  # one file
 ```
 
@@ -279,9 +329,10 @@ src/lightsaber_fx/
 ├── pipeline/
 │   ├── frames.py       # 1. extract
 │   ├── track.py        # 2. click-picker + SAM2 propagation
-│   ├── glow.py         # 3. glow compositing + colour parsing
-│   ├── audio.py        # 4. hum / whoosh / ignition / power-down
-│   ├── mux.py          # 5. ffmpeg
+│   ├── blade.py        # 3. motion: per-frame blade geometry fit + motion.npz
+│   ├── glow.py         # 4. glow compositing + colour parsing
+│   ├── audio.py        # 5. hum / swing / ignition / power-down
+│   ├── mux.py          # 6. single ffmpeg encode() pass
 │   └── runner.py       # run_pipeline(): the single orchestrator
 └── web/
     ├── server.py       # FastAPI routes
