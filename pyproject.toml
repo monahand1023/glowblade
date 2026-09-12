@@ -1,0 +1,34 @@
+[project]
+name = "lightsaber-fx"
+version = "0.1.0"
+description = "Turn a home video into a lightsaber VFX clip: SAM2 tracking, glow compositing, synthesized audio."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "opencv-python",
+    "numpy",
+    "scipy",
+    "soundfile",
+    "torch",
+    "torchvision",
+    "click",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "platformdirs",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[project.scripts]
+lightsaber-fx = "lightsaber_fx.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"lightsaber_fx.web" = ["static/*"]
