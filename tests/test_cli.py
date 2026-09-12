@@ -10,8 +10,6 @@ def test_cli_help_exits_zero():
     assert "lightsaber-fx" in result.output or "Usage" in result.output
 
 
-from pathlib import Path
-
 import lightsaber_fx.paths as paths_module
 
 

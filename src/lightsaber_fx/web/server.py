@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import cv2
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from .. import paths
 from ..device import select_device
@@ -14,9 +16,15 @@ from ..pipeline.runner import run_pipeline
 from .jobs import JobManager
 
 STATIC_DIR = Path(__file__).parent / "static"
+JOB_ID_RE = re.compile(r"[0-9a-zA-Z_-]{1,64}")
 
 app = FastAPI()
 manager = JobManager()
+
+
+def _validate_job_id(job_id: str) -> None:
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
 
 
 @app.get("/")
@@ -51,6 +59,7 @@ async def upload(file: UploadFile = File(...)):
 
 @app.get("/api/jobs/{job_id}/frame0")
 def get_frame0(job_id: str):
+    _validate_job_id(job_id)
     frame0_path = paths.get_jobs_dir() / job_id / "frame0.jpg"
     if not frame0_path.exists():
         raise HTTPException(status_code=404, detail="Job not found")
@@ -59,6 +68,7 @@ def get_frame0(job_id: str):
 
 @app.post("/api/jobs/{job_id}/points")
 async def submit_points(job_id: str, body: dict):
+    _validate_job_id(job_id)
     job_dir = paths.get_jobs_dir() / job_id
     input_path = job_dir / "input.mp4"
     if not input_path.exists():
@@ -100,6 +110,8 @@ async def submit_points(job_id: str, body: dict):
 
 @app.get("/api/jobs/{job_id}/events")
 def stream_events(job_id: str):
+    _validate_job_id(job_id)
+
     def event_gen():
         last_sent = 0
         while True:
@@ -123,12 +135,11 @@ def stream_events(job_id: str):
 
 @app.get("/api/jobs/{job_id}/result")
 def get_result(job_id: str):
+    _validate_job_id(job_id)
     result_path = paths.get_jobs_dir() / job_id / "final.mp4"
     if not result_path.exists():
         raise HTTPException(status_code=404, detail="Result not ready")
     return FileResponse(result_path, media_type="video/mp4")
 
-
-from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

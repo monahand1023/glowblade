@@ -1,6 +1,7 @@
 import threading
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import lightsaber_fx.paths as paths_module
@@ -105,3 +106,62 @@ def test_index_html_references_expected_elements(client):
     html = resp.text
     for element_id in ("dropzone", "picker-canvas", "submit-button", "progress-fill", "result-player"):
         assert f'id="{element_id}"' in html
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    ["..", "../../etc/passwd", "a" * 65, "", "..."],
+)
+def test_validate_job_id_rejects_traversal_style_ids(job_id):
+    with pytest.raises(HTTPException) as exc_info:
+        server_module._validate_job_id(job_id)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.parametrize("job_id", ["abcd1234", "a" * 64, "job-id_1"])
+def test_validate_job_id_accepts_normal_ids(job_id):
+    server_module._validate_job_id(job_id)  # must not raise
+
+
+def test_traversal_style_job_id_cannot_escape_jobs_dir(client, tmp_path):
+    # get_jobs_dir() is tmp_path / "jobs" (see the fresh_job_manager fixture).
+    # A job_id of ".." would, without validation, make
+    # `get_jobs_dir() / job_id / "frame0.jpg"` resolve to tmp_path/"frame0.jpg" —
+    # one level above the jobs directory. Plant a file there and confirm the
+    # traversal id is rejected before that file is ever served.
+    outside_file = tmp_path / "frame0.jpg"
+    outside_file.write_bytes(b"should never be reachable via job_id traversal")
+
+    resp = client.get("/api/jobs/../frame0")
+
+    assert resp.status_code == 404
+    assert resp.content != b"should never be reachable via job_id traversal"
+
+
+def test_second_points_submission_returns_409_while_job_is_running(client, tiny_video_bytes, monkeypatch):
+    release = threading.Event()
+
+    def slow_run_pipeline(*, output_path, progress_cb, **kwargs):
+        release.wait(timeout=2)
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+        return output_path
+
+    monkeypatch.setattr(server_module, "run_pipeline", slow_run_pipeline)
+
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    first = client.post(f"/api/jobs/{job_id}/points", json={"points": [[1, 1, 1]]})
+    assert first.status_code == 200
+
+    # The job is now running (blocked on `release`). A second points submission
+    # for the same job_id passes the upload-level `is_busy()` guard entirely
+    # (it never touches /api/upload) and must instead be rejected by
+    # `manager.start()` raising RuntimeError, which `submit_points` translates
+    # into a 409.
+    second = client.post(f"/api/jobs/{job_id}/points", json={"points": [[2, 2, 1]]})
+    assert second.status_code == 409
+
+    release.set()
+    server_module.manager.wait(timeout=2)
