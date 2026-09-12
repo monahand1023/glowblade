@@ -6,13 +6,15 @@ import uuid
 from pathlib import Path
 
 import cv2
+import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import paths
 from ..device import select_device
-from ..pipeline.frames import extract_first_frame
+from ..pipeline.detect import detect_blade
+from ..pipeline.frames import extract_first_frame, extract_frame_at
 from ..pipeline.job_meta import JobNotRerenderableError, require_rerenderable
 from ..pipeline.runner import rerender_pipeline, run_pipeline
 from .jobs import JobManager
@@ -69,6 +71,90 @@ def get_frame0(job_id: str):
     return FileResponse(frame0_path, media_type="image/jpeg")
 
 
+DETECT_TINT = (0, 255, 0)  # BGR; matches the CLI picker's overlay.
+
+
+@app.post("/api/jobs/{job_id}/detect")
+def detect(job_id: str):
+    """Look for the swung object and return a proposal to confirm.
+
+    Deliberately a *sync* route: detection runs optical flow and one SAM2
+    image pass, several seconds of blocking CPU work, and FastAPI runs sync
+    routes in a threadpool rather than on the event loop. Declaring this
+    `async def` would stall every other request, including the progress
+    stream, for the duration.
+
+    Writes two files into the job dir rather than returning pixels inline:
+    the clean frame the points refer to, and an RGBA tint of the mask for
+    the page to composite over it. The frame matters -- a proposal's points
+    are meaningless against frame 0, since the object has moved by then.
+    """
+    _validate_job_id(job_id)
+    job_dir = paths.get_jobs_dir() / job_id
+    input_path = job_dir / "input.mp4"
+    if not input_path.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not paths.get_checkpoint_path().exists():
+        raise HTTPException(
+            status_code=400,
+            detail="SAM2 is not installed yet — run `lightsaber-fx setup` first.",
+        )
+
+    proposal = detect_blade(
+        str(input_path), str(paths.get_checkpoint_path()),
+        "configs/sam2.1/sam2.1_hiera_s.yaml", select_device(),
+    )
+    if proposal is None:
+        return {"found": False}
+
+    try:
+        extract_frame_at(
+            str(input_path), proposal.frame_index, str(job_dir / "detect_frame.jpg")
+        )
+    except ValueError:
+        # Detection read this same file, so a frame it named should always be
+        # seekable -- but a container whose index disagrees with its actual
+        # frames is a real thing, and "found nothing" leaves the user clicking
+        # the object as they would have anyway. A 500 here would instead break
+        # a page that has a perfectly good fallback.
+        return {"found": False}
+
+    height, width = proposal.mask.shape[:2]
+    overlay = np.zeros((height, width, 4), dtype=np.uint8)
+    overlay[proposal.mask, :3] = DETECT_TINT
+    overlay[proposal.mask, 3] = 110
+    cv2.imwrite(str(job_dir / "detect_mask.png"), overlay)
+
+    return {
+        "found": True,
+        "frame_index": proposal.frame_index,
+        "elongation": round(proposal.elongation, 1),
+        "points": [[x, y, 1] for x, y in proposal.points],
+        "frame_url": f"/api/jobs/{job_id}/detect-frame",
+        "mask_url": f"/api/jobs/{job_id}/detect-mask",
+        "width": width,
+        "height": height,
+    }
+
+
+@app.get("/api/jobs/{job_id}/detect-frame")
+def get_detect_frame(job_id: str):
+    _validate_job_id(job_id)
+    path = paths.get_jobs_dir() / job_id / "detect_frame.jpg"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/jobs/{job_id}/detect-mask")
+def get_detect_mask(job_id: str):
+    _validate_job_id(job_id)
+    path = paths.get_jobs_dir() / job_id / "detect_mask.png"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    return FileResponse(path, media_type="image/png")
+
+
 def _parse_render_params(body: dict):
     """Validate and extract color/intensity/blade_extend/voice from a
     request body. Shared by `/points` (the first render) and `/rerender`
@@ -107,6 +193,13 @@ async def submit_points(job_id: str, body: dict):
     points = [[p[0], p[1]] for p in points_and_labels]
     labels = [p[2] for p in points_and_labels]
     color, intensity, blade_extend, voice = _parse_render_params(body)
+    # Which frame the points were placed on. Accepted from the client
+    # because the page may be showing a detected frame from mid-swing
+    # rather than frame 0, and points against the wrong frame land on
+    # whatever happens to be there.
+    prompt_frame = int(body.get("prompt_frame", 0))
+    if prompt_frame < 0:
+        raise HTTPException(status_code=400, detail="prompt_frame must not be negative")
 
     output_path = job_dir / "final.mp4"
     device = select_device()
@@ -116,6 +209,7 @@ async def submit_points(job_id: str, body: dict):
             input_video=str(input_path),
             points=points,
             labels=labels,
+            prompt_frame=prompt_frame,
             output_path=str(output_path),
             job_dir=str(job_dir),
             checkpoint_path=str(paths.get_checkpoint_path()),

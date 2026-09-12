@@ -17,11 +17,22 @@ const resultSection = document.getElementById("result-section");
 const resultPlayer = document.getElementById("result-player");
 const downloadLink = document.getElementById("download-link");
 const errorMessage = document.getElementById("error-message");
+const pickerHint = document.getElementById("picker-hint");
+
+const MANUAL_HINT =
+  "Click the object to track. Shift-click to exclude a spot (e.g. a hand).";
 
 let jobId = null;
 let frameImage = null;
 let points = []; // [x, y, label]
 let hasRendered = false; // true once this job has completed at least one render
+// Which frame the points on screen refer to. Automatic detection reports the
+// frame where the object was easiest to find -- usually mid-swing, not frame
+// 0 -- so this travels with the points to the tracker, which prompts there
+// and propagates both ways.
+let promptFrame = 0;
+// The detected mask, drawn under the points until the user overrides it.
+let detectOverlay = null;
 
 // Mirrors format_duration() in lightsaber_fx/progress.py.
 function formatDuration(seconds) {
@@ -44,6 +55,7 @@ function clearError() {
 function renderRequestBody() {
   return {
     points,
+    prompt_frame: promptFrame,
     color: colorSelect.value,
     intensity: parseFloat(intensityInput.value),
     voice: voiceSelect.value,
@@ -65,24 +77,79 @@ async function uploadFile(file) {
   jobId = data.job_id;
   points = [];
   hasRendered = false;
+  promptFrame = 0;
+  detectOverlay = null;
   submitButton.hidden = false;
   submitButton.disabled = true;
   rerenderButton.hidden = true;
   resultSection.hidden = true;
 
-  frameImage = new Image();
-  frameImage.onload = () => {
-    canvas.width = data.width;
-    canvas.height = data.height;
-    ctx.drawImage(frameImage, 0, 0);
-    pickerSection.hidden = false;
-    controlsSection.hidden = false;
-  };
-  frameImage.src = data.frame0_url;
+  await showFrame(data.frame0_url, data.width, data.height);
+  detect();
+}
+
+// Loads `url` into the picker canvas and resolves once it is drawn.
+function showFrame(url, width, height) {
+  return new Promise((resolve) => {
+    frameImage = new Image();
+    frameImage.onload = () => {
+      canvas.width = width;
+      canvas.height = height;
+      redrawPoints();
+      pickerSection.hidden = false;
+      controlsSection.hidden = false;
+      resolve();
+    };
+    frameImage.onerror = () => resolve();
+    frameImage.src = url;
+  });
+}
+
+function loadImage(url) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => resolve(null);
+    image.src = url;
+  });
+}
+
+// Asks the server to find the swung object, and shows what it found for the
+// user to accept or override. A failure here is not an error the user needs
+// to see: it just means they click the object themselves, which is the
+// behaviour they had before this existed.
+async function detect() {
+  const startedFor = jobId;
+  pickerHint.textContent = "Looking for the swung object...";
+  let data;
+  try {
+    const resp = await fetch(`/api/jobs/${jobId}/detect`, { method: "POST" });
+    if (!resp.ok) throw new Error("detect failed");
+    data = await resp.json();
+  } catch {
+    pickerHint.textContent = MANUAL_HINT;
+    return;
+  }
+  // The user may have dropped another file while this was running.
+  if (startedFor !== jobId) return;
+  if (!data.found) {
+    pickerHint.textContent = `Couldn't find it automatically. ${MANUAL_HINT}`;
+    return;
+  }
+
+  promptFrame = data.frame_index;
+  points = data.points;
+  detectOverlay = await loadImage(data.mask_url);
+  if (startedFor !== jobId) return;
+  await showFrame(data.frame_url, data.width, data.height);
+  pickerHint.textContent =
+    `Found it in frame ${data.frame_index + 1} (elongation ${data.elongation}). ` +
+    "Render it, or click the object yourself to override.";
 }
 
 function redrawPoints() {
-  ctx.drawImage(frameImage, 0, 0);
+  if (frameImage) ctx.drawImage(frameImage, 0, 0);
+  if (detectOverlay) ctx.drawImage(detectOverlay, 0, 0, canvas.width, canvas.height);
   for (const [x, y, label] of points) {
     ctx.beginPath();
     ctx.arc(x, y, 6, 0, 2 * Math.PI);
@@ -97,6 +164,16 @@ canvas.addEventListener("click", (event) => {
   const x = Math.round((event.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.round((event.clientY - rect.top) * (canvas.height / rect.height));
   const label = event.shiftKey ? 0 : 1;
+  // The first click discards the detected proposal rather than adding to it.
+  // A user correcting a detection disagrees with it, and keeping it would
+  // keep whatever was wrong -- and give SAM2 two contradictory prompts if the
+  // mask was on the wrong object. promptFrame stays as it is: the frame on
+  // screen is still the frame these coordinates refer to.
+  if (detectOverlay) {
+    detectOverlay = null;
+    points = [];
+    pickerHint.textContent = MANUAL_HINT;
+  }
   points.push([x, y, label]);
   redrawPoints();
 });

@@ -1,12 +1,15 @@
 # lightsaber_fx
 
 Turn a home video of someone swinging a stick — a bat, a broom, a toy sword —
-into a glowing-blade VFX clip with matching sound, from a single mouse click.
+into a glowing-blade VFX clip with matching sound, usually without clicking
+anything.
 
-No tape markers, no green screen, no frame-by-frame painting. You click the
-object once in the first frame; [SAM2](https://github.com/facebookresearch/sam2)
-tracks it through the rest of the clip, and the glow, the light it spills onto
-nearby surfaces, and the audio are all generated from that tracking data.
+No tape markers, no green screen, no frame-by-frame painting. It finds the
+swung object by itself and shows you what it found;
+[SAM2](https://github.com/facebookresearch/sam2) tracks it through the rest of
+the clip, and the glow, the light it spills onto nearby surfaces, and the audio
+are all generated from that tracking data. If it guesses wrong, one click
+overrides it.
 
 The audio is synthesized from scratch — layered sines and shaped noise — so
 there is no sampled or copyrighted sound anywhere in the output.
@@ -14,9 +17,9 @@ there is no sampled or copyrighted sound anywhere in the output.
 Two ways to use it:
 
 - **A browser app.** `lightsaber-fx serve`, then drag a clip onto the page,
-  click the object, watch progress stream, play the result in place.
-- **A command line.** `lightsaber-fx run clip.mp4`, click the object in a popup
-  window, and the rest runs unattended.
+  confirm what it found, watch progress stream, play the result in place.
+- **A command line.** `lightsaber-fx run clip.mp4`, press Enter to accept what
+  it found in a popup window, and the rest runs unattended.
 
 Everything runs locally on your machine. Nothing is uploaded anywhere.
 
@@ -82,8 +85,8 @@ pytest -q                # the SAM2 tracking test is skipped if setup hasn't run
 
 ### Pick a clip that will work well
 
-The tracker follows one object from one click, so the clips that work best are
-the ones where that object stays distinguishable:
+The tracker follows one object all the way through, so the clips that work
+best are the ones where that object stays distinguishable:
 
 - **Short.** Start with 2–10 seconds. Runtime scales with frame count, and
   you'll want to iterate.
@@ -102,18 +105,25 @@ lightsaber-fx serve --open-browser
 
 Then, in the page:
 
-1. **Drag your clip onto the drop zone** (or click it to pick a file). The first
-   frame appears on a canvas.
-2. **Click once on the object** you want to glow. A green dot marks it. Click
-   the middle of the thickest part — not the very tip, and not where it
-   overlaps a hand.
-3. **Shift-click anything you want excluded** — a hand, a glove, a hilt. Red
+1. **Drag your clip onto the drop zone** (or click it to pick a file).
+2. **Wait a second or two while it looks for the object.** If it finds one, the
+   page jumps to the frame where the object was moving fastest, tints the
+   detected shape green, and marks the points it will track from. That frame is
+   usually mid-swing rather than the first frame — that is deliberate, and the
+   tracker works outwards from there in both directions.
+3. **Accept or override.** If the green shape is the thing you want glowing,
+   just click **Track & Render**. If it isn't — or if it found nothing — click
+   the object yourself. Your first click discards the detection entirely
+   rather than adding to it.
+4. **Shift-click anything you want excluded** — a hand, a glove, a hilt. Red
    dots mark those. This is how you stop the glow bleeding onto the person
    holding the object. Optional, but it noticeably improves the result.
-4. **Pick a colour and intensity**, then click **Track & Render**.
-5. **Watch the progress bar.** It names the stage it's in and counts frames, so
-   you can see the slow part (tracking) working.
-6. **The finished clip plays in the page** when it's done, with a download link.
+5. **Pick a colour, intensity and voice**, then click **Track & Render**.
+6. **Watch the progress bar.** It names the stage it's in, counts frames, and
+   shows elapsed time and an estimate of what's left.
+7. **The finished clip plays in the page** when it's done, with a download
+   link — and the controls stay put with a **Re-render** button, so trying
+   another colour doesn't re-run the tracking.
 
 One render happens at a time. If you submit a second while one is going, you'll
 get a "busy" message rather than two jobs fighting over your GPU.
@@ -124,9 +134,14 @@ get a "busy" message rather than two jobs fighting over your GPU.
 lightsaber-fx run clip.mp4
 ```
 
-A window opens showing the first frame. Click the object (**shift-click** to
-exclude a spot), then press **Enter**. Everything after that is unattended, and
-progress prints per stage. The result is written to `final.mp4`.
+It looks for the swung object first, then opens a window showing what it
+found, with the detected shape tinted green. Press **Enter** to accept it, or
+click the object yourself to override (**shift-click** to exclude a spot).
+Everything after that is unattended, and progress prints per stage with an ETA.
+The result is written to `final.mp4`.
+
+Pass `--no-auto` to skip the search and go straight to clicking the first
+frame.
 
 ```bash
 lightsaber-fx run clip.mp4 \
@@ -145,6 +160,7 @@ lightsaber-fx run clip.mp4 \
 | `--blade-extend` / `--no-blade-extend` | extend on | Rebuilds the blade as a capsule extending past the tracked object's tip (what makes a bat or broom read as a blade rather than a glowing prop). `--no-blade-extend` falls back to tracing the raw tracked silhouette instead — useful for an object that isn't elongated. |
 | `--voice` | `neutral` | `neutral`, `jedi`, or `sith`. Changes the hum/swing character only — independent of `--color`, so picking red never silently changes the soundtrack. |
 | `--keep-intermediate` | off | Also keep the extracted `frames/` after rendering (useful for debugging a bad track). The tracking masks are kept either way — they are tiny and `rerender` needs them. The rendered PNG sequence used for the final encode is always deleted after a successful run; it has no debugging value once encoded. |
+| `--auto` / `--no-auto` | auto on | Look for the swung object before asking you to click. `--no-auto` skips the search (a couple of seconds) and shows you the first frame straight away. |
 
 In the picker window, note that the only way to finish is **Enter**, and the
 only way to abort is **Ctrl-C** — closing the window doesn't do it, and there's
@@ -162,8 +178,10 @@ lightsaber-fx rerender a1b2c3d4 --color green --voice sith
 ```
 
 `rerender` reuses the cached masks and re-runs only extract, glow, audio and the
-encode. On the 2-second test clip that is **7.9 s instead of 42.8 s** — the
-34.7 s tracking stage is skipped entirely.
+encode. On the 2-second test clip that is **7.2 s instead of 41 s** — the 33.6 s
+tracking stage is skipped entirely. On a 10-second 720p clip the saving is real
+but smaller (1m 37s instead of 5m 45s), because glow is most of what is left
+once tracking is gone; see [How long it takes](#how-long-it-takes).
 
 The browser app does the same thing: when a render finishes, the colour,
 intensity and voice controls stay on screen with a **Re-render** button, so you
@@ -179,32 +197,39 @@ by name rather than failing obscurely, and `jobs` shows it up front.
 
 ### How long it takes
 
-Tracking still dominates and scales with frame count, but **glow and the
-final encode are no longer negligible** — the fidelity upgrade deliberately
-traded speed for quality there (see [Tuning](#tuning)). Measured on an Apple
-Silicon Mac using MPS, 2 s / 60 frames / 640×360:
+Measured on an Apple Silicon Mac using MPS. These are real timings, not
+estimates, but the machine had ordinary background load (Spotlight indexing and
+a backup running, load average 8–20), so treat them as representative rather
+than as a clean benchmark.
 
-| Stage | Time |
-|---|---|
-| extract | <0.1 s |
-| track | ~32 s |
-| motion | <0.1 s |
-| glow | ~16 s |
-| audio | <0.1 s |
-| mux (encode) | <0.2 s |
-| **whole pipeline** | **~54 s** |
-
-| Clip | Tracking | Whole pipeline |
+| Stage | 2 s / 60 frames / 640×360 | 10 s / 300 frames / 1280×720 |
 |---|---|---|
-| 2 s, 60 frames, 640×360 | ~32 s | ~1 min |
-| 10 s, 300 frames, 1280×720 | ~2m 47s | ~5m 16s |
+| detect | 2.0 s | 4.1 s |
+| extract | 1.3 s | 10.1 s |
+| track | 33.6 s | 168.3 s |
+| motion | 0.1 s | 3.8 s |
+| glow | 5.9 s | 159.6 s |
+| audio | 0.1 s | 0.6 s |
+| mux (encode) | 0.2 s | 2.9 s |
+| **whole pipeline** | **41 s** | **5m 45s** |
+| `rerender` (same job, new colour) | **7.2 s** | **1m 37s** |
 
-Both rows are measured, not estimated. Note that glow scales with the blade's
-on-screen size, not just the frame count: the wide multi-scale blur is confined
-to a bounding box around the blade, so a long blade swung across the frame costs
-several times more per frame than a small one.
+Two things worth reading off that table:
 
-On CPU, expect several times that — the CLI warns you when it falls back.
+**Tracking dominates on short clips, but not on long ones.** At 720p the glow
+stage (159.6 s) costs almost as much as tracking (168.3 s). Glow scales with
+the blade's on-screen *size* as well as the frame count — the wide multi-scale
+blur is confined to a bounding box around the blade, so a long blade swung
+across a 720p frame costs several times more per frame than a small one in a
+360p frame. The fidelity upgrade deliberately traded speed for quality here
+(see [Tuning](#tuning)).
+
+**That is also why `rerender` saves less on a long clip** — 5.7× on the 2 s
+clip but 3.6× on the 10 s one. It skips tracking entirely, but glow is most of
+what remains.
+
+On CPU, expect several times all of this — the CLI warns you when it falls
+back.
 
 ---
 

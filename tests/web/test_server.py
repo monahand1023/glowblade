@@ -347,3 +347,197 @@ def test_rerender_endpoint_409_when_a_job_is_already_running(client, tiny_video_
 
     release.set()
     server_module.manager.wait(timeout=2)
+
+
+# --------------------------------------------------------------------------
+# Automatic detection
+# --------------------------------------------------------------------------
+
+def _fake_proposal(frame_index=3):  # inside the 5-frame fixture clip
+    import numpy as np
+
+    from lightsaber_fx.pipeline.detect import BladeProposal, MotionSeed
+
+    mask = np.zeros((48, 64), dtype=bool)
+    mask[22:26, 8:56] = True
+    points = [[12, 24], [32, 24], [52, 24]]
+    return BladeProposal(
+        frame_index=frame_index, points=points, labels=[1, 1, 1], mask=mask,
+        elongation=8.4,
+        seed=MotionSeed(frame_index=frame_index, point=[52, 24], speed=7.1, area=180),
+    )
+
+
+def _upload(client, tiny_video_bytes):
+    resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    assert resp.status_code == 200
+    return resp.json()["job_id"]
+
+
+def test_detect_returns_a_proposal_with_its_frame_and_points(
+    client, tiny_video_bytes, monkeypatch
+):
+    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal(3))
+    job_id = _upload(client, tiny_video_bytes)
+
+    resp = client.post(f"/api/jobs/{job_id}/detect")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["found"] is True
+    assert data["frame_index"] == 3
+    assert data["elongation"] == 8.4
+    # Points come back in the same [x, y, label] shape /points takes, all
+    # includes -- detection never proposes carving anything out.
+    assert data["points"] == [[12, 24, 1], [32, 24, 1], [52, 24, 1]]
+
+
+def test_detect_serves_the_frame_the_points_refer_to_and_a_mask_overlay(
+    client, tiny_video_bytes, monkeypatch
+):
+    # The frame matters as much as the points: a proposal from mid-swing is
+    # meaningless drawn over frame 0, because the object has moved.
+    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal(3))
+    job_id = _upload(client, tiny_video_bytes)
+
+    data = client.post(f"/api/jobs/{job_id}/detect").json()
+
+    frame_resp = client.get(data["frame_url"])
+    assert frame_resp.status_code == 200
+    assert frame_resp.headers["content-type"] == "image/jpeg"
+
+    mask_resp = client.get(data["mask_url"])
+    assert mask_resp.status_code == 200
+    assert mask_resp.headers["content-type"] == "image/png"
+
+
+def test_detect_mask_overlay_is_transparent_outside_the_mask(
+    client, tiny_video_bytes, monkeypatch
+):
+    # The page composites this over the frame, so anything outside the mask
+    # must be fully transparent or it paints over the footage.
+    import cv2
+    import numpy as np
+
+    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal())
+    job_id = _upload(client, tiny_video_bytes)
+    client.post(f"/api/jobs/{job_id}/detect")
+
+    overlay = cv2.imread(
+        str(paths_module.get_jobs_dir() / job_id / "detect_mask.png"), cv2.IMREAD_UNCHANGED
+    )
+    assert overlay.shape[2] == 4, "overlay has no alpha channel"
+    assert overlay[24, 32, 3] > 0, "masked pixels are transparent"
+    assert overlay[5, 5, 3] == 0, "unmasked pixels are not transparent"
+    assert np.count_nonzero(overlay[:, :, 3]) == 4 * 48
+
+
+def test_detect_reports_not_found_without_erroring(client, tiny_video_bytes, monkeypatch):
+    # "I couldn't find it" is a normal outcome, not a failure: the page falls
+    # back to asking the user to click, which is what it did before detection
+    # existed. Returning an error status would surface a scary message for
+    # something entirely expected.
+    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: None)
+    job_id = _upload(client, tiny_video_bytes)
+
+    resp = client.post(f"/api/jobs/{job_id}/detect")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"found": False}
+
+
+def test_detect_404_for_unknown_job(client):
+    assert client.post("/api/jobs/deadbeef/detect").status_code == 404
+
+
+def test_detect_400_when_sam2_checkpoint_missing(client, tiny_video_bytes, tmp_path):
+    job_id = _upload(client, tiny_video_bytes)
+    (paths_module.get_checkpoint_path()).unlink()
+
+    resp = client.post(f"/api/jobs/{job_id}/detect")
+
+    assert resp.status_code == 400
+    assert "setup" in resp.json()["detail"]
+
+
+def test_detect_routes_reject_traversal_style_job_ids(client):
+    for path in ("detect", "detect-frame", "detect-mask"):
+        method = client.post if path == "detect" else client.get
+        resp = method(f"/api/jobs/%2E%2E/{path}")
+        assert resp.status_code == 404, f"{path} accepted a traversal-style id"
+
+
+def test_points_passes_prompt_frame_through_to_the_pipeline(
+    client, tiny_video_bytes, monkeypatch
+):
+    # The whole detection flow hinges on this: points placed on frame 17 must
+    # be tracked from frame 17. Dropping prompt_frame here would put them on
+    # frame 0, land them on whatever is there, and produce a wrong render with
+    # no error anywhere.
+    captured = {}
+
+    def fake_run_pipeline(*, output_path, progress_cb, **kwargs):
+        captured.update(kwargs)
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+        return output_path
+
+    monkeypatch.setattr(server_module, "run_pipeline", fake_run_pipeline)
+    job_id = _upload(client, tiny_video_bytes)
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"points": [[10, 20, 1]], "prompt_frame": 17},
+    )
+    assert resp.status_code == 200
+    server_module.manager.wait(timeout=10)
+
+    assert captured["prompt_frame"] == 17
+
+
+def test_points_defaults_prompt_frame_to_zero(client, tiny_video_bytes, monkeypatch):
+    captured = {}
+
+    def fake_run_pipeline(*, output_path, progress_cb, **kwargs):
+        captured.update(kwargs)
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+        return output_path
+
+    monkeypatch.setattr(server_module, "run_pipeline", fake_run_pipeline)
+    job_id = _upload(client, tiny_video_bytes)
+
+    client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 20, 1]]})
+    server_module.manager.wait(timeout=10)
+
+    assert captured["prompt_frame"] == 0
+
+
+def test_points_rejects_a_negative_prompt_frame(client, tiny_video_bytes):
+    job_id = _upload(client, tiny_video_bytes)
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"points": [[10, 20, 1]], "prompt_frame": -3},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_detect_reports_not_found_when_its_frame_cannot_be_extracted(
+    client, tiny_video_bytes, monkeypatch
+):
+    # Detection names a frame index from the same file, so this should not
+    # happen -- but a container whose reported frame count disagrees with its
+    # actual frames is real. Falling back to "found nothing" leaves the user
+    # clicking the object, which is the pre-detection behaviour; a 500 would
+    # break a page that has a working fallback.
+    monkeypatch.setattr(
+        server_module, "detect_blade", lambda *a, **k: _fake_proposal(9999)
+    )
+    job_id = _upload(client, tiny_video_bytes)
+
+    resp = client.post(f"/api/jobs/{job_id}/detect")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"found": False}
