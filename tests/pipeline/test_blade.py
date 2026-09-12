@@ -6,6 +6,7 @@ from lightsaber_fx.pipeline.blade import (
     angular_speed,
     classify_tip_by_taper,
     fit_blade,
+    fit_motion,
     load_motion,
     save_motion,
     tip_speed,
@@ -154,6 +155,40 @@ def test_wrap_axis_angle_delta_handles_array():
     deltas = np.array([0.1, np.pi, -np.pi, 2 * np.pi])
     wrapped = wrap_axis_angle_delta(deltas)
     assert np.all(np.abs(wrapped) <= np.pi / 2 + 1e-9)
+
+
+# ---------------------------------------------------------------------------
+# fit_motion -- builds the per-frame geometry list from a masks_dir
+# ---------------------------------------------------------------------------
+
+def test_fit_motion_handles_missing_and_present_masks(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    n_frames = 4
+
+    for idx in (0, 2, 3):
+        mask = np.zeros((48, 64), dtype=bool)
+        mask[10:16, 5:55] = True
+        np.save(masks_dir / f"{idx:05d}.npy", mask)
+    # frame 1's mask file is entirely absent (object lost that frame)
+
+    geometries = fit_motion(str(masks_dir), n_frames)
+
+    assert len(geometries) == n_frames
+    assert geometries[1] is None
+    assert isinstance(geometries[0], BladeGeometry)
+    assert isinstance(geometries[2], BladeGeometry)
+    assert isinstance(geometries[3], BladeGeometry)
+
+
+def test_fit_motion_empty_mask_file_yields_none(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    np.save(masks_dir / "00000.npy", np.zeros((48, 64), dtype=bool))
+
+    geometries = fit_motion(str(masks_dir), 1)
+
+    assert geometries == [None]
 
 
 # ---------------------------------------------------------------------------

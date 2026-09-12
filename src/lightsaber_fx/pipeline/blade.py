@@ -10,6 +10,7 @@ this:
   of the mask centroid, which barely moves when a blade pivots in place.
 """
 
+import os
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -152,6 +153,22 @@ def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20):
         width=float(width),
         angle=angle,
     )
+
+
+def fit_motion(masks_dir, n_frames, taper_frac=1.0 / 3.0, width_bins=20):
+    """Fit BladeGeometry for every frame index in [0, n_frames) from the
+    per-frame mask files a tracking stage writes to `masks_dir` (as
+    ``{idx:05d}.npy``, matching track_object's naming). None for a frame
+    whose mask file is missing entirely (object lost) or empty."""
+    geometries = []
+    for idx in range(n_frames):
+        mask_path = os.path.join(masks_dir, f"{idx:05d}.npy")
+        if os.path.exists(mask_path):
+            mask = np.load(mask_path)
+            geometries.append(fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins))
+        else:
+            geometries.append(None)
+    return geometries
 
 
 _FIELDS = ("centroid", "tip", "hilt", "axis", "length", "width", "angle")

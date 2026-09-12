@@ -20,6 +20,15 @@ def test_parse_color_rejects_unknown():
 
 
 def test_render_glow_writes_video_and_motion(tmp_path, synthetic_track_fixture):
+    # NOTE (Phase A): render_glow itself is untouched and still writes the
+    # legacy (N, 2) centroid-only contract to motion_out_path -- glow.py is
+    # Phase B1's file, out of scope here. The new enriched contract
+    # (BladeGeometry per frame: centroid/tip/hilt/axis/length/width/angle,
+    # written by lightsaber_fx.pipeline.blade.save_motion as motion.npz) is
+    # covered by tests/pipeline/test_blade.py and by the runner-level
+    # end-to-end test in tests/pipeline/test_runner.py, and is produced
+    # independently in runner.py from the tracked masks. This assertion is
+    # still true and is intentionally left as-is; see fx-a-report.md.
     output_video = tmp_path / "glow_video.mp4"
     motion_out = tmp_path / "motion.npy"
     progress_calls = []

@@ -79,3 +79,17 @@ def test_run_pipeline_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, ti
     assert result == str(output_path)
     assert output_path.exists()
     assert {"extract", "track", "glow", "audio", "mux"} <= set(stages_seen)
+
+    # A2: run_pipeline now also produces the enriched motion.npz contract
+    # (blade geometry per frame), alongside the legacy centroid motion.npy
+    # that render_glow/synthesize_audio still consume internally.
+    motion = np.load(job_dir / "motion.npz")
+    for key in ("centroid", "tip", "hilt", "axis", "length", "width", "angle"):
+        assert key in motion.files
+    n_frames = len(motion["length"])
+    assert n_frames > 0
+    assert motion["tip"].shape == (n_frames, 2)
+    # The stubbed tracker writes an identical, non-empty mask for every
+    # frame, so every frame should have fitted (non-NaN) geometry.
+    assert not np.any(np.isnan(motion["length"]))
+    assert (job_dir / "motion.npy").exists()  # legacy contract still present
