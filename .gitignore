@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# Isolated worktrees for in-progress feature work
+.worktrees/
+
 # SAM2 (cloned + installed locally, not vendored)
 sam2/
 
