@@ -42,3 +42,21 @@ def extract_first_frame(video_path, out_path):
     if not ok:
         raise ValueError(f"Could not read a frame from {video_path}")
     cv2.imwrite(out_path, frame)
+
+
+def extract_frame_at(video_path, index, out_path):
+    """Write frame `index` to `out_path`.
+
+    Needed because the frame a user confirms is not always the first one:
+    automatic detection reports the frame where the swung object was easiest
+    to find, which is usually mid-swing (frame 135 of 300 on the 10 s test
+    clip). `index` 0 is equivalent to `extract_first_frame`.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if index:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        raise ValueError(f"Could not read frame {index} from {video_path}")
+    cv2.imwrite(out_path, frame)

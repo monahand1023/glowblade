@@ -116,6 +116,7 @@ def run_pipeline(
     job_dir,
     checkpoint_path,
     device,
+    prompt_frame=0,
     config_name="configs/sam2.1/sam2.1_hiera_s.yaml",
     color="red",
     intensity=0.35,
@@ -144,6 +145,7 @@ def run_pipeline(
     track_object(
         paths["frames_dir"], paths["masks_dir"], points, labels,
         checkpoint_path, config_name, device, n_frames,
+        prompt_frame=prompt_frame,
         progress_cb=stage_cb("track"),
     )
 

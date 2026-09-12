@@ -55,7 +55,7 @@ def test_run_pipeline_validates_color_before_extracting_frames(tmp_path, monkeyp
 @requires_ffmpeg
 def test_run_pipeline_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, tiny_video_path):
     def fake_track_object(frames_dir, masks_dir, points, labels, checkpoint_path,
-                           config_name, device, n_frames, progress_cb=None):
+                           config_name, device, n_frames, prompt_frame=0, progress_cb=None):
         import os
         os.makedirs(masks_dir, exist_ok=True)
         for i in range(n_frames):
@@ -117,7 +117,7 @@ def test_run_pipeline_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, ti
 @requires_ffmpeg
 def test_run_pipeline_threads_blade_extend_and_voice_through(tmp_path, monkeypatch, tiny_video_path):
     def fake_track_object(frames_dir, masks_dir, points, labels, checkpoint_path,
-                           config_name, device, n_frames, progress_cb=None):
+                           config_name, device, n_frames, prompt_frame=0, progress_cb=None):
         import os
         os.makedirs(masks_dir, exist_ok=True)
         for i in range(n_frames):
@@ -167,7 +167,7 @@ def test_run_pipeline_threads_blade_extend_and_voice_through(tmp_path, monkeypat
 @requires_ffmpeg
 def test_run_pipeline_writes_job_meta_so_the_job_is_later_rerenderable(tmp_path, monkeypatch, tiny_video_path):
     def fake_track_object(frames_dir, masks_dir, points, labels, checkpoint_path,
-                           config_name, device, n_frames, progress_cb=None):
+                           config_name, device, n_frames, prompt_frame=0, progress_cb=None):
         import os
         os.makedirs(masks_dir, exist_ok=True)
         for i in range(n_frames):
@@ -356,7 +356,7 @@ def _fake_track_writing(mask_factory):
     returns for each frame index. Used by the coverage-guard tests below to
     simulate a track that found nothing, or found the object only briefly."""
     def fake_track_object(frames_dir, masks_dir, points, labels, checkpoint_path,
-                          config_name, device, n_frames, progress_cb=None):
+                          config_name, device, n_frames, prompt_frame=0, progress_cb=None):
         import os
         os.makedirs(masks_dir, exist_ok=True)
         for i in range(n_frames):

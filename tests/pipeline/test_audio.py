@@ -14,7 +14,6 @@ from lightsaber_fx.pipeline.audio import (
     synthesize_audio,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixture helpers: build a motion.npz directly (matching blade.save_motion's
 # field set) plus the plain-text video_meta.txt, without going through real

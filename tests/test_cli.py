@@ -59,7 +59,8 @@ def test_run_command_parses_options_and_calls_run_pipeline(tmp_path, monkeypatch
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
     monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
     monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
 
@@ -86,7 +87,8 @@ def test_run_command_aborts_when_no_points_selected(tmp_path, monkeypatch):
     video.write_bytes(b"fake video bytes")
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
-    monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
     monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([], []))
 
     runner = CliRunner()
@@ -97,7 +99,7 @@ def test_run_command_aborts_when_no_points_selected(tmp_path, monkeypatch):
 
 def test_run_command_fails_fast_when_sam2_not_set_up(tmp_path, monkeypatch):
     # No checkpoint file created: cli.run's pre-flight check (A7) should raise
-    # before ever touching extract_first_frame or the interactive picker.
+    # before ever touching detection, frame extraction or the picker.
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake video bytes")
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
@@ -105,7 +107,8 @@ def test_run_command_fails_fast_when_sam2_not_set_up(tmp_path, monkeypatch):
     def fail_if_called(*a, **k):
         raise AssertionError("should not be reached when the checkpoint is missing")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", fail_if_called)
+    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", fail_if_called)
+    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", fail_if_called)
     monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", fail_if_called)
 
     runner = CliRunner()
@@ -168,7 +171,8 @@ def test_run_command_keeps_masks_but_removes_frames_by_default(tmp_path, monkeyp
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
     monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
     monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
 
@@ -197,7 +201,8 @@ def test_run_command_keep_intermediate_also_keeps_frames(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
     monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
     monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
 
@@ -336,3 +341,123 @@ def test_jobs_command_reports_no_jobs_found(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "No jobs found" in result.output
+
+
+def _proposal(frame_index=135, points=None):
+    """A BladeProposal like detect_blade returns, with a mask sized to match
+    what the picker would be shown."""
+    import numpy as np
+
+    from lightsaber_fx.pipeline.detect import BladeProposal, MotionSeed
+
+    points = points or [[377, 541], [483, 557], [588, 563]]
+    mask = np.zeros((24, 32), dtype=bool)
+    mask[10:14, 4:28] = True
+    return BladeProposal(
+        frame_index=frame_index, points=points, labels=[1] * len(points),
+        mask=mask, elongation=10.1,
+        seed=MotionSeed(frame_index=frame_index, point=points[0], speed=16.1, area=1825),
+    )
+
+
+def _auto_run_harness(tmp_path, monkeypatch, proposal):
+    """Set up a `run` invocation with detection returning `proposal`, and
+    capture what the picker was shown and what run_pipeline received."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake video bytes")
+    monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
+    _fake_checkpoint(tmp_path / "appdata")
+    monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
+    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: proposal)
+
+    seen = {}
+    monkeypatch.setattr(
+        "lightsaber_fx.cli.extract_frame_at",
+        lambda video_path, index, out_path: seen.update(extracted_index=index),
+    )
+
+    def fake_picker(frame_path, proposal=None):
+        seen["picker_proposal"] = proposal
+        return (proposal.points, proposal.labels) if proposal else ([[1, 2]], [1])
+
+    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", fake_picker)
+
+    def fake_run_pipeline(**kwargs):
+        seen.update(kwargs)
+        return kwargs["output_path"]
+
+    monkeypatch.setattr("lightsaber_fx.cli.run_pipeline", fake_run_pipeline)
+    return video, seen
+
+
+def test_run_command_uses_the_detected_frame_as_the_prompt_frame(tmp_path, monkeypatch):
+    # The single most important wiring detail. Detection reports points
+    # against the frame it found them in -- frame 135 of 300 on the real 10 s
+    # clip -- so the frame extracted for confirmation, the frame the overlay
+    # is drawn on, and the frame the tracker prompts must all be that same
+    # one. Reading those coordinates against frame 0 lands them on whatever
+    # is there instead, which is a mistake with no symptom until the render
+    # comes out wrong.
+    proposal = _proposal(frame_index=135)
+    video, seen = _auto_run_harness(tmp_path, monkeypatch, proposal)
+
+    result = CliRunner().invoke(main, ["run", str(video)])
+
+    assert result.exit_code == 0
+    assert seen["extracted_index"] == 135
+    assert seen["prompt_frame"] == 135
+    assert seen["points"] == proposal.points
+
+
+def test_run_command_passes_the_proposal_to_the_picker_for_confirmation(tmp_path, monkeypatch):
+    # "Propose, then confirm" only holds if the proposal actually reaches the
+    # picker; detecting and then rendering without showing anything would
+    # pass every other assertion here.
+    proposal = _proposal()
+    video, seen = _auto_run_harness(tmp_path, monkeypatch, proposal)
+
+    result = CliRunner().invoke(main, ["run", str(video)])
+
+    assert result.exit_code == 0
+    assert seen["picker_proposal"] is proposal
+    assert "elongation 10.1" in result.output
+
+
+def test_run_command_no_auto_skips_detection_entirely(tmp_path, monkeypatch):
+    # --no-auto must not pay for detection at all, not merely ignore its
+    # result -- on a long clip the scan plus segmentation is several seconds.
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake video bytes")
+    monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
+    _fake_checkpoint(tmp_path / "appdata")
+    monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("detect_blade ran despite --no-auto")
+
+    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", fail_if_called)
+    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
+
+    captured = {}
+    monkeypatch.setattr(
+        "lightsaber_fx.cli.run_pipeline",
+        lambda **kwargs: (captured.update(kwargs), kwargs["output_path"])[1],
+    )
+
+    result = CliRunner().invoke(main, ["run", str(video), "--no-auto"])
+
+    assert result.exit_code == 0
+    assert captured["prompt_frame"] == 0
+
+
+def test_run_command_falls_back_to_clicking_when_detection_finds_nothing(tmp_path, monkeypatch):
+    video, seen = _auto_run_harness(tmp_path, monkeypatch, None)
+
+    result = CliRunner().invoke(main, ["run", str(video)])
+
+    assert result.exit_code == 0
+    assert "Couldn't find one automatically" in result.output
+    assert seen["extracted_index"] == 0
+    assert seen["prompt_frame"] == 0
+    assert seen["points"] == [[1, 2]]

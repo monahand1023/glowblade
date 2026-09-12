@@ -15,7 +15,7 @@ phases can *read* it:
 """
 
 import os
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import numpy as np
 

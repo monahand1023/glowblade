@@ -6,11 +6,40 @@ import numpy as np
 from .blade import save_mask
 
 
-def pick_points_interactive(first_frame_path):
+def overlay_proposal(img, mask, points, tint=(0, 255, 0), alpha=0.35):
+    """Draw a detected mask and its prompt points onto `img`, in place.
+
+    Shared by the CLI picker and the web app's first-frame preview so a
+    proposal looks the same wherever it is confirmed.
+    """
+    if mask is not None and mask.shape[:2] == img.shape[:2]:
+        img[mask] = (alpha * np.array(tint) + (1 - alpha) * img[mask]).astype(img.dtype)
+    for point in points:
+        cv2.drawMarker(img, tuple(point), (0, 0, 255), cv2.MARKER_CROSS, 24, 3)
+    return img
+
+
+def pick_points_interactive(frame_path, proposal=None):
+    """Show `frame_path` and collect click points.
+
+    With a `proposal` (a `detect.BladeProposal`), its mask and points are
+    drawn on the frame and returned as-is if the user just presses ENTER --
+    the confirm half of detect-then-confirm. The first click discards the
+    proposal entirely rather than adding to it: a detected mask the user is
+    correcting is a mask they disagree with, and mixing their point into it
+    would keep whatever was wrong about it.
+    """
     points, labels = [], []
+    proposal_points = list(proposal.points) if proposal is not None else []
+    proposal_labels = list(proposal.labels) if proposal is not None else []
+    proposal_mask = proposal.mask if proposal is not None else None
+    state = {"overridden": False}
 
     def on_click(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
+            if not state["overridden"] and proposal_points:
+                print("Discarding the detected blade in favour of your clicks.")
+                state["overridden"] = True
             if flags & cv2.EVENT_FLAG_SHIFTKEY:
                 points.append([x, y])
                 labels.append(0)
@@ -20,15 +49,20 @@ def pick_points_interactive(first_frame_path):
                 labels.append(1)
                 print(f"Include point at ({x},{y})")
 
-    img = cv2.imread(first_frame_path)
+    img = cv2.imread(frame_path)
     if img is None:
-        raise ValueError(f"Could not read a frame from {first_frame_path}")
+        raise ValueError(f"Could not read a frame from {frame_path}")
     clone = img.copy()
-    window = "Click the object (shift-click to exclude), then press ENTER"
+    if proposal is not None:
+        window = "ENTER to accept the detected blade, or click to choose your own"
+    else:
+        window = "Click the object (shift-click to exclude), then press ENTER"
     cv2.namedWindow(window)
     cv2.setMouseCallback(window, on_click)
     while True:
         disp = clone.copy()
+        if not state["overridden"] and proposal is not None:
+            overlay_proposal(disp, proposal_mask, proposal_points)
         for p, l in zip(points, labels):
             color = (0, 0, 255) if l == 1 else (255, 0, 0)
             cv2.circle(disp, tuple(p), 5, color, -1)
@@ -36,7 +70,9 @@ def pick_points_interactive(first_frame_path):
         if (cv2.waitKey(20) & 0xFF) == 13:
             break
     cv2.destroyAllWindows()
-    return points, labels
+    if points:
+        return points, labels
+    return proposal_points, proposal_labels
 
 
 def track_object(
@@ -48,8 +84,17 @@ def track_object(
     config_name,
     device,
     n_frames,
+    prompt_frame=0,
     progress_cb=None,
 ):
+    """Propagate `points`/`labels` given on `prompt_frame` across the clip.
+
+    `prompt_frame` defaults to 0, which is what the interactive picker
+    produces -- it shows the first frame. Automatic detection
+    (`detect.detect_blade`) instead reports the frame where the swung
+    object was easiest to find, which is usually mid-swing, so tracking
+    runs in both directions from there.
+    """
     def report(pct, message):
         if progress_cb:
             progress_cb(pct, message)
@@ -67,14 +112,30 @@ def track_object(
     state = predictor.init_state(video_path=frames_dir)
     predictor.add_new_points_or_box(
         state,
-        frame_idx=0,
+        frame_idx=prompt_frame,
         obj_id=1,
         points=np.array(points, dtype=np.float32),
         labels=np.array(labels, dtype=np.int32),
     )
 
     os.makedirs(masks_dir, exist_ok=True)
-    for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
-        mask = (mask_logits[0] > 0.0).cpu().numpy().squeeze()
-        save_mask(masks_dir, frame_idx, mask)
-        report((frame_idx + 1) / n_frames * 100, f"frame {frame_idx + 1}/{n_frames}")
+    # Propagate forward from the prompt frame, then backward, so prompting a
+    # frame in the middle of the clip still covers all of it. Automatic
+    # detection needs this: the frame where a swung object is easiest to
+    # find is the frame where it is moving fastest, which is rarely frame 0
+    # (on the 10 s test clip it is frame 135 of 300). With prompt_frame=0
+    # the reverse pass has only that one frame to do and the behaviour is
+    # unchanged from propagating forward alone.
+    #
+    # Both passes emit the prompt frame itself, so its mask is written
+    # twice. That is a redundant write, not a conflict -- the same logits
+    # produce the same mask -- and it keeps the loop free of special cases.
+    written = 0
+    for reverse in (False, True):
+        for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(
+            state, reverse=reverse
+        ):
+            mask = (mask_logits[0] > 0.0).cpu().numpy().squeeze()
+            save_mask(masks_dir, frame_idx, mask)
+            written += 1
+            report(min(written / n_frames * 100, 100.0), f"frame {written}/{n_frames}")

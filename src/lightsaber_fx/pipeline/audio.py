@@ -111,7 +111,7 @@ def _voice_params(voice):
 # ---------------------------------------------------------------------------
 
 def _n_samples(duration, sr=SR):
-    return max(0, int(round(sr * duration)))
+    return max(0, round(sr * duration))
 
 
 def _osc(freq_t, sr=SR):
@@ -255,7 +255,7 @@ def _interp_and_smooth(frame_values, fps, n_samples, sr=SR, smooth_ms=60.0):
     # returns a length-max(M, N) array when the kernel is longer than the
     # signal, which would silently break every caller's length assumption
     # on short clips.
-    win = min(max(1, int(round(smooth_ms / 1000.0 * sr))), n_samples)
+    win = min(max(1, round(smooth_ms / 1000.0 * sr)), n_samples)
     if win > 1 and n_samples > 1:
         kernel = np.ones(win, dtype=np.float64) / win
         interped = np.convolve(interped, kernel, mode="same")
@@ -412,7 +412,7 @@ def synth_tv_buzz(duration, voice="neutral", seed=1, sr=SR):
     if peak > 0:
         buzz = buzz / peak
 
-    n_crackles = max(1, int(round(duration * 3)))
+    n_crackles = max(1, round(duration * 3))
     crackle_len = max(1, int(0.003 * sr))
     crackle_track = np.zeros(n, dtype=np.float64)
     for pos in rng.integers(0, n, size=n_crackles):

@@ -3,14 +3,15 @@ import threading
 import time
 import uuid
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 
 import click
 
 from . import paths
 from .device import select_device
 from .pipeline import job_meta
-from .pipeline.frames import extract_first_frame
+from .pipeline.detect import detect_blade
+from .pipeline.frames import extract_frame_at
 from .pipeline.runner import rerender_pipeline, run_pipeline
 from .pipeline.track import pick_points_interactive
 from .progress import EtaTracker, format_duration
@@ -71,30 +72,66 @@ def _echo_progress(eta):
          "(W1 made it small) so `lightsaber-fx rerender` can reuse this job later "
          "without re-tracking; frames/ is still the disk hog, so it stays opt-in.",
 )
-def run(input_video, output, color, intensity, blade_extend, voice, keep_intermediate):
-    """Run the full pipeline on INPUT_VIDEO, prompting you to click the object to track."""
+@click.option(
+    "--auto/--no-auto", default=True, show_default=True,
+    help="Look for the swung object automatically before asking you to click. "
+         "It finds the fastest-moving elongated thing in the clip and proposes "
+         "it; press Enter to accept or click to choose your own. --no-auto skips "
+         "the search and shows you the first frame straight away.",
+)
+def run(input_video, output, color, intensity, blade_extend, voice, keep_intermediate, auto):
+    """Run the full pipeline on INPUT_VIDEO.
+
+    By default it looks for the swung object itself and shows you what it
+    found to accept or override. Pass --no-auto to go straight to clicking.
+    """
     if not paths.get_checkpoint_path().exists():
         raise click.ClickException("SAM2 is not installed yet — run `lightsaber-fx setup` first.")
-
-    job_id = uuid.uuid4().hex[:8]
-    job_dir = paths.new_job_dir(job_id)
-    preview_path = job_dir / "frame0_preview.jpg"
-    extract_first_frame(input_video, str(preview_path))
-
-    click.echo("Click the object in the popup window. Shift-click to exclude a spot. Press Enter when done.")
-    points, labels = pick_points_interactive(str(preview_path))
-    if not points:
-        click.echo("No points selected, aborting.")
-        raise SystemExit(1)
 
     device = select_device()
     click.echo(f"Using device: {device}")
     if device == "cpu":
         click.echo("No GPU/MPS acceleration available — running on CPU, this will be much slower.")
+
+    job_id = uuid.uuid4().hex[:8]
+    job_dir = paths.new_job_dir(job_id)
+
+    proposal = None
+    if auto:
+        click.echo("Looking for the swung object...")
+        proposal = detect_blade(
+            input_video, str(paths.get_checkpoint_path()),
+            "configs/sam2.1/sam2.1_hiera_s.yaml", device,
+        )
+        if proposal is None:
+            click.echo("Couldn't find one automatically — click it yourself.")
+        else:
+            click.echo(
+                f"Found a candidate in frame {proposal.frame_index + 1} "
+                f"(elongation {proposal.elongation:.1f}). "
+                "Press Enter in the popup to accept it, or click to choose your own."
+            )
+
+    # The frame shown is the one the points refer to. With a proposal that is
+    # the frame it was found in, which is usually mid-swing rather than the
+    # first frame -- so the picker, the overlay and `prompt_frame` all have to
+    # agree on it.
+    prompt_frame = proposal.frame_index if proposal is not None else 0
+    preview_path = job_dir / f"frame{prompt_frame}_preview.jpg"
+    extract_frame_at(input_video, prompt_frame, str(preview_path))
+
+    if proposal is None:
+        click.echo("Click the object in the popup window. Shift-click to exclude a spot. Press Enter when done.")
+    points, labels = pick_points_interactive(str(preview_path), proposal=proposal)
+    if not points:
+        click.echo("No points selected, aborting.")
+        raise SystemExit(1)
+
     result = run_pipeline(
         input_video=input_video,
         points=points,
         labels=labels,
+        prompt_frame=prompt_frame,
         output_path=output,
         job_dir=str(job_dir),
         checkpoint_path=str(paths.get_checkpoint_path()),
@@ -173,7 +210,9 @@ def list_jobs():
         info = job_meta.describe_job(str(job_dir))
         if info.rerenderable:
             created = (
-                datetime.fromtimestamp(info.created_at).strftime("%Y-%m-%d %H:%M:%S")
+                datetime.fromtimestamp(info.created_at, tz=timezone.utc)
+                .astimezone()
+                .strftime("%Y-%m-%d %H:%M:%S")
                 if info.created_at is not None else "unknown"
             )
             click.echo(
