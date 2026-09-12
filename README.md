@@ -170,7 +170,12 @@ Silicon Mac using MPS, 2 s / 60 frames / 640×360:
 | Clip | Tracking | Whole pipeline |
 |---|---|---|
 | 2 s, 60 frames, 640×360 | ~32 s | ~1 min |
-| 10 s, 300 frames, 1280×720 | ~3 min | ~4–5 min |
+| 10 s, 300 frames, 1280×720 | ~2m 47s | ~5m 16s |
+
+Both rows are measured, not estimated. Note that glow scales with the blade's
+on-screen size, not just the frame count: the wide multi-scale blur is confined
+to a bounding box around the blade, so a long blade swung across the frame costs
+several times more per frame than a small one.
 
 On CPU, expect several times that — the CLI warns you when it falls back.
 
