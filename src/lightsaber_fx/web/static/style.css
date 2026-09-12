@@ -1,0 +1,52 @@
+/* src/lightsaber_fx/web/static/style.css */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  max-width: 720px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+#dropzone {
+  border: 2px dashed #888;
+  border-radius: 8px;
+  padding: 3rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  color: #555;
+}
+
+#picker-canvas {
+  max-width: 100%;
+  border: 1px solid #ccc;
+  cursor: crosshair;
+}
+
+#controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+#progress-bar {
+  background: #eee;
+  border-radius: 4px;
+  overflow: hidden;
+  height: 1rem;
+}
+
+#progress-fill {
+  background: #d33;
+  height: 100%;
+  width: 0%;
+  transition: width 0.2s;
+}
+
+#result-player {
+  max-width: 100%;
+}
+
+#error-message {
+  color: #b00;
+  font-weight: bold;
+}

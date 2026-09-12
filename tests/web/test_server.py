@@ -98,3 +98,10 @@ def test_second_upload_returns_409_while_a_job_is_running(client, tiny_video_byt
     assert up2.status_code == 409
     release.set()
     server_module.manager.wait(timeout=2)
+
+
+def test_index_html_references_expected_elements(client):
+    resp = client.get("/")
+    html = resp.text
+    for element_id in ("dropzone", "picker-canvas", "submit-button", "progress-fill", "result-player"):
+        assert f'id="{element_id}"' in html
