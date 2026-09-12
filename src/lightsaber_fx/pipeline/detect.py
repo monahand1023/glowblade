@@ -33,10 +33,21 @@ The pipeline:
    the scene. It handles pans and tilts, not zoom or roll -- a known limit.
 3. Keep the fastest pixels, split them into components, and emit the top few
    as seed points, fastest first. No shape gate here; see above.
-4. Segment each seed with SAM2's image predictor, asking for several mask
-   granularities (a bat alone, versus a bat merged with the hands), fit each
-   with `fit_blade`, and take the most elongated. The first seed that yields
-   a blade-like mask wins.
+4. Segment *every* seed with SAM2's image predictor, asking for several mask
+   granularities (a bat alone, versus a bat merged with the hands), and keep
+   the most elongated candidate across all of them. Not the first one that
+   clears the bar: seeds are ordered by speed, and the fastest-moving thing
+   is not reliably the most blade-like thing.
+5. Reject candidates that look like background rather than an object -- a
+   mask that does not contain its own prompt, one that shatters into dozens
+   of specks, one whose pixels were not actually moving, or one far larger
+   than the motion that seeded it. Every one of those checks exists because
+   it was measured letting a wrong proposal through on real footage.
+
+Tested on five clips: two baseball, one golf, one broom, one sword
+demonstration. Four detect correctly; the sword -- a small, thin object in a
+wide shot with two figures and a busy background -- returns None, which is
+the intended outcome for footage it cannot read confidently.
 
 What comes back is a proposal, not a decision. It carries the frame index,
 prompt points that are guaranteed to lie on the mask, and the mask itself
@@ -56,11 +67,18 @@ from .blade import fit_blade
 # need the location of a large moving object, not sub-pixel accuracy.
 FLOW_LONG_EDGE = 480
 
-# A SAM2 mask must be at least this elongated (length/width, from the same
-# fit the renderer uses) to be called a blade. A bat, broom or sword in frame
-# measures roughly 5-15; a torso, a head or a hand measures 1-3. Below this
-# we return None and let the user click rather than propose something wrong.
-MIN_ELONGATION = 3.5
+# A SAM2 mask must be at least this elongated (length/width, from the same fit
+# the renderer uses) to be called a blade.
+#
+# 3.5 was too permissive, measured: a *standing person* fits at 3.7, which is
+# how a sword clip came to propose the swordsman rather than his sword. Correct
+# proposals, once every candidate is scored rather than the first acceptable
+# one, come in far higher -- 15.1 on the baseball clip and 21.0 on a golf club.
+# So the bar is set where a human body cannot reach it, and the cost is that
+# genuinely ambiguous footage returns None. That is the right trade: None means
+# "click it yourself", which is what the user would have done anyway, while a
+# confident wrong guess costs them a full render to discover.
+MIN_ELONGATION = 6.0
 
 # Area bounds as a fraction of the frame. Applied to flow components (below
 # the floor is flow speckle) and again to SAM2 masks (above the ceiling the
@@ -82,21 +100,48 @@ MOTION_PERCENTILE = 97.0
 # 16.1, and compression noise sits below 0.3.
 MIN_SEED_SPEED = 0.5
 
-# How many motion seeds to hand to SAM2 before giving up. Each costs one
-# image-embedding pass, so this is the main cost knob. Five is enough to get
-# past a couple of false leads (a foot, a ball) without a long stall.
+# How many motion seeds to consider. Each costs one image-embedding pass, so
+# this is the main cost knob. All of them are scored and the best wins -- an
+# earlier version returned the first seed that cleared the bar, which is how a
+# golf clip ended up proposing the sky (elongation 8.7, from seed 1) while the
+# club shaft (21.0, from seed 3) was never looked at. Even the baseball clip it
+# was developed on settled for 4.6 when a 15.1 candidate was available.
 MAX_SEEDS = 5
+
+# Reject a SAM2 mask more than this many times the area of the motion
+# component that seeded it. The motion region is often just the fast tip of
+# the object, so the object can reasonably be several times larger; a mask
+# tens of times larger is the background, not the thing that moved. Measured:
+# correct candidates came in at 0.4-1.8x, the golf clip's sky at 5.5x, and
+# whole-scene segmentations at 12-37x.
+MAX_MASK_TO_MOTION_RATIO = 4.0
+
+# Shape- and motion-quality gates, both aimed at the same failure: SAM2
+# segmenting soft background instead of an object. Thresholds sit in the gap
+# between the correct and incorrect proposals measured across five real clips
+# (baseball x2, golf, sword, broom) -- a small sample, but the margins are
+# wide: specks 9 vs 41, moving fraction 0.36 vs 0.54.
+MAX_SPECKLES = 20
+MIN_MOVING_FRACTION = 0.45
 
 
 class MotionSeed:
     """A place worth asking SAM2 about: a point on the fastest-moving thing
-    found at one sampled moment, in source-resolution coordinates."""
+    found at one sampled moment, in source-resolution coordinates.
 
-    def __init__(self, frame_index, point, speed, area):
+    `hot` is the flow-resolution map of every pixel that was moving fast in
+    that frame pair, carried along so a candidate mask can be checked against
+    the motion without recomputing the optical flow. It is small (the flow
+    runs at FLOW_LONG_EDGE) and it is the evidence the whole proposal rests
+    on, so keeping it beats recomputing it.
+    """
+
+    def __init__(self, frame_index, point, speed, area, hot=None):
         self.frame_index = int(frame_index)
         self.point = point
         self.speed = float(speed)
         self.area = int(area)
+        self.hot = hot
 
     def __repr__(self):
         return (
@@ -183,6 +228,7 @@ def _hot_components(magnitude, min_area, max_area):
     hot = cv2.morphologyEx(hot, cv2.MORPH_CLOSE, kernel)
     hot = cv2.morphologyEx(hot, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
+    hot_bool = hot.astype(bool)
     count, labels_img, stats, _ = cv2.connectedComponentsWithStats(hot, connectivity=8)
     for label in range(1, count):
         area = int(stats[label, cv2.CC_STAT_AREA])
@@ -192,7 +238,7 @@ def _hot_components(magnitude, min_area, max_area):
         speed = float(magnitude[component].mean())
         if speed < MIN_SEED_SPEED:
             continue
-        yield component, speed, area
+        yield component, speed, area, hot_bool
 
 
 def _fastest_pixel(component, magnitude):
@@ -247,13 +293,16 @@ def propose_motion_seeds(video_path, n_samples=12, max_seeds=MAX_SEEDS, progress
                                       interpolation=cv2.INTER_AREA)
                 grays.append(gray)
             magnitude = _relative_motion(*grays)
-            for component, speed, area in _hot_components(magnitude, min_area, max_area):
+            for component, speed, area, hot in _hot_components(
+                magnitude, min_area, max_area
+            ):
                 x, y = _fastest_pixel(component, magnitude)
                 seeds.append(MotionSeed(
                     frame_index=index,
                     point=[round(x / scale), round(y / scale)],
                     speed=speed,
                     area=area,
+                    hot=hot,
                 ))
     finally:
         cap.release()
@@ -270,33 +319,88 @@ def _build_image_predictor(checkpoint_path, config_name, device):
     return SAM2ImagePredictor(build_sam2(config_name, checkpoint_path, device=device))
 
 
-def _best_blade_mask(predictor, frame_bgr, point, max_mask_area):
-    """Segment at `point` and return the most blade-like mask, or None.
+def _candidate_masks(predictor, frame_bgr, seed, max_mask_area, motion_area):
+    """Every plausible mask SAM2 offers for `seed`, scored.
 
-    Asks SAM2 for several granularities because a point on a bat plausibly
-    means the bat, or the bat plus the hands gripping it, or the whole
-    batter. Scoring each with `fit_blade` and keeping the most elongated is
-    what picks the bat out of that set.
+    Yields `(elongation, mask)` for candidates that survive three checks.
+    Each one exists because it was measured failing on real footage:
+
+    - **The mask must contain the seed point.** SAM2 can return a mask that
+      excludes its own prompt, and on a sword-demonstration clip the
+      top-scoring candidate was exactly that: a mask of the whole swordsman
+      that did not include the moving point it was asked about.
+    - **The mask must not be far larger than the motion evidence.** The
+      motion component is a sample of the moving object -- often just its
+      fast tip -- so the object can legitimately be several times bigger,
+      but not fifty times. On a golf clip the winning candidate was the
+      *sky*: a wide thin band above the treeline, 5.5x the motion area and
+      16% of the frame, which scored well on shape precisely because a
+      letterbox of sky is extremely elongated.
+    - **Absolute area bounds**, as before, for the whole-frame case.
     """
     predictor.set_image(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
     masks, _scores, _logits = predictor.predict(
-        point_coords=np.array([point], dtype=np.float32),
+        point_coords=np.array([seed.point], dtype=np.float32),
         point_labels=np.array([1], dtype=np.int32),
         multimask_output=True,
     )
-    best = None
+    height, width = np.asarray(masks).shape[-2:]
+    x, y = seed.point
     for mask in np.asarray(masks):
         mask = mask.astype(bool)
         area = int(mask.sum())
         if area == 0 or area > max_mask_area:
             continue
+        if not (0 <= y < height and 0 <= x < width and mask[y, x]):
+            continue
+        if area > MAX_MASK_TO_MOTION_RATIO * max(motion_area, 1.0):
+            continue
+        if _speckle_count(mask) > MAX_SPECKLES:
+            continue
+        if _moving_fraction(mask, seed.hot) < MIN_MOVING_FRACTION:
+            continue
         geometry = fit_blade(mask)
         if geometry is None:
             continue
-        elongation = geometry.length / max(geometry.width, 1.0)
-        if best is None or elongation > best[0]:
-            best = (elongation, mask)
-    return best
+        yield geometry.length / max(geometry.width, 1.0), mask
+
+
+def _speckle_count(mask):
+    """Connected components beyond the largest one.
+
+    SAM2 asked about a point in soft, out-of-focus background returns a
+    ragged mask that shatters into dozens of specks; asked about an object
+    with real edges it returns a solid one. Measured on five clips, correct
+    proposals came in at 2, 8 and 9 specks while two wrong ones -- a band of
+    blurred treeline beside a golf club, and a strip of sky above a sword
+    demonstration -- came in at 47 and 41.
+    """
+    count = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)[0]
+    return max(count - 2, 0)
+
+
+def _moving_fraction(mask, hot):
+    """Fraction of `mask` that was actually moving, per the seed's flow map.
+
+    The complement of the speckle check, and the more principled of the two:
+    a band of background *next to* a fast object inherits none of its motion.
+    Measured, correct proposals had 0.54-1.00 of their pixels moving against
+    0.20 and 0.36 for the two wrong ones. Not 1.0 for a legitimate object,
+    because on a rotating swing only the outer part of it moves fast.
+
+    Returns 1.0 when no flow map is available, so a caller that builds a
+    MotionSeed by hand is not silently rejected by a check it cannot feed.
+    """
+    if hot is None:
+        return 1.0
+    if hot.shape != mask.shape:
+        hot = cv2.resize(
+            hot.astype(np.uint8), (mask.shape[1], mask.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+    if not mask.any():
+        return 0.0
+    return float(hot[mask].mean())
 
 
 def _points_on_axis(mask, fractions=(0.3, 0.5, 0.7)):
@@ -361,30 +465,43 @@ def detect_blade(
         max_mask_area = MAX_MASK_AREA_FRAC * width * height
         predictor = _build_image_predictor(checkpoint_path, config_name, device)
 
+        # Score every seed and keep the best, rather than returning the first
+        # one that clears the bar. The seeds are ordered by speed, and the
+        # fastest-moving thing is not reliably the most blade-like thing: on a
+        # golf clip the fastest seed yielded the sky at elongation 8.7 while a
+        # slower seed yielded the club shaft at 21.0.
+        best = None
+        scale = min(1.0, FLOW_LONG_EDGE / max(width, height))
         for i, seed in enumerate(seeds):
             report(50 + i / len(seeds) * 50, f"checking frame {seed.frame_index + 1}")
             frame = _read_frame(cap, seed.frame_index)
             if frame is None:
                 continue
-            best = _best_blade_mask(predictor, frame, seed.point, max_mask_area)
-            if best is None:
-                continue
-            elongation, mask = best
-            if elongation < MIN_ELONGATION:
-                continue
-            report(100, f"found a blade in frame {seed.frame_index + 1} "
-                        f"(elongation {elongation:.1f})")
-            points = _points_on_axis(mask)
-            return BladeProposal(
-                frame_index=seed.frame_index,
-                points=points,
-                labels=[1] * len(points),
-                mask=mask,
-                elongation=elongation,
-                seed=seed,
-            )
+            # seed.area is measured at the flow resolution; compare like with
+            # like by scaling it up to the frame the masks are in.
+            motion_area = seed.area / (scale * scale)
+            for elongation, mask in _candidate_masks(
+                predictor, frame, seed, max_mask_area, motion_area
+            ):
+                if best is None or elongation > best[0]:
+                    best = (elongation, mask, seed)
     finally:
         cap.release()
 
-    report(100, "nothing blade-like found")
-    return None
+    if best is None or best[0] < MIN_ELONGATION:
+        found = f" (best was {best[0]:.1f})" if best else ""
+        report(100, f"nothing blade-like found{found}")
+        return None
+
+    elongation, mask, seed = best
+    report(100, f"found a blade in frame {seed.frame_index + 1} "
+                f"(elongation {elongation:.1f})")
+    points = _points_on_axis(mask)
+    return BladeProposal(
+        frame_index=seed.frame_index,
+        points=points,
+        labels=[1] * len(points),
+        mask=mask,
+        elongation=elongation,
+        seed=seed,
+    )
