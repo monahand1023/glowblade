@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -41,7 +42,7 @@ async def upload(file: UploadFile = File(...)):
     job_dir = paths.new_job_dir(job_id)
     input_path = job_dir / "input.mp4"
     with open(input_path, "wb") as f:
-        f.write(await file.read())
+        shutil.copyfileobj(file.file, f)
 
     frame0_path = job_dir / "frame0.jpg"
     extract_first_frame(str(input_path), str(frame0_path))
@@ -69,6 +70,11 @@ def get_frame0(job_id: str):
 @app.post("/api/jobs/{job_id}/points")
 async def submit_points(job_id: str, body: dict):
     _validate_job_id(job_id)
+    if not paths.get_checkpoint_path().exists():
+        raise HTTPException(
+            status_code=400,
+            detail="SAM2 is not installed yet — run `lightsaber-fx setup` first.",
+        )
     job_dir = paths.get_jobs_dir() / job_id
     input_path = job_dir / "input.mp4"
     if not input_path.exists():
@@ -82,6 +88,8 @@ async def submit_points(job_id: str, body: dict):
     labels = [p[2] for p in points_and_labels]
     color = body.get("color", "red")
     intensity = float(body.get("intensity", 0.35))
+    if not 0.0 <= intensity <= 1.0:
+        raise HTTPException(status_code=400, detail="intensity must be between 0.0 and 1.0")
 
     output_path = job_dir / "final.mp4"
     device = select_device()

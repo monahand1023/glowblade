@@ -1,4 +1,5 @@
 import threading
+import traceback
 from dataclasses import dataclass, field
 
 
@@ -7,8 +8,8 @@ class JobState:
     job_id: str
     status: str = "running"
     events: list = field(default_factory=list)
-    result_path: str = None
-    error_message: str = None
+    result_path: str | None = None
+    error_message: str | None = None
 
 
 class JobManager:
@@ -39,6 +40,7 @@ class JobManager:
                     state.result_path = result
                     state.status = "done"
             except Exception as exc:
+                traceback.print_exc()
                 with self._lock:
                     state.status = "error"
                     state.error_message = str(exc)

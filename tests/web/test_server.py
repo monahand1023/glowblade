@@ -12,6 +12,11 @@ import lightsaber_fx.web.server as server_module
 def fresh_job_manager(monkeypatch, tmp_path):
     monkeypatch.setattr(server_module, "manager", server_module.JobManager())
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path))
+    # submit_points now pre-flight-checks that SAM2 setup has been run (A7);
+    # plant a stand-in checkpoint so existing tests still reach the pipeline.
+    checkpoint = tmp_path / "checkpoints" / "sam2.1_hiera_small.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"fake checkpoint")
     yield
 
 
@@ -77,6 +82,31 @@ def test_points_rejected_without_include_point(client, tiny_video_bytes):
     resp = client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 0]]})
 
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("intensity", [-1.0, 1.5, 200.0])
+def test_points_rejected_with_out_of_range_intensity(client, tiny_video_bytes, intensity):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"points": [[10, 10, 1]], "intensity": intensity},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_points_rejected_when_sam2_checkpoint_missing(client, tiny_video_bytes, tmp_path):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    (tmp_path / "checkpoints" / "sam2.1_hiera_small.pt").unlink()
+
+    resp = client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 1]]})
+
+    assert resp.status_code == 400
+    assert "lightsaber-fx setup" in resp.json()["detail"]
 
 
 def test_second_upload_returns_409_while_a_job_is_running(client, tiny_video_bytes, monkeypatch):
