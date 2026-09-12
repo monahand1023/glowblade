@@ -19,6 +19,12 @@ def test_default_config_name_is_the_full_relative_sam2_config_path():
     assert default == "configs/sam2.1/sam2.1_hiera_s.yaml"
 
 
+def test_run_pipeline_defaults_blade_extend_on_and_voice_neutral():
+    params = inspect.signature(run_pipeline).parameters
+    assert params["blade_extend"].default is True
+    assert params["voice"].default == "neutral"
+
+
 def test_run_pipeline_validates_color_before_extracting_frames(tmp_path, monkeypatch, tiny_video_path):
     # A4: an invalid --color must fail immediately, before the (potentially
     # minutes-long) extract/track stages ever run.
@@ -84,9 +90,9 @@ def test_run_pipeline_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, ti
     assert {"extract", "track", "motion", "glow", "audio", "mux"} <= set(stages_seen)
     assert stages_seen.index("track") < stages_seen.index("motion") < stages_seen.index("glow")
 
-    # A2: run_pipeline now also produces the enriched motion.npz contract
-    # (blade geometry per frame), alongside the legacy centroid motion.npy
-    # that render_glow/synthesize_audio still consume internally.
+    # A2: run_pipeline produces the enriched motion.npz contract (blade
+    # geometry per frame). render_glow/synthesize_audio (Phase B1/B2) read
+    # it directly now -- there is no more legacy centroid motion.npy.
     motion = np.load(job_dir / "motion.npz")
     for key in ("centroid", "tip", "hilt", "axis", "length", "width", "angle"):
         assert key in motion.files
@@ -96,4 +102,61 @@ def test_run_pipeline_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, ti
     # The stubbed tracker writes an identical, non-empty mask for every
     # frame, so every frame should have fitted (non-NaN) geometry.
     assert not np.any(np.isnan(motion["length"]))
-    assert (job_dir / "motion.npy").exists()  # legacy contract still present
+
+    # Phase C: no stray intermediates left behind after a successful run --
+    # the legacy centroid path is gone entirely, and the lossless PNG
+    # sequence the glow stage writes is a pure intermediate (unlike
+    # frames/masks, kept only on request) that gets cleaned up unconditionally.
+    assert not (job_dir / "motion.npy").exists()
+    assert not (job_dir / "glow_video.mp4").exists()
+    assert not (job_dir / "glow_frames").exists()
+
+
+@requires_ffmpeg
+def test_run_pipeline_threads_blade_extend_and_voice_through(tmp_path, monkeypatch, tiny_video_path):
+    def fake_track_object(frames_dir, masks_dir, points, labels, checkpoint_path,
+                           config_name, device, n_frames, progress_cb=None):
+        import os
+        os.makedirs(masks_dir, exist_ok=True)
+        for i in range(n_frames):
+            mask = np.zeros((48, 64), dtype=bool)
+            mask[10:20, 10:20] = True
+            np.save(os.path.join(masks_dir, f"{i:05d}.npy"), mask)
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", fake_track_object)
+
+    from lightsaber_fx.pipeline.audio import synthesize_audio as real_synthesize_audio
+    from lightsaber_fx.pipeline.glow import render_glow as real_render_glow
+
+    captured = {}
+
+    def spy_render_glow(*args, **kwargs):
+        captured["blade_extend"] = kwargs.get("blade_extend")
+        return real_render_glow(*args, **kwargs)
+
+    def spy_synthesize_audio(*args, **kwargs):
+        captured["voice"] = kwargs.get("voice")
+        return real_synthesize_audio(*args, **kwargs)
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.render_glow", spy_render_glow)
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.synthesize_audio", spy_synthesize_audio)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    output_path = tmp_path / "final.mp4"
+
+    run_pipeline(
+        input_video=str(tiny_video_path),
+        points=[[10, 10]],
+        labels=[1],
+        output_path=str(output_path),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        config_name="unused",
+        device="cpu",
+        blade_extend=False,
+        voice="sith",
+    )
+
+    assert captured["blade_extend"] is False
+    assert captured["voice"] == "sith"

@@ -5,6 +5,8 @@ const canvas = document.getElementById("picker-canvas");
 const ctx = canvas.getContext("2d");
 const colorSelect = document.getElementById("color-select");
 const intensityInput = document.getElementById("intensity-input");
+const voiceSelect = document.getElementById("voice-select");
+const bladeExtendInput = document.getElementById("blade-extend-input");
 const submitButton = document.getElementById("submit-button");
 const progressSection = document.getElementById("progress-section");
 const progressFill = document.getElementById("progress-fill");
@@ -99,6 +101,8 @@ submitButton.addEventListener("click", async () => {
       points,
       color: colorSelect.value,
       intensity: parseFloat(intensityInput.value),
+      voice: voiceSelect.value,
+      blade_extend: bladeExtendInput.checked,
     }),
   });
   if (!resp.ok) {

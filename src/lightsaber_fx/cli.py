@@ -36,8 +36,16 @@ def setup(force):
 @click.option(
     "--intensity", default=0.35, type=click.FloatRange(0.0, 1.0), help="Light-spill strength, 0.0-1.0."
 )
+@click.option(
+    "--blade-extend/--no-blade-extend", default=True,
+    help="Rebuild the blade as an extended capsule (default), or fall back to tracing the raw mask.",
+)
+@click.option(
+    "--voice", default="neutral", type=click.Choice(["jedi", "sith", "neutral"]),
+    help="Hum/swing character. Independent of --color.",
+)
 @click.option("--keep-intermediate", is_flag=True, help="Keep the job's frames/masks/intermediate files.")
-def run(input_video, output, color, intensity, keep_intermediate):
+def run(input_video, output, color, intensity, blade_extend, voice, keep_intermediate):
     """Run the full pipeline on INPUT_VIDEO, prompting you to click the object to track."""
     if not paths.get_checkpoint_path().exists():
         raise click.ClickException("SAM2 is not installed yet — run `lightsaber-fx setup` first.")
@@ -76,6 +84,8 @@ def run(input_video, output, color, intensity, keep_intermediate):
         device=device,
         color=color,
         intensity=intensity,
+        blade_extend=blade_extend,
+        voice=voice,
         progress_cb=progress_cb,
     )
     click.echo(f"Wrote {result}")

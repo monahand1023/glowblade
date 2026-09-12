@@ -18,6 +18,7 @@ from .jobs import JobManager
 
 STATIC_DIR = Path(__file__).parent / "static"
 JOB_ID_RE = re.compile(r"[0-9a-zA-Z_-]{1,64}")
+VALID_VOICES = ("neutral", "jedi", "sith")
 
 app = FastAPI()
 manager = JobManager()
@@ -90,6 +91,12 @@ async def submit_points(job_id: str, body: dict):
     intensity = float(body.get("intensity", 0.35))
     if not 0.0 <= intensity <= 1.0:
         raise HTTPException(status_code=400, detail="intensity must be between 0.0 and 1.0")
+    blade_extend = bool(body.get("blade_extend", True))
+    voice = body.get("voice", "neutral")
+    if voice not in VALID_VOICES:
+        raise HTTPException(
+            status_code=400, detail=f"voice must be one of {', '.join(VALID_VOICES)}"
+        )
 
     output_path = job_dir / "final.mp4"
     device = select_device()
@@ -105,6 +112,8 @@ async def submit_points(job_id: str, body: dict):
             device=device,
             color=color,
             intensity=intensity,
+            blade_extend=blade_extend,
+            voice=voice,
             progress_cb=progress_cb,
         )
 

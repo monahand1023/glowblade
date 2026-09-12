@@ -1,10 +1,11 @@
 import os
+import shutil
 
 from .audio import synthesize_audio
 from .blade import compute_motion
 from .frames import extract_frames
 from .glow import parse_color, render_glow
-from .mux import mux
+from .mux import encode
 from .track import track_object
 
 
@@ -19,6 +20,8 @@ def run_pipeline(
     config_name="configs/sam2.1/sam2.1_hiera_s.yaml",
     color="red",
     intensity=0.35,
+    blade_extend=True,
+    voice="neutral",
     progress_cb=None,
 ):
     def stage_cb(stage):
@@ -33,13 +36,12 @@ def run_pipeline(
     masks_dir = os.path.join(job_dir, "masks")
     video_meta_path = os.path.join(job_dir, "video_meta.txt")
     motion_path = os.path.join(job_dir, "motion.npz")
-    # render_glow (Phase B1's file) and synthesize_audio (Phase B2's file)
-    # both still take the legacy centroid-only .npy contract until those
-    # phases land and switch to consuming motion_path's enriched fields
-    # (tip/hilt/axis/length/width/angle) via lightsaber_fx.pipeline.blade
-    # directly.
-    legacy_motion_path = os.path.join(job_dir, "motion.npy")
-    glow_video_path = os.path.join(job_dir, "glow_video.mp4")
+    # Lossless PNG sequence written by the glow stage (B1.10) and consumed,
+    # once, by the final encode below -- a pure intermediate with no
+    # debugging value of its own (unlike frames/masks, which the CLI keeps
+    # on request to diagnose a bad track), so it is always removed after a
+    # successful run rather than gated behind --keep-intermediate.
+    glow_frames_dir = os.path.join(job_dir, "glow_frames")
     audio_path = os.path.join(job_dir, "saber_audio.wav")
 
     if progress_cb:
@@ -59,16 +61,18 @@ def run_pipeline(
     compute_motion(masks_dir, motion_path, progress_cb=stage_cb("motion"))
 
     render_glow(
-        frames_dir, masks_dir, video_meta_path, glow_video_path, legacy_motion_path,
-        color=color_bgr, spill_strength=intensity,
+        frames_dir, masks_dir, video_meta_path, glow_frames_dir, motion_path,
+        color=color_bgr, spill_strength=intensity, blade_extend=blade_extend,
         progress_cb=stage_cb("glow"),
     )
 
     synthesize_audio(
-        legacy_motion_path, video_meta_path, audio_path,
-        progress_cb=stage_cb("audio"),
+        motion_path, video_meta_path, audio_path,
+        voice=voice, progress_cb=stage_cb("audio"),
     )
 
-    mux(glow_video_path, audio_path, output_path, progress_cb=stage_cb("mux"))
+    encode(glow_frames_dir, fps, audio_path, output_path, progress_cb=stage_cb("mux"))
+
+    shutil.rmtree(glow_frames_dir, ignore_errors=True)
 
     return output_path
