@@ -6,21 +6,41 @@ objects, and audio are all generated from that tracking data.
 
 ## Setup (one-time)
 
-1. Python 3.10+ in a virtualenv.
+1. Python 3.10-3.12 in a virtualenv (PyTorch wheels lag behind the very
+   latest Python releases — 3.12 is the safe choice; skip 3.13/3.14
+   until torch publishes wheels for them).
 2. `pip install -r requirements.txt`
-3. Install SAM2 itself (not a simple PyPI package):
+3. Install SAM2 itself (not a simple PyPI package). **Clone it outside
+   this project directory**, not as a `sam2/` subfolder next to these
+   scripts — SAM2's own `build_sam.py` refuses to import if it detects
+   its repo cloned as a sibling of the code that imports it (it looks
+   like the package shadowing itself) and raises a `RuntimeError`:
    ```
-   git clone https://github.com/facebookresearch/sam2.git
-   cd sam2 && pip install -e ".[demo]"
+   git clone https://github.com/facebookresearch/sam2.git ../sam2-src
+   cd ../sam2-src && pip install -e .
    ```
+   (The `[demo]`/`[demo]`-style extras from older SAM2 docs no longer
+   exist upstream — `notebooks` and `interactive-demo` are the current
+   extras, and neither is needed for this pipeline.)
 4. Download a checkpoint. On an M-series Mac, start with the **small**
    model — it's noticeably faster than base/large under MPS or CPU
-   fallback:
+   fallback. `download_ckpts.sh` ignores its argument and always
+   downloads all four checkpoints (~1.5GB) — pull just the one you want
+   directly instead:
    ```
-   cd checkpoints && ./download_ckpts.sh sam2.1_hiera_small
+   cd ../sam2-src/checkpoints
+   curl -L -O https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
    ```
-   Make sure `SAM2_CONFIG` / `SAM2_CHECKPOINT` at the top of
-   `track_sword.py` match whatever you downloaded.
+   Then symlink it into this project so `track_sword.py`'s
+   `SAM2_CHECKPOINT` path resolves:
+   ```
+   mkdir -p checkpoints
+   ln -s ../sam2-src/checkpoints/sam2.1_hiera_small.pt checkpoints/sam2.1_hiera_small.pt
+   ```
+   `SAM2_CONFIG` in `track_sword.py` must be the full path Hydra expects
+   relative to the installed `sam2` package, e.g.
+   `configs/sam2.1/sam2.1_hiera_s.yaml` — a bare filename like
+   `sam2.1_hiera_s.yaml` fails with `MissingConfigException`.
 
 ## Run
 

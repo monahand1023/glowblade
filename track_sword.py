@@ -19,7 +19,7 @@ import torch
 VIDEO_PATH = "input.mp4"                    # <-- point this at your clip
 FRAMES_DIR = "frames"
 MASKS_DIR = "masks"
-SAM2_CONFIG = "sam2.1_hiera_s.yaml"          # must match the checkpoint below
+SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_s.yaml"  # must match the checkpoint below
 SAM2_CHECKPOINT = "checkpoints/sam2.1_hiera_small.pt"
 
 points, labels = [], []
