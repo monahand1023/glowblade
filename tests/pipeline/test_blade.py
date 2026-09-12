@@ -5,8 +5,8 @@ from lightsaber_fx.pipeline.blade import (
     BladeGeometry,
     angular_speed,
     classify_tip_by_taper,
+    compute_motion,
     fit_blade,
-    fit_motion,
     load_motion,
     save_motion,
     tip_speed,
@@ -158,37 +158,59 @@ def test_wrap_axis_angle_delta_handles_array():
 
 
 # ---------------------------------------------------------------------------
-# fit_motion -- builds the per-frame geometry list from a masks_dir
+# compute_motion -- the "motion" pipeline stage: reads masks, writes motion.npz
 # ---------------------------------------------------------------------------
 
-def test_fit_motion_handles_missing_and_present_masks(tmp_path):
+def test_compute_motion_writes_npz_for_every_mask_file(tmp_path):
     masks_dir = tmp_path / "masks"
     masks_dir.mkdir()
     n_frames = 4
-
-    for idx in (0, 2, 3):
+    for idx in range(n_frames):
         mask = np.zeros((48, 64), dtype=bool)
         mask[10:16, 5:55] = True
         np.save(masks_dir / f"{idx:05d}.npy", mask)
-    # frame 1's mask file is entirely absent (object lost that frame)
+    motion_path = tmp_path / "motion.npz"
+    progress_calls = []
 
-    geometries = fit_motion(str(masks_dir), n_frames)
+    compute_motion(
+        str(masks_dir), str(motion_path),
+        progress_cb=lambda pct, msg: progress_calls.append(pct),
+    )
 
-    assert len(geometries) == n_frames
-    assert geometries[1] is None
-    assert isinstance(geometries[0], BladeGeometry)
-    assert isinstance(geometries[2], BladeGeometry)
-    assert isinstance(geometries[3], BladeGeometry)
+    assert motion_path.exists()
+    motion = load_motion(str(motion_path))
+    assert motion["length"].shape == (n_frames,)
+    assert not np.any(np.isnan(motion["length"]))
+    assert progress_calls[-1] == 100
 
 
-def test_fit_motion_empty_mask_file_yields_none(tmp_path):
+def test_compute_motion_empty_mask_yields_nan_row(tmp_path):
     masks_dir = tmp_path / "masks"
     masks_dir.mkdir()
-    np.save(masks_dir / "00000.npy", np.zeros((48, 64), dtype=bool))
+    np.save(masks_dir / "00000.npy", np.zeros((48, 64), dtype=bool))  # object lost
+    present = np.zeros((48, 64), dtype=bool)
+    present[10:16, 5:55] = True
+    np.save(masks_dir / "00001.npy", present)
+    motion_path = tmp_path / "motion.npz"
 
-    geometries = fit_motion(str(masks_dir), 1)
+    compute_motion(str(masks_dir), str(motion_path))
 
-    assert geometries == [None]
+    motion = load_motion(str(motion_path))
+    assert np.isnan(motion["length"][0])
+    assert np.all(np.isnan(motion["tip"][0]))
+    assert not np.isnan(motion["length"][1])
+
+
+def test_compute_motion_no_masks_writes_empty_arrays(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+
+    motion = load_motion(str(motion_path))
+    assert motion["length"].shape == (0,)
+    assert motion["tip"].shape == (0, 2)
 
 
 # ---------------------------------------------------------------------------

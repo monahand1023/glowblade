@@ -1,7 +1,7 @@
 import os
 
 from .audio import synthesize_audio
-from .blade import fit_motion, save_motion
+from .blade import compute_motion
 from .frames import extract_frames
 from .glow import parse_color, render_glow
 from .mux import mux
@@ -37,7 +37,7 @@ def run_pipeline(
     # both still take the legacy centroid-only .npy contract until those
     # phases land and switch to consuming motion_path's enriched fields
     # (tip/hilt/axis/length/width/angle) via lightsaber_fx.pipeline.blade
-    # directly. See fx-a-report.md for why this is split in two for now.
+    # directly.
     legacy_motion_path = os.path.join(job_dir, "motion.npy")
     glow_video_path = os.path.join(job_dir, "glow_video.mp4")
     audio_path = os.path.join(job_dir, "saber_audio.wav")
@@ -56,7 +56,7 @@ def run_pipeline(
         progress_cb=stage_cb("track"),
     )
 
-    save_motion(motion_path, fit_motion(masks_dir, n_frames))
+    compute_motion(masks_dir, motion_path, progress_cb=stage_cb("motion"))
 
     render_glow(
         frames_dir, masks_dir, video_meta_path, glow_video_path, legacy_motion_path,

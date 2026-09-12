@@ -1,11 +1,15 @@
-"""Per-frame blade geometry fitting from a binary mask.
+"""Per-frame blade geometry fitting from a binary mask, and the "motion"
+pipeline stage that turns a job's tracked masks into a ``motion.npz``
+artifact.
 
 Pure numpy, no cv2/torch dependency, so it is cheap to unit-test in
-isolation from tracking and rendering. Two later pipeline phases consume
-this:
+isolation from tracking and rendering. ``compute_motion`` runs as its own
+stage between tracking and rendering (see ``runner.py``) so both later
+phases can *read* it:
 
 - the visual phase rebuilds the blade as a capsule along ``axis`` between
-  ``hilt`` and ``tip`` instead of tracing the raw mask silhouette;
+  ``hilt`` and ``tip`` instead of tracing the raw mask silhouette, and uses
+  the per-frame motion for directional motion blur;
 - the audio phase drives swings from ``tip_speed``/``angular_speed`` instead
   of the mask centroid, which barely moves when a blade pivots in place.
 """
@@ -155,22 +159,6 @@ def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20):
     )
 
 
-def fit_motion(masks_dir, n_frames, taper_frac=1.0 / 3.0, width_bins=20):
-    """Fit BladeGeometry for every frame index in [0, n_frames) from the
-    per-frame mask files a tracking stage writes to `masks_dir` (as
-    ``{idx:05d}.npy``, matching track_object's naming). None for a frame
-    whose mask file is missing entirely (object lost) or empty."""
-    geometries = []
-    for idx in range(n_frames):
-        mask_path = os.path.join(masks_dir, f"{idx:05d}.npy")
-        if os.path.exists(mask_path):
-            mask = np.load(mask_path)
-            geometries.append(fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins))
-        else:
-            geometries.append(None)
-    return geometries
-
-
 _FIELDS = ("centroid", "tip", "hilt", "axis", "length", "width", "angle")
 _VECTOR_FIELDS = ("centroid", "tip", "hilt", "axis")
 
@@ -201,6 +189,38 @@ def load_motion(path):
     """Load the .npz written by `save_motion` back into a dict of arrays."""
     with np.load(path) as data:
         return {k: data[k].copy() for k in data.files}
+
+
+def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=20, progress_cb=None):
+    """The motion pipeline stage: fit blade geometry for every tracked
+    frame and write it to `motion_out_path` (see `save_motion`).
+
+    This runs as its own stage between tracking and rendering. Motion is a
+    first-class artifact that both the visual phase (capsule
+    reconstruction, directional motion blur) and the audio phase
+    (tip/angular speed) need to *read* -- render_glow producing it as a
+    side effect of drawing was the wrong shape once both consumers exist.
+
+    Processes every ``*.npy`` mask file present in `masks_dir`, in
+    filename order (matching track_object's ``{idx:05d}.npy`` naming, one
+    file per frame) -- a frame whose mask is empty (object lost that
+    frame) gets a None geometry, which `save_motion` turns into a NaN row.
+    """
+    def report(pct, message):
+        if progress_cb:
+            progress_cb(pct, message)
+
+    mask_files = sorted(f for f in os.listdir(masks_dir) if f.endswith(".npy"))
+    n = len(mask_files)
+    geometries = []
+    for i, fname in enumerate(mask_files):
+        mask = np.load(os.path.join(masks_dir, fname))
+        geometries.append(fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins))
+        report((i + 1) / n * 100, f"frame {i + 1}/{n}")
+
+    save_motion(motion_out_path, geometries)
+    if n == 0:
+        report(100, "no masks found")
 
 
 def wrap_axis_angle_delta(delta):

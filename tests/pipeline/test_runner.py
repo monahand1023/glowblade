@@ -78,7 +78,11 @@ def test_run_pipeline_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, ti
 
     assert result == str(output_path)
     assert output_path.exists()
-    assert {"extract", "track", "glow", "audio", "mux"} <= set(stages_seen)
+    # "motion" is its own stage, run between "track" and "glow" (A2): motion
+    # is a first-class artifact both the visual and audio phases need to
+    # read, so it can't be produced as a side effect of rendering.
+    assert {"extract", "track", "motion", "glow", "audio", "mux"} <= set(stages_seen)
+    assert stages_seen.index("track") < stages_seen.index("motion") < stages_seen.index("glow")
 
     # A2: run_pipeline now also produces the enriched motion.npz contract
     # (blade geometry per frame), alongside the legacy centroid motion.npy
