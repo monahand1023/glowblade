@@ -32,3 +32,15 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "lightsaber_fx.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # All three are third-party; none originate in lightsaber_fx code.
+    # SAM2 ships an optional compiled extension that is not built on Apple Silicon.
+    # Upstream's INSTALL.md states the resulting warning is safe to ignore and does
+    # not affect tracking results.
+    "ignore:cannot import name '_C' from 'sam2'",
+    # Raised by FastAPI's own TestClient plumbing, not by our test code.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated",
+]

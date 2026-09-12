@@ -9,20 +9,4 @@ dist/
 # Isolated worktrees for in-progress feature work
 .worktrees/
 
-# SAM2 (cloned + installed locally, not vendored)
-sam2/
-
-# Model checkpoints
-checkpoints/
-
-# Pipeline inputs/outputs (large media, regenerate locally)
-input.mp4
-frames/
-masks/
-video_meta.txt
-motion.npy
-glow_video.mp4
-saber_audio.wav
-final.mp4
-
 .DS_Store
