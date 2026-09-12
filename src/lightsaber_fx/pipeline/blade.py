@@ -475,6 +475,10 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     farther -- see that function's docstring for why shape alone isn't
     enough (it's inverted for a bat) and when the motion-based decision
     falls back to the per-frame guess.
+
+    Returns `(n_frames, n_with_blade)` so the caller can tell a good track
+    from one that found nothing before paying for the glow stage -- see
+    `runner._require_usable_track`.
     """
     def report(pct, message):
         if progress_cb:
@@ -493,6 +497,7 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     save_motion(motion_out_path, geometries)
     if n == 0:
         report(100, "no masks found")
+    return n, sum(1 for g in geometries if g is not None)
 
 
 def wrap_axis_angle_delta(delta):

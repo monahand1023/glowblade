@@ -233,10 +233,12 @@ On CPU, expect several times that — the CLI warns you when it falls back.
    intermediate this pipeline is happy to spend disk and time on.
 5. **audio** — a two-layer hum (a beating oscillator pair plus a resonant
    "dark tone", both with slow pitch drift) and a TV-interference buzz layer,
-   continuously cross-faded into a pitched-up register as the blade swings
-   faster (no discrete whoosh trigger), with an ignition swell at the start
-   and a power-down at the end. Panned in stereo by the blade's on-screen x
-   position. All synthesized, never sampled.
+   continuously cross-faded into a louder, pitched-up register as the blade
+   swings faster (no discrete whoosh trigger), with an ignition swell at the
+   start and a power-down at the end. A full-speed swing is the loudest
+   sustained thing in the clip — about 2.9× the idle hum's level, measured,
+   and louder than the ignition transient. Panned in stereo by the blade's
+   on-screen x position. All synthesized, never sampled.
 6. **mux** — a single ffmpeg pass encodes the PNG sequence to H.264 and muxes
    in the stereo audio as AAC, in one lossy generation instead of three.
 
@@ -277,6 +279,11 @@ Code-level, in `src/lightsaber_fx/pipeline/`:
   `tip_speed`/`angular_speed` against their own 90th-percentile-of-positive
   values (`_normalize_speed`'s `ref_percentile`); raise it for a swing sound
   that only kicks in on faster motion.
+- **Swing loudness** — also in `synth_swing_hum()`, `hum * (1.0 + 1.6 *
+  swing_outer)` sets how much louder a full-speed swing is than the idle hum.
+  It is deliberately large: a swing should be the loudest sustained thing in
+  the clip. Lower it for a subtler result. Pushing it much higher runs into
+  the `tanh` limiter, which gives the extra gain straight back.
 - **Encode quality** — `-crf 16` is hardcoded in `mux.py`'s `encode()`; lower
   is higher quality (and larger) output.
 - **Model size** — `setup.py` fetches `sam2.1_hiera_small`. Larger SAM2

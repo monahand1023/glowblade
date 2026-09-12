@@ -349,3 +349,131 @@ def test_rerender_pipeline_threads_color_intensity_voice_blade_extend_through(
     assert captured["spill_strength"] == 0.7
     assert captured["blade_extend"] is False
     assert captured["voice"] == "sith"
+
+
+def _fake_track_writing(mask_factory):
+    """Build a `track_object` stub that writes whatever masks `mask_factory`
+    returns for each frame index. Used by the coverage-guard tests below to
+    simulate a track that found nothing, or found the object only briefly."""
+    def fake_track_object(frames_dir, masks_dir, points, labels, checkpoint_path,
+                          config_name, device, n_frames, progress_cb=None):
+        import os
+        os.makedirs(masks_dir, exist_ok=True)
+        for i in range(n_frames):
+            np.save(os.path.join(masks_dir, f"{i:05d}.npy"), mask_factory(i))
+    return fake_track_object
+
+
+def _blank(_i):
+    return np.zeros((48, 64), dtype=bool)
+
+
+def _blade(_i):
+    mask = np.zeros((48, 64), dtype=bool)
+    mask[10:34, 20:24] = True
+    return mask
+
+
+def test_run_pipeline_raises_before_glow_when_tracking_found_nothing(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # An all-empty track used to cost the full glow stage (~160s on a 10s 720p
+    # clip) and then emit a video identical to the input, with nothing saying
+    # why -- which reads as a compositing bug rather than as bad click points.
+    # Stubbing render_glow to fail if called proves the guard runs *first*:
+    # asserting only that run_pipeline raises would pass even if the raise came
+    # after glow had already burned the time.
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("render_glow ran despite the track finding no blade")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blank))
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.render_glow", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match="no blade in any of"):
+        run_pipeline(
+            input_video=str(tiny_video_path),
+            points=[[10, 10]],
+            labels=[1],
+            output_path=str(tmp_path / "final.mp4"),
+            job_dir=str(job_dir),
+            checkpoint_path="unused",
+            device="cpu",
+        )
+
+
+def test_run_pipeline_error_for_an_empty_track_names_the_click_points(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # The message is the whole value of this guard, so it is asserted rather
+    # than left to `match=`: a bare count would leave the user with no idea
+    # what to change. Empty masks nearly always mean an include point that
+    # missed the object or an exclude point that landed on it.
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blank))
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        run_pipeline(
+            input_video=str(tiny_video_path),
+            points=[[10, 10]],
+            labels=[1],
+            output_path=str(tmp_path / "final.mp4"),
+            job_dir=str(job_dir),
+            checkpoint_path="unused",
+            device="cpu",
+        )
+
+    message = str(excinfo.value)
+    assert "click points" in message
+    assert "exclude point" in message
+
+
+@requires_ffmpeg
+def test_run_pipeline_warns_but_renders_when_the_blade_is_found_in_few_frames(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # Partial coverage is legitimate -- an object can leave frame and come back
+    # -- so this must NOT raise. It reports through the normal progress channel
+    # so both front ends surface it, and still produces a file.
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_object",
+        _fake_track_writing(lambda i: _blade(i) if i == 0 else _blank(i)),
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    output_path = tmp_path / "final.mp4"
+    messages = []
+
+    run_pipeline(
+        input_video=str(tiny_video_path),
+        points=[[10, 10]],
+        labels=[1],
+        output_path=str(output_path),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+        progress_cb=lambda stage, pct, message: messages.append((stage, message)),
+    )
+
+    warnings = [m for stage, m in messages if stage == "motion" and m.startswith("warning:")]
+    assert len(warnings) == 1
+    assert "only 1 of" in warnings[0]
+    assert output_path.exists()
+
+
+def test_compute_motion_reports_how_many_frames_produced_a_blade(tmp_path):
+    from lightsaber_fx.pipeline.blade import compute_motion, save_mask
+
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    for i in range(4):
+        save_mask(str(masks_dir), i, _blade(i) if i < 3 else _blank(i))
+
+    n_tracked, n_with_blade = compute_motion(str(masks_dir), str(tmp_path / "motion.npz"))
+
+    assert (n_tracked, n_with_blade) == (4, 3)

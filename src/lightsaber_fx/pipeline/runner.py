@@ -67,6 +67,47 @@ def _render_from_masks(job_dir, paths, fps, output_path, color_bgr, intensity, b
     return output_path
 
 
+_LOW_COVERAGE_FRAC = 0.5
+
+
+def _require_usable_track(n_tracked, n_with_blade, report):
+    """Stop a doomed render at the motion stage instead of at the end of it.
+
+    A track that found nothing still costs the full glow stage -- on a 10 s
+    720p clip that is around 160 seconds, nearly as much as the tracking
+    itself -- and then emits a video that looks exactly like the input, with
+    nothing anywhere saying why. That is a bad failure: expensive, silent,
+    and easy to misread as a bug in the compositing.
+
+    The usual cause is the click points. An include point that missed the
+    object, or an exclude point that landed *on* it, produces empty masks
+    from the first frame, and every later frame inherits that. So the error
+    names the points as the thing to check rather than reporting a bare
+    count.
+
+    Zero is the only unambiguous case, so it's the only one that raises.
+    Partial coverage is legitimate -- an object can leave frame and come
+    back -- so low coverage reports a warning through the normal progress
+    channel (the CLI prints it, the web app streams it) and the render
+    proceeds.
+    """
+    if n_tracked and not n_with_blade:
+        raise RuntimeError(
+            f"Tracking produced no blade in any of {n_tracked} frames, so there is "
+            "nothing to render. This almost always means the click points were "
+            "wrong: an include point that wasn't on the object, or an exclude "
+            "point that landed on it. Check the points against the first frame "
+            "and try again."
+        )
+    if n_with_blade and n_with_blade < _LOW_COVERAGE_FRAC * n_tracked:
+        report(
+            100,
+            f"warning: a blade was found in only {n_with_blade} of {n_tracked} "
+            "frames -- the mask was lost for most of the clip, so expect the glow "
+            "to flicker or disappear. Rendering anyway.",
+        )
+
+
 def run_pipeline(
     input_video,
     points,
@@ -106,7 +147,10 @@ def run_pipeline(
         progress_cb=stage_cb("track"),
     )
 
-    compute_motion(paths["masks_dir"], paths["motion_path"], progress_cb=stage_cb("motion"))
+    n_tracked, n_with_blade = compute_motion(
+        paths["masks_dir"], paths["motion_path"], progress_cb=stage_cb("motion"),
+    )
+    _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"))
 
     return _render_from_masks(
         job_dir, paths, fps, output_path, color_bgr, intensity, blade_extend, voice, stage_cb,
