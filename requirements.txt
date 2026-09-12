@@ -1,0 +1,6 @@
+opencv-python
+numpy
+scipy
+soundfile
+torch
+torchvision
