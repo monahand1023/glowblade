@@ -2,8 +2,8 @@
 
 Rewritten around Phase A's ``BladeGeometry`` contract
 (``lightsaber_fx.pipeline.blade``) and the VFX practices catalogued in
-fx-upgrade-plan.md section B1. Each helper below is labelled with the plan
-item it implements.
+docs/design-notes.md's "B1 -- the glow renderer" table. Each helper below
+is labelled with the item it implements.
 
 Old behaviour this replaces: ``colored[mask > 0] = color`` traced the prop's
 exact silhouette (the "glowing bat"), core and colour blurred the same
@@ -353,7 +353,7 @@ def render_glow(
     ``lightsaber_fx.pipeline.blade.load_motion``) instead of writing a
     centroid track -- motion is now produced upstream by the "motion"
     pipeline stage. Each numbered step below is documented against
-    fx-upgrade-plan.md section B1.
+    docs/design-notes.md's B1 table.
     """
     def report(pct, message):
         if progress_cb:

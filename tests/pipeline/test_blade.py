@@ -280,7 +280,8 @@ def test_save_mask_compressed_is_dramatically_smaller_than_raw_for_sparse_mask(t
     # The whole point of this change: a sparse, blade-shaped mask (thin
     # diagonal band, small fraction of the frame) compresses far better
     # than plain np.save. Assert a conservative ratio (real measurements on
-    # a representative blade mask were ~350x-470x -- see fx-wave2-plan.md)
+    # a representative blade mask were ~350x-470x -- see
+    # docs/design-notes.md)
     # so this documents the intent without being brittle to numpy-version
     # compression differences.
     height, width = 1080, 1920

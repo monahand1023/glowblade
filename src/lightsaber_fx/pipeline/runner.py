@@ -47,7 +47,7 @@ def _render_from_masks(job_dir, paths, fps, output_path, color_bgr, intensity, b
 
     Kept in exactly one place on purpose -- a full render and a rerender
     diverging on stage order/arguments here is exactly the kind of drift a
-    reviewer flagged earlier in this project (see fx-wave2-plan.md W2)."""
+    reviewer flagged earlier in this project."""
     render_glow(
         paths["frames_dir"], paths["masks_dir"], paths["video_meta_path"],
         paths["glow_frames_dir"], paths["motion_path"],
@@ -94,7 +94,7 @@ def run_pipeline(
         f.write(f"{fps}\n{n_frames}\n")
     # Recorded so a later `rerender` can re-extract frames from the same
     # source clip without keeping frames/ around in the meantime (see
-    # fx-wave2-plan.md W2) -- this is the one piece of bookkeeping a job
+    # docs/design-notes.md) -- this is the one piece of bookkeeping a job
     # needs beyond its masks/motion.npz to be re-renderable.
     job_meta.write_job_meta(job_dir, source_video=input_video)
     if progress_cb:
@@ -125,7 +125,8 @@ def rerender_pipeline(
     """Re-render an existing job with a new color/intensity/voice/
     blade_extend, reusing its cached tracking masks instead of re-running
     SAM2 -- the stage that dominates a full render's runtime (see
-    fx-wave2-plan.md, "Why this wave"). Runs extract -> glow -> audio -> mux;
+    docs/design-notes.md, "Two storage trade-offs"). Runs
+    extract -> glow -> audio -> mux;
     `track_object` never runs.
 
     `compute_motion` is skipped too, but not because it's slow -- it's
@@ -136,7 +137,7 @@ def rerender_pipeline(
     produce, so `_render_from_masks` below reads it as-is via
     `paths["motion_path"]` -- there is no call to `compute_motion` anywhere
     in this function. If this looks like an omission, it isn't: see
-    fx-wave2-plan.md W2.
+    docs/design-notes.md.
 
     Frames are deliberately NOT cached between renders -- re-extracted here
     from the job's recorded source clip -- because W1 measured a real job

@@ -342,7 +342,8 @@ def _orient_by_motion(geometries):
 # `np.save` by two to three orders of magnitude -- far better than
 # `np.packbits`, which only gets the fixed 8x of bit-packing and doesn't
 # exploit the sparsity. That's what keeps a render's masks from being the
-# dominant disk cost (see fx-wave2-plan.md).
+# dominant disk cost (see docs/design-notes.md, "Two storage
+# trade-offs", for the measurements).
 #
 # Loading also transparently accepts the older, uncompressed `.npy` format
 # written by earlier versions of `track_object`, so a job directory created

@@ -4,10 +4,11 @@ job directory has everything `rerender` needs.
 
 This is deliberately separate from `blade.py`'s per-frame mask/motion I/O:
 it is whole-job bookkeeping (one small JSON file per job), not a per-frame
-artifact format. See fx-wave2-plan.md, section W2 ("Design correction after
-W1's measurements") for why frames are re-extracted rather than kept, which
-is exactly what makes `source_video` -- recorded here -- the one thing a job
-can't do without.
+artifact format. Frames are re-extracted from the source clip rather than
+kept -- they are cheap to recompute and expensive to store, the exact
+opposite of masks (docs/design-notes.md, "Two storage trade-offs") -- which
+is what makes `source_video`, recorded here, the one thing a job can't do
+without.
 """
 
 import json
@@ -51,7 +52,7 @@ def write_job_meta(job_dir, source_video):
 
     Called once, by `run_pipeline`, right after extract -- this is the only
     bookkeeping a job needs beyond its masks/motion.npz to be re-renderable
-    later without re-running SAM2 (see fx-wave2-plan.md W2)."""
+    later without re-running SAM2."""
     meta = {
         "source_video": os.path.abspath(str(source_video)),
         "created_at": time.time(),
@@ -92,8 +93,8 @@ def describe_job(job_dir):
     see blade.py's compressed/legacy fallback), motion.npz, video_meta.txt,
     and a source clip that still exists on disk at its recorded path.
     frames/ is deliberately NOT required: it is re-extracted from the source
-    clip (see fx-wave2-plan.md W2's "cache masks, re-extract frames"
-    design)."""
+    clip, which costs seconds against the hundreds of megabytes keeping it
+    would cost (docs/design-notes.md, "Two storage trade-offs")."""
     job_dir = str(job_dir)
     job_id = os.path.basename(job_dir.rstrip(os.sep))
     meta = read_job_meta(job_dir)

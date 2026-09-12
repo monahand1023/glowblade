@@ -360,23 +360,34 @@ the muxed output.
 
 ```
 src/lightsaber_fx/
-├── cli.py              # click CLI: setup / run / serve / clean
+├── cli.py              # click CLI: setup / run / serve / clean / rerender / jobs
 ├── paths.py            # where SAM2, the checkpoint, and job dirs live
 ├── device.py           # mps -> cuda -> cpu selection
+├── progress.py         # per-stage elapsed/ETA tracking
 ├── setup.py            # the one-time SAM2 bootstrap
 ├── pipeline/
 │   ├── frames.py       # 1. extract
 │   ├── track.py        # 2. click-picker + SAM2 propagation
-│   ├── blade.py        # 3. motion: per-frame blade geometry fit + motion.npz
+│   ├── blade.py        # 3. motion: per-frame blade geometry fit + mask I/O
 │   ├── glow.py         # 4. glow compositing + colour parsing
 │   ├── audio.py        # 5. hum / swing / ignition / power-down
 │   ├── mux.py          # 6. single ffmpeg encode() pass
-│   └── runner.py       # run_pipeline(): the single orchestrator
+│   ├── job_meta.py     # per-job source-clip record; rerender eligibility
+│   └── runner.py       # run_pipeline() / rerender_pipeline()
 └── web/
     ├── server.py       # FastAPI routes
     ├── jobs.py         # one-job-at-a-time manager
     └── static/         # the browser UI (plain HTML/CSS/JS, no build step)
 ```
+
+The code uses short labels — `B1.4`, `B2.5`, `W1` — where a comment would
+otherwise have to re-explain a whole compositing or synthesis technique.
+[`docs/design-notes.md`](docs/design-notes.md) is what those point at: the
+film-compositing and sound-design practice behind each step, the measurements
+the storage design rests on, and a write-up of the one interesting bug (a
+linear crossfade that made swings quieter instead of louder). The original
+design spec for the packaging and web UI is in
+[`docs/superpowers/specs/`](docs/superpowers/specs/).
 
 Both entry points call `pipeline.runner.run_pipeline()` — there is no second
 copy of the stage sequencing. Each pipeline stage is a plain function taking
