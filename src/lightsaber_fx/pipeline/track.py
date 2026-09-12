@@ -19,6 +19,8 @@ def pick_points_interactive(first_frame_path):
                 print(f"Include point at ({x},{y})")
 
     img = cv2.imread(first_frame_path)
+    if img is None:
+        raise ValueError(f"Could not read a frame from {first_frame_path}")
     clone = img.copy()
     window = "Click the object (shift-click to exclude), then press ENTER"
     cv2.namedWindow(window)

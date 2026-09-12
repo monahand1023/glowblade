@@ -29,4 +29,4 @@ def bootstrap(force=False):
 
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading small SAM2.1 checkpoint to {checkpoint_path} ...")
-    subprocess.run(["curl", "-L", "-o", str(checkpoint_path), CHECKPOINT_URL], check=True)
+    subprocess.run(["curl", "-fL", "-o", str(checkpoint_path), CHECKPOINT_URL], check=True)

@@ -15,7 +15,7 @@ def synth_hum(duration, base_freq=70.0):
     return tone * wobble
 
 
-def synth_whoosh(duration, peak_freq=900.0):
+def synth_whoosh(duration):
     n = int(SR * duration)
     t = np.linspace(0, duration, n, endpoint=False)
     noise = np.random.uniform(-1, 1, n)
@@ -81,7 +81,7 @@ def synthesize_audio(motion_path, video_meta_path, out_wav_path, progress_cb=Non
             s = int(t_start * SR)
             e = min(len(audio), s + len(whoosh))
             audio[s:e] += whoosh[: e - s] * 0.7
-            i += int(fps * whoosh_dur)
+            i += max(1, int(fps * whoosh_dur))
         else:
             i += 1
     report(60, "added swing whooshes")
