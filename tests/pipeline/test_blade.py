@@ -64,17 +64,25 @@ def test_fit_blade_vertical_rectangle_axis_is_vertical():
     assert endpoints == {5.0, 74.0}
 
 
-def test_fit_blade_disambiguates_tip_from_tapered_hilt_bulge():
-    # A bat/sword shape: a long thin blade with a wide "knob" bulge at one
-    # end (the hilt). The tip must be identified as the far, narrow end.
+def test_fit_blade_single_frame_taper_guess_picks_narrow_end_not_pipeline_truth():
+    # fit_blade (via classify_tip_by_taper) is a *single-frame, shape-only*
+    # guess: narrower end = tip. That's a fine, honest thing for it to
+    # report in isolation -- a sword-like bulge (wide hilt, narrow far
+    # end) really does taper that way -- but it is NOT the pipeline's
+    # actual tip/hilt decision. For a bat-like object (thin handle, thick
+    # barrel) this exact heuristic is backwards, which is precisely why
+    # compute_motion (see test_compute_motion_bat_swing_puts_tip_at_barrel_
+    # not_handle below) overrides it with a motion-based decision for the
+    # whole clip and only falls back to this per-frame guess when motion
+    # can't decide (see test_compute_motion_static_clip_falls_back_to_taper).
     mask = np.zeros((60, 100), dtype=bool)
     mask[27:33, 10:90] = True  # thin blade body, x 10..89, y 27..32
     mask[20:40, 10:20] = True  # wide hilt bulge, x 10..19, y 20..39
 
     geo = fit_blade(mask)
 
-    assert geo.tip[0] > 70  # tip is near the far, narrow end
-    assert geo.hilt[0] < 25  # hilt is near the bulge
+    assert geo.tip[0] > 70  # the heuristic calls the far, narrow end "tip"
+    assert geo.hilt[0] < 25  # ...and the bulge "hilt"
     assert geo.width < 10  # median width reflects the thin body, not the bulge
     assert geo.width > 3
 
@@ -211,6 +219,212 @@ def test_compute_motion_no_masks_writes_empty_arrays(tmp_path):
     motion = load_motion(str(motion_path))
     assert motion["length"].shape == (0,)
     assert motion["tip"].shape == (0, 2)
+
+
+# ---------------------------------------------------------------------------
+# compute_motion -- tip/hilt orientation decided from motion over the whole
+# clip, not per-frame shape (the actual regression: classify_tip_by_taper
+# alone gets a bat backwards -- see the taper test above).
+#
+# All of these swing a mask about a fixed pivot with numpy only (no cv2):
+# rotating a mask's foreground pixels about the pivot and rasterizing them
+# onto a fresh canvas by nearest-pixel rounding. Rotation about a pivot
+# preserves each point's *distance* from that pivot, so a physically
+# correct, temporally-stable labelling should keep the hilt consistently
+# near the pivot and the tip consistently far from it on every frame --
+# any frame where that flips is either a wrong-end bug or a label flip.
+# ---------------------------------------------------------------------------
+
+_SWING_CANVAS = (900, 900)
+_SWING_PIVOT = (450, 450)
+
+
+def _rotate_points_mask(mask, pivot, angle_rad, canvas_shape):
+    ys, xs = np.nonzero(mask)
+    pts = np.stack([xs, ys], axis=1).astype(np.float64)
+    pivot = np.asarray(pivot, dtype=np.float64)
+    rel = pts - pivot
+    c, s = np.cos(angle_rad), np.sin(angle_rad)
+    rot = np.stack(
+        [rel[:, 0] * c - rel[:, 1] * s, rel[:, 0] * s + rel[:, 1] * c], axis=1
+    )
+    new_pts = rot + pivot
+    nx = np.round(new_pts[:, 0]).astype(int)
+    ny = np.round(new_pts[:, 1]).astype(int)
+    h, w = canvas_shape
+    valid = (nx >= 0) & (nx < w) & (ny >= 0) & (ny < h)
+    out = np.zeros(canvas_shape, dtype=bool)
+    out[ny[valid], nx[valid]] = True
+    return out
+
+
+def _bat_base_mask():
+    """Bat-shaped rest pose: thin handle starting at the pivot, thick
+    barrel at the far end -- the exact regression shape (thin handle,
+    thick barrel; taper alone calls the handle "tip")."""
+    mask = np.zeros(_SWING_CANVAS, dtype=bool)
+    px, py = _SWING_PIVOT
+    mask[py - 5:py + 5, px:px + 240] = True  # handle: thin (10px)
+    mask[py - 30:py + 30, px + 240:px + 300] = True  # barrel: thick (60px)
+    return mask
+
+
+def _sword_base_mask():
+    """Sword-shaped rest pose: thick hilt at the pivot, tapering to a
+    narrow point at the far end -- taper and motion agree here."""
+    mask = np.zeros(_SWING_CANVAS, dtype=bool)
+    px, py = _SWING_PIVOT
+    mask[py - 30:py + 30, px:px + 60] = True  # hilt: thick (60px)
+    mask[py - 5:py + 5, px + 60:px + 300] = True  # blade: thin (10px)
+    return mask
+
+
+def _dumbbell_base_mask():
+    """Equal-width bulges at both ends of a thin shaft. classify_tip_by_
+    taper sees a tie on every single frame, so its deterministic tie
+    break ("minimum projection end") is at the mercy of PCA's arbitrary
+    eigenvector sign -- which does NOT reliably track the same physical
+    end from one frame to the next as the shape rotates, causing the
+    per-frame-only heuristic to flip which end is "tip" almost every
+    frame (verified empirically while building this fix)."""
+    mask = np.zeros(_SWING_CANVAS, dtype=bool)
+    px, py = _SWING_PIVOT
+    mask[py - 5:py + 5, px:px + 300] = True  # shaft
+    mask[py - 20:py + 20, px:px + 30] = True  # bulge near the pivot
+    mask[py - 20:py + 20, px + 270:px + 300] = True  # bulge at the far end
+    return mask
+
+
+def _swing_sequence(base_mask, n_frames=10, max_angle_deg=80.0):
+    """Rotate `base_mask` about `_SWING_PIVOT` in `n_frames` steps from 0
+    to `max_angle_deg`, as if it were swung about that end."""
+    angles = np.linspace(0.0, np.deg2rad(max_angle_deg), n_frames)
+    return [_rotate_points_mask(base_mask, _SWING_PIVOT, a, _SWING_CANVAS) for a in angles]
+
+
+def _write_masks(masks_dir, masks):
+    for i, mask in enumerate(masks):
+        np.save(masks_dir / f"{i:05d}.npy", mask)
+
+
+def _dist(p, q):
+    return float(np.hypot(p[0] - q[0], p[1] - q[1]))
+
+
+def test_compute_motion_bat_swing_puts_tip_at_barrel_not_handle(tmp_path):
+    # The exact regression, reproduced end to end through compute_motion:
+    # classify_tip_by_taper alone calls the thin handle "tip" (it's the
+    # narrower end), which is backwards for a bat. Swung about the
+    # handle, the handle barely moves while the barrel sweeps a wide arc
+    # -- that physical signal must win. This test fails against the
+    # taper-only code and passes once compute_motion decides from motion.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    _write_masks(masks_dir, _swing_sequence(_bat_base_mask()))
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    assert len(motion["tip"]) == 10
+    for i in range(len(motion["tip"])):
+        hilt_dist = _dist(motion["hilt"][i], _SWING_PIVOT)
+        tip_dist = _dist(motion["tip"][i], _SWING_PIVOT)
+        assert hilt_dist < 20, f"frame {i}: hilt ({hilt_dist:.1f}px) should stay near the pivot/handle"
+        assert tip_dist > 200, f"frame {i}: tip ({tip_dist:.1f}px) should be out at the barrel"
+
+
+def test_compute_motion_sword_swing_keeps_tip_at_point(tmp_path):
+    # Same motion-based mechanism, opposite shape: proves the fix isn't
+    # simply inverting the taper heuristic. A sword's narrow point also
+    # travels farthest when swung about the hilt, so it must still win.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    _write_masks(masks_dir, _swing_sequence(_sword_base_mask()))
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    for i in range(len(motion["tip"])):
+        hilt_dist = _dist(motion["hilt"][i], _SWING_PIVOT)
+        tip_dist = _dist(motion["tip"][i], _SWING_PIVOT)
+        assert hilt_dist < 20, f"frame {i}: hilt ({hilt_dist:.1f}px) should stay near the pivot/hilt"
+        assert tip_dist > 200, f"frame {i}: tip ({tip_dist:.1f}px) should be out at the point"
+
+
+def test_compute_motion_no_frame_to_frame_tip_hilt_flips(tmp_path):
+    # A symmetric shape (equal-width ends) hands classify_tip_by_taper a
+    # tie every frame; verified empirically, its deterministic tie-break
+    # flips which physical end is "tip" on almost every frame of this
+    # exact swing under a per-frame-only decision -- exactly what glow.py's
+    # _stabilize_tip_hilt has been papering over downstream. Deciding once
+    # from motion for the whole sequence must not flip.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    _write_masks(masks_dir, _swing_sequence(_dumbbell_base_mask()))
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    axis = motion["axis"]
+    for i in range(len(axis) - 1):
+        assert np.dot(axis[i], axis[i + 1]) > 0, (
+            f"axis direction flipped between frame {i} and {i + 1}"
+        )
+    for i in range(len(axis)):
+        hilt_dist = _dist(motion["hilt"][i], _SWING_PIVOT)
+        tip_dist = _dist(motion["tip"][i], _SWING_PIVOT)
+        assert hilt_dist < 40, f"frame {i}: hilt ({hilt_dist:.1f}px) should stay near the pivot"
+        assert tip_dist > 200, f"frame {i}: tip ({tip_dist:.1f}px) should stay out at the far end"
+
+
+def test_compute_motion_static_clip_falls_back_to_taper(tmp_path):
+    # No motion at all: the two ends are genuinely indistinguishable from
+    # position alone, so compute_motion must fall back explicitly to
+    # fit_blade's own per-frame taper guess -- exactly what fit_blade
+    # reports for that mask on its own -- rather than guess randomly.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    static_mask = _bat_base_mask()
+    _write_masks(masks_dir, [static_mask] * 5)
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    expected = fit_blade(static_mask)
+    for i in range(5):
+        assert motion["tip"][i] == pytest.approx(expected.tip, abs=1e-6)
+        assert motion["hilt"][i] == pytest.approx(expected.hilt, abs=1e-6)
+        assert motion["axis"][i] == pytest.approx(expected.axis, abs=1e-6)
+
+
+def test_compute_motion_bat_swing_with_nan_gap_still_orients_by_motion(tmp_path):
+    # A dropped frame mid-swing must not break the global motion decision
+    # for the frames around it, and must still leave a NaN row exactly at
+    # the gap -- do not regress the existing NaN-gap handling.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = _swing_sequence(_bat_base_mask())
+    masks[4] = np.zeros(_SWING_CANVAS, dtype=bool)  # object lost this frame
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    assert np.isnan(motion["length"][4])
+    assert np.all(np.isnan(motion["tip"][4]))
+
+    for i in range(len(motion["tip"])):
+        if i == 4:
+            continue
+        hilt_dist = _dist(motion["hilt"][i], _SWING_PIVOT)
+        tip_dist = _dist(motion["tip"][i], _SWING_PIVOT)
+        assert hilt_dist < 20, f"frame {i}: hilt ({hilt_dist:.1f}px) should stay near the pivot/handle"
+        assert tip_dist > 200, f"frame {i}: tip ({tip_dist:.1f}px) should be out at the barrel"
 
 
 # ---------------------------------------------------------------------------
