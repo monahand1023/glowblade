@@ -1,0 +1,49 @@
+[project]
+name = "lightsaber-fx"
+dynamic = ["version"]
+description = "Turn a home video into a lightsaber VFX clip: SAM2 tracking, glow compositing, synthesized audio."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "opencv-python",
+    "numpy",
+    "scipy",
+    "soundfile",
+    "torch",
+    "torchvision",
+    "click",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "platformdirs",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[project.scripts]
+lightsaber-fx = "lightsaber_fx.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "lightsaber_fx.__version__"}
+
+[tool.setuptools.package-data]
+"lightsaber_fx.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # All three are third-party; none originate in lightsaber_fx code.
+    # SAM2 ships an optional compiled extension that is not built on Apple Silicon.
+    # Upstream's INSTALL.md states the resulting warning is safe to ignore and does
+    # not affect tracking results.
+    "ignore:cannot import name '_C' from 'sam2'",
+    # Raised by FastAPI's own TestClient plumbing, not by our test code.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated",
+]
