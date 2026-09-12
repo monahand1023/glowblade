@@ -73,7 +73,7 @@ Verify the install:
 
 ```bash
 lightsaber-fx --version
-pytest -q                # 129 tests; the SAM2 tracking test is skipped if setup hasn't run
+pytest -q                # the SAM2 tracking test is skipped if setup hasn't run
 ```
 
 ---
@@ -144,11 +144,38 @@ lightsaber-fx run clip.mp4 \
 | `--intensity` | `0.35` | `0.0`–`1.0`. How strongly the blade lights up its surroundings. Values outside the range are rejected immediately. |
 | `--blade-extend` / `--no-blade-extend` | extend on | Rebuilds the blade as a capsule extending past the tracked object's tip (what makes a bat or broom read as a blade rather than a glowing prop). `--no-blade-extend` falls back to tracing the raw tracked silhouette instead — useful for an object that isn't elongated. |
 | `--voice` | `neutral` | `neutral`, `jedi`, or `sith`. Changes the hum/swing character only — independent of `--color`, so picking red never silently changes the soundtrack. |
-| `--keep-intermediate` | off | Keep the extracted frames and masks after rendering (useful for debugging a bad track). The rendered PNG frame sequence used for the final encode is always deleted after a successful run regardless of this flag — it has no debugging value once it's been encoded. |
+| `--keep-intermediate` | off | Also keep the extracted `frames/` after rendering (useful for debugging a bad track). The tracking masks are kept either way — they are tiny and `rerender` needs them. The rendered PNG sequence used for the final encode is always deleted after a successful run; it has no debugging value once encoded. |
 
 In the picker window, note that the only way to finish is **Enter**, and the
 only way to abort is **Ctrl-C** — closing the window doesn't do it, and there's
 currently no undo for a misplaced point. If you misclick, Ctrl-C and re-run.
+
+### Trying a different colour without re-tracking
+
+Tracking is most of the runtime, and nothing about the colour, intensity, voice
+or blade shape can change the mask — so changing your mind about any of those
+shouldn't cost you another full render. It doesn't:
+
+```bash
+lightsaber-fx jobs                          # which past jobs can be reused, and why others can't
+lightsaber-fx rerender a1b2c3d4 --color green --voice sith
+```
+
+`rerender` reuses the cached masks and re-runs only extract, glow, audio and the
+encode. On the 2-second test clip that is **7.9 s instead of 42.8 s** — the
+34.7 s tracking stage is skipped entirely.
+
+The browser app does the same thing: when a render finishes, the colour,
+intensity and voice controls stay on screen with a **Re-render** button, so you
+can iterate without re-uploading or re-clicking.
+
+What a job needs to stay re-renderable: its `masks/`, `motion.npz`,
+`video_meta.txt`, and **its original source clip still at the same path**.
+Notably it does *not* need `frames/` — those are re-extracted, because frames
+are cheap to recompute (a few seconds) and expensive to keep (hundreds of MB),
+while masks are the exact opposite. The cost of that trade is that **moving or
+deleting the source clip makes a job un-re-renderable**; `rerender` tells you so
+by name rather than failing obscurely, and `jobs` shows it up front.
 
 ### How long it takes
 
@@ -294,19 +321,25 @@ come up. If it does, it's worth checking the exact codec/profile with
 
 ## Disk usage
 
-Each render keeps its working files so a failed or interesting run can be
-inspected. They are not small: masks are uncompressed boolean arrays, roughly
-2 MB per 1080p frame, so a 60-second 30 fps render can leave several GB of
-frames and masks behind.
+Each render keeps its tracking masks so you can `rerender` it later. Those are
+cheap: they compress about **355×** (measured on real tracked footage — blade
+masks are overwhelmingly empty), which works out to well under a megabyte for a
+whole clip. Keeping them is effectively free, which is why it is the default.
+
+The extracted `frames/` are the expensive part — near-lossless JPEGs, hundreds
+of MB for a long clip. The CLI deletes them after a successful render unless you
+pass `--keep-intermediate`, and `rerender` re-extracts them from your source
+clip when it needs them. The browser app currently keeps them until you run
+`clean`.
 
 ```bash
 lightsaber-fx clean     # delete all job directories
 ```
 
-`clean` leaves the SAM2 install and the model checkpoint alone. It has no
-cross-process lock, so don't run it while a render is in progress. The CLI
-already deletes its own intermediates unless you pass `--keep-intermediate`;
-the web app keeps them until you run `clean`.
+`clean` leaves the SAM2 install and the model checkpoint alone — rerun
+`lightsaber-fx setup --force` if you need to replace those. It has no
+cross-process lock, so don't run it while a render is in progress. Note that
+cleaning a job also makes it un-re-renderable, since it removes the masks.
 
 ---
 
