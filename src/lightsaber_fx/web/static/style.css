@@ -23,9 +23,15 @@ body {
 
 #controls {
   display: flex;
+  flex-wrap: wrap;
   gap: 1rem;
   align-items: center;
   margin-top: 0.5rem;
+}
+
+#rerender-hint {
+  color: #666;
+  font-size: 0.9rem;
 }
 
 #progress-bar {

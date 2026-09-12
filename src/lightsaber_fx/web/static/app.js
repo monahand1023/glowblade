@@ -3,11 +3,13 @@ const fileInput = document.getElementById("file-input");
 const pickerSection = document.getElementById("picker-section");
 const canvas = document.getElementById("picker-canvas");
 const ctx = canvas.getContext("2d");
+const controlsSection = document.getElementById("controls-section");
 const colorSelect = document.getElementById("color-select");
 const intensityInput = document.getElementById("intensity-input");
 const voiceSelect = document.getElementById("voice-select");
 const bladeExtendInput = document.getElementById("blade-extend-input");
 const submitButton = document.getElementById("submit-button");
+const rerenderButton = document.getElementById("rerender-button");
 const progressSection = document.getElementById("progress-section");
 const progressFill = document.getElementById("progress-fill");
 const progressLabel = document.getElementById("progress-label");
@@ -19,6 +21,7 @@ const errorMessage = document.getElementById("error-message");
 let jobId = null;
 let frameImage = null;
 let points = []; // [x, y, label]
+let hasRendered = false; // true once this job has completed at least one render
 
 // Mirrors format_duration() in lightsaber_fx/progress.py.
 function formatDuration(seconds) {
@@ -38,6 +41,16 @@ function clearError() {
   errorMessage.textContent = "";
 }
 
+function renderRequestBody() {
+  return {
+    points,
+    color: colorSelect.value,
+    intensity: parseFloat(intensityInput.value),
+    voice: voiceSelect.value,
+    blade_extend: bladeExtendInput.checked,
+  };
+}
+
 async function uploadFile(file) {
   clearError();
   const formData = new FormData();
@@ -51,6 +64,11 @@ async function uploadFile(file) {
   const data = await resp.json();
   jobId = data.job_id;
   points = [];
+  hasRendered = false;
+  submitButton.hidden = false;
+  submitButton.disabled = true;
+  rerenderButton.hidden = true;
+  resultSection.hidden = true;
 
   frameImage = new Image();
   frameImage.onload = () => {
@@ -58,6 +76,7 @@ async function uploadFile(file) {
     canvas.height = data.height;
     ctx.drawImage(frameImage, 0, 0);
     pickerSection.hidden = false;
+    controlsSection.hidden = false;
   };
   frameImage.src = data.frame0_url;
 }
@@ -97,13 +116,7 @@ submitButton.addEventListener("click", async () => {
   const resp = await fetch(`/api/jobs/${jobId}/points`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      points,
-      color: colorSelect.value,
-      intensity: parseFloat(intensityInput.value),
-      voice: voiceSelect.value,
-      blade_extend: bladeExtendInput.checked,
-    }),
+    body: JSON.stringify(renderRequestBody()),
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
@@ -111,6 +124,29 @@ submitButton.addEventListener("click", async () => {
     return;
   }
   pickerSection.hidden = true;
+  submitButton.hidden = true;
+  rerenderButton.hidden = true;
+  progressSection.hidden = false;
+  listenForProgress();
+});
+
+// Re-renders the same job (glow/audio/mux only -- no re-tracking) with
+// whatever color/intensity/voice/blade-extend the controls currently hold.
+// No points are sent: the job already has its tracking masks.
+rerenderButton.addEventListener("click", async () => {
+  clearError();
+  const resp = await fetch(`/api/jobs/${jobId}/rerender`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(renderRequestBody()),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    showError(body.detail || "Could not start re-render");
+    return;
+  }
+  resultSection.hidden = true;
+  rerenderButton.hidden = true;
   progressSection.hidden = false;
   listenForProgress();
 });
@@ -121,14 +157,24 @@ function listenForProgress() {
     const data = JSON.parse(event.data);
     if (data.stage === "done") {
       source.close();
+      hasRendered = true;
       progressSection.hidden = true;
       resultSection.hidden = false;
-      resultPlayer.src = data.result_url;
+      rerenderButton.hidden = false;
+      resultPlayer.src = data.result_url + `?t=${Date.now()}`; // bust the cache: same URL, new content
       downloadLink.href = data.result_url;
     } else if (data.stage === "error") {
       source.close();
       progressSection.hidden = true;
       showError(data.message);
+      // A render (first or re-) failing shouldn't force starting over: bring
+      // back whichever action was available before this attempt.
+      if (hasRendered) {
+        resultSection.hidden = false;
+        rerenderButton.hidden = false;
+      } else {
+        submitButton.hidden = false;
+      }
     } else {
       progressFill.style.width = `${data.pct}%`;
       let label = `${data.stage}: ${data.message} (${Math.round(data.pct)}%)`;

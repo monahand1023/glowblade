@@ -222,3 +222,128 @@ def test_second_points_submission_returns_409_while_job_is_running(client, tiny_
 
     release.set()
     server_module.manager.wait(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# rerender: change color/intensity/voice/blade_extend on an existing job
+# without re-uploading, re-tracking, or inventing a second job-manager path.
+# ---------------------------------------------------------------------------
+
+
+def _fake_run_pipeline_writing(content: bytes):
+    def fake_run_pipeline(*, output_path, progress_cb, **kwargs):
+        for stage in ("extract", "track", "glow", "audio", "mux"):
+            progress_cb(stage, 100, "done")
+        with open(output_path, "wb") as f:
+            f.write(content)
+        return output_path
+    return fake_run_pipeline
+
+
+def test_rerender_endpoint_starts_job_and_produces_new_result(client, tiny_video_bytes, monkeypatch):
+    monkeypatch.setattr(server_module, "run_pipeline", _fake_run_pipeline_writing(b"first render bytes"))
+
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    points_resp = client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 1]]})
+    assert points_resp.status_code == 200
+    server_module.manager.wait(timeout=2)
+
+    first_result = client.get(f"/api/jobs/{job_id}/result")
+    assert first_result.content == b"first render bytes"
+
+    # The fake run_pipeline above never actually wrote masks/motion.npz/
+    # job_meta.json (the real one does) -- the "is a real job actually
+    # rerenderable" question is covered on its own by
+    # test_rerender_endpoint_400_when_job_has_no_masks_yet, so here the
+    # rerenderability check itself is stubbed out to isolate what this test
+    # is actually about: the endpoint wiring (JobManager reuse, new result).
+    monkeypatch.setattr(server_module, "require_rerenderable", lambda job_dir: None)
+
+    def fake_rerender_pipeline(*, output_path, progress_cb, **kwargs):
+        for stage in ("extract", "glow", "audio", "mux"):
+            progress_cb(stage, 100, "done")
+        with open(output_path, "wb") as f:
+            f.write(b"rerendered bytes")
+        return output_path
+
+    monkeypatch.setattr(server_module, "rerender_pipeline", fake_rerender_pipeline)
+
+    rerender_resp = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "blue", "intensity": 0.6})
+    assert rerender_resp.status_code == 200
+    server_module.manager.wait(timeout=2)
+
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as stream:
+        body = b"".join(stream.iter_bytes())
+    assert b'"stage": "done"' in body or b'"stage":"done"' in body
+
+    result_resp = client.get(f"/api/jobs/{job_id}/result")
+    assert result_resp.status_code == 200
+    assert result_resp.content == b"rerendered bytes"
+
+
+def test_rerender_endpoint_404_for_unknown_job(client):
+    resp = client.post("/api/jobs/doesnotexist/rerender", json={})
+    assert resp.status_code == 404
+
+
+def test_rerender_endpoint_400_when_job_has_no_masks_yet(client, tiny_video_bytes):
+    # Upload only -- /points was never called, so there's no masks/,
+    # motion.npz, or video_meta.txt for this job yet.
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "blue"})
+
+    assert resp.status_code == 400
+    assert "masks" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("intensity", [-1.0, 1.5, 200.0])
+def test_rerender_endpoint_rejects_out_of_range_intensity(client, tiny_video_bytes, intensity):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(f"/api/jobs/{job_id}/rerender", json={"intensity": intensity})
+
+    assert resp.status_code == 400
+
+
+def test_rerender_endpoint_rejects_invalid_voice(client, tiny_video_bytes):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(f"/api/jobs/{job_id}/rerender", json={"voice": "yoda"})
+
+    assert resp.status_code == 400
+
+
+def test_rerender_endpoint_409_when_a_job_is_already_running(client, tiny_video_bytes, monkeypatch):
+    monkeypatch.setattr(server_module, "run_pipeline", _fake_run_pipeline_writing(b"first"))
+
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+    client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 1]]})
+    server_module.manager.wait(timeout=2)
+
+    monkeypatch.setattr(server_module, "require_rerenderable", lambda job_dir: None)
+
+    release = threading.Event()
+
+    def slow_rerender_pipeline(*, output_path, progress_cb, **kwargs):
+        release.wait(timeout=2)
+        with open(output_path, "wb") as f:
+            f.write(b"slow")
+        return output_path
+
+    monkeypatch.setattr(server_module, "rerender_pipeline", slow_rerender_pipeline)
+
+    first = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "blue"})
+    assert first.status_code == 200
+
+    second = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "green"})
+    assert second.status_code == 409
+
+    release.set()
+    server_module.manager.wait(timeout=2)

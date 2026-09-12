@@ -14,6 +14,9 @@
   <div id="picker-section" hidden>
     <p>Click the object to track. Shift-click to exclude a spot (e.g. a hand).</p>
     <canvas id="picker-canvas"></canvas>
+  </div>
+
+  <div id="controls-section" hidden>
     <div id="controls">
       <label>Color:
         <select id="color-select">
@@ -37,6 +40,7 @@
         Extend blade
       </label>
       <button id="submit-button" disabled>Track &amp; Render</button>
+      <button id="rerender-button" hidden>Re-render</button>
     </div>
   </div>
 
@@ -48,6 +52,8 @@
   <div id="result-section" hidden>
     <video id="result-player" controls></video>
     <a id="download-link" download="final.mp4">Download</a>
+    <p id="rerender-hint">Not the right look? Adjust color/intensity/voice above and click Re-render --
+      it reuses the tracking from this render instead of starting over.</p>
   </div>
 
   <p id="error-message" hidden></p>

@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from .. import paths
 from ..device import select_device
 from ..pipeline.frames import extract_first_frame
-from ..pipeline.runner import run_pipeline
+from ..pipeline.job_meta import JobNotRerenderableError, require_rerenderable
+from ..pipeline.runner import rerender_pipeline, run_pipeline
 from .jobs import JobManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -68,6 +69,24 @@ def get_frame0(job_id: str):
     return FileResponse(frame0_path, media_type="image/jpeg")
 
 
+def _parse_render_params(body: dict):
+    """Validate and extract color/intensity/blade_extend/voice from a
+    request body. Shared by `/points` (the first render) and `/rerender`
+    (later renders of the same job) so the two endpoints can't quietly
+    drift apart on what counts as a valid --intensity or --voice."""
+    color = body.get("color", "red")
+    intensity = float(body.get("intensity", 0.35))
+    if not 0.0 <= intensity <= 1.0:
+        raise HTTPException(status_code=400, detail="intensity must be between 0.0 and 1.0")
+    blade_extend = bool(body.get("blade_extend", True))
+    voice = body.get("voice", "neutral")
+    if voice not in VALID_VOICES:
+        raise HTTPException(
+            status_code=400, detail=f"voice must be one of {', '.join(VALID_VOICES)}"
+        )
+    return color, intensity, blade_extend, voice
+
+
 @app.post("/api/jobs/{job_id}/points")
 async def submit_points(job_id: str, body: dict):
     _validate_job_id(job_id)
@@ -87,16 +106,7 @@ async def submit_points(job_id: str, body: dict):
 
     points = [[p[0], p[1]] for p in points_and_labels]
     labels = [p[2] for p in points_and_labels]
-    color = body.get("color", "red")
-    intensity = float(body.get("intensity", 0.35))
-    if not 0.0 <= intensity <= 1.0:
-        raise HTTPException(status_code=400, detail="intensity must be between 0.0 and 1.0")
-    blade_extend = bool(body.get("blade_extend", True))
-    voice = body.get("voice", "neutral")
-    if voice not in VALID_VOICES:
-        raise HTTPException(
-            status_code=400, detail=f"voice must be one of {', '.join(VALID_VOICES)}"
-        )
+    color, intensity, blade_extend, voice = _parse_render_params(body)
 
     output_path = job_dir / "final.mp4"
     device = select_device()
@@ -110,6 +120,46 @@ async def submit_points(job_id: str, body: dict):
             job_dir=str(job_dir),
             checkpoint_path=str(paths.get_checkpoint_path()),
             device=device,
+            color=color,
+            intensity=intensity,
+            blade_extend=blade_extend,
+            voice=voice,
+            progress_cb=progress_cb,
+        )
+
+    try:
+        manager.start(job_id, pipeline_fn)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return {"status": "started"}
+
+
+@app.post("/api/jobs/{job_id}/rerender")
+async def rerender_job(job_id: str, body: dict):
+    """Re-render an existing job with a new color/intensity/voice/
+    blade_extend, reusing its cached masks instead of re-tracking. Goes
+    through the same `JobManager` (one job at a time) as `/points` --
+    rerender_pipeline() itself never calls track_object, so this can't
+    contend with anything except another render of some job."""
+    _validate_job_id(job_id)
+    job_dir = paths.get_jobs_dir() / job_id
+    if not job_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    color, intensity, blade_extend, voice = _parse_render_params(body)
+
+    try:
+        require_rerenderable(str(job_dir))
+    except JobNotRerenderableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    output_path = job_dir / "final.mp4"
+
+    def pipeline_fn(progress_cb):
+        return rerender_pipeline(
+            job_dir=str(job_dir),
+            output_path=str(output_path),
             color=color,
             intensity=intensity,
             blade_extend=blade_extend,
