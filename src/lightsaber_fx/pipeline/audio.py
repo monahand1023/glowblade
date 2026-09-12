@@ -34,6 +34,33 @@ Every oscillator here uses cumulative-phase accumulation
 (``phase = 2*pi*cumsum(f_t)/SR``) rather than a fixed ``sin(2*pi*f*t)``, so
 frequency can vary sample-to-sample without phase discontinuities -- this is
 what makes continuous Doppler modulation and drifting pitch possible at all.
+
+Design notes (B-fix: dynamic-range/HF rewrite)
+-----------------------------------------------
+The B2 mechanism above was structurally right but, measured on real
+footage, its swing barely registered against the idle bed (~1.1-1.2x RMS
+contrast, excluding the ignition/power-down transients, versus the
+ignition's own ~2-3x over idle). The dominant cause was the loudness
+mapping, not the swing-strength signal itself or the limiter: idle and the
+pitched-up swing register are similar-RMS hum textures, so a *linear*
+crossfade between them changes timbre far more than level -- worse, at the
+midpoint it actively *loses* power (energies of two decorrelated signals
+don't add coherently), fighting the token "+35% at full swing" loudness
+coefficient that was supposed to compensate. `_equal_power_crossfade`
+removes that self-inflicted loudness loss, a much larger explicit boost
+(see `synth_swing_hum`) supplies the loudness, and driving the waveshaper
+harder as swing strength rises (plus a modest swing-scaled boost to
+`synth_tv_buzz`'s mix level) adds real upper-harmonic content so a swing
+also gets *brighter*, not just louder at the same spectral shape. The
+250 ms outer (loudness/timbre) smoothing constant was also long enough to
+measurably flatten a bat swing's sub-300ms fast phase, so it's down to
+130 ms; the 50 ms inner (Doppler/register) constant was already fine.
+Separately, `_slow_drift`'s Butterworth filter was redesigned (filter at a
+low control rate, then interpolate up) after profiling showed it was
+numerically ill-conditioned at a 0.5 Hz cutoff against a 44.1 kHz rate and
+leaking real broadband noise -- quiet, but enough to swamp a naive
+spectral-centroid measurement of "did the swing get brighter" with noise
+unrelated to the swing itself.
 """
 
 import numpy as np
@@ -88,15 +115,36 @@ def _osc(freq_t, sr=SR):
 
 def _slow_drift(n, sr, rng, depth=0.5, cutoff=0.5):
     """Slow, irregular wander (Hz) from low-passed noise -- "steady yet
-    unstable, fluctuating with mechanical imperfections" (B2.2)."""
+    unstable, fluctuating with mechanical imperfections" (B2.2).
+
+    Filters at a low internal control rate rather than the full audio
+    `sr`, then interpolates up (B-fix, dynamic-range/HF rewrite). Designing
+    the Butterworth filter directly at `sr` gives a cutoff/rate ratio of
+    ~1e-5 (0.5 Hz at 44100 Hz), which is numerically ill-conditioned: the
+    SOS coefficients don't actually attenuate the stopband as intended, and
+    measurably leak broadband noise across the whole spectrum (verified:
+    roughly a third of the leaked signal's magnitude sum lands above 300
+    Hz) -- inaudible on its own, but enough to swamp any spectral-centroid
+    measurement of the hum with noise unrelated to swing brightness.
+    Filtering white noise at a low rate where `cutoff` is a sane fraction
+    of Nyquist, then `np.interp`-ing up to `sr` (the same
+    slow-signal-to-audio-rate technique `_interp_and_smooth` already uses
+    for frame data), sidesteps the ill-conditioning entirely and gives the
+    same slow wander with a clean stopband.
+    """
     if n <= 0:
         return np.zeros(0, dtype=np.float64)
-    noise = rng.standard_normal(n)
-    sos = signal.butter(2, cutoff, btype="low", fs=sr, output="sos")
-    drift = signal.sosfilt(sos, noise)
-    peak = np.max(np.abs(drift))
+    control_sr = max(cutoff * 20.0, 20.0)
+    n_slow = max(4, int(np.ceil(n / sr * control_sr)) + 1)
+    noise = rng.standard_normal(n_slow)
+    sos = signal.butter(2, cutoff, btype="low", fs=control_sr, output="sos")
+    drift_slow = signal.sosfilt(sos, noise)
+    peak = np.max(np.abs(drift_slow))
     if peak > 0:
-        drift = drift / peak
+        drift_slow = drift_slow / peak
+    slow_t = np.arange(n_slow) / control_sr
+    fast_t = np.arange(n) / sr
+    drift = np.interp(fast_t, slow_t, drift_slow)
     return drift * depth
 
 
@@ -141,12 +189,18 @@ def _time_varying_lowpass(x, fc_t, sr=SR):
 def _waveshape(x, drive):
     """Soft-clip waveshaper distortion, unity-gain-normalized at |x|=1 so
     `drive` purely controls harmonic content, not level. Used for the `sith`
-    voice's heavier distortion (B2.9)."""
-    if len(x) == 0 or drive <= 0:
+    voice's heavier distortion (B2.9), and (B-fix, dynamic-range/HF rewrite)
+    for tying a swing's harmonic brightness to its instantaneous speed:
+    `drive` may be a per-sample array as well as a scalar, so distortion
+    -- and the real upper-harmonic content it adds -- can rise and fall
+    with motion rather than being fixed per voice. `drive <= 0` still
+    degrades to (approximately) the identity, matching the old scalar
+    behaviour, via a small floor rather than a branch (needed since a
+    truth-value branch doesn't work on an array)."""
+    if len(x) == 0:
         return x
+    drive = np.maximum(np.asarray(drive, dtype=np.float64), 1e-9)
     norm = np.tanh(drive)
-    if norm <= 1e-9:
-        return x
     return np.tanh(drive * x) / norm
 
 
@@ -193,6 +247,49 @@ def _interp_and_smooth(frame_values, fps, n_samples, sr=SR, smooth_ms=60.0):
         kernel = np.ones(win, dtype=np.float64) / win
         interped = np.convolve(interped, kernel, mode="same")
     return interped
+
+
+def _equal_power_crossfade(a, b, mix):
+    """Cross-fade `a` -> `b` by `mix` in [0, 1] using an equal-power
+    (quarter-cosine) law instead of a linear `(1 - mix) * a + mix * b`
+    blend (B-fix, dynamic-range/HF rewrite).
+
+    For two decorrelated, similarly-loud signals a linear blend *loses*
+    power around the midpoint -- their energies don't add coherently, so
+    RMS dips to about 0.71x either endpoint's around `mix=0.5` -- which is
+    exactly backwards for a swing that should get louder as it crosses
+    from idle into the pitched-up register, not quieter. Equal-power
+    weights (the same cos/sin quarter circle already used for stereo pan
+    in `_apply_stereo_pan`) keep total power ~constant across the blend,
+    so the loudness change actually applied downstream comes from an
+    explicit boost, not from an accidental cancellation fighting it.
+    """
+    mix = np.clip(np.asarray(mix, dtype=np.float64), 0.0, 1.0)
+    theta = mix * (np.pi / 2.0)
+    return a * np.cos(theta) + b * np.sin(theta)
+
+
+def _swing_envelope(tip_speed_frames, angular_speed_frames, fps, n, sr=SR):
+    """Per-sample [0, 1] "how hard is this swing" track at two time
+    constants, shared by `synth_swing_hum` (hum pitch/timbre/loudness) and
+    `synthesize_audio` (TV-buzz loudness) so every swing-reactive layer
+    agrees on when a swing is happening.
+
+    - `inner` (50 ms): fast enough to track the Doppler pitch shift, the
+      low/high register blend, and instantaneous distortion drive
+      sample-to-sample.
+    - `outer` (130 ms, down from an earlier 250 ms -- B-fix,
+      dynamic-range/HF rewrite): the idle<->swing timbral/loudness
+      crossfade. A real bat swing's fast phase is only a few hundred ms
+      end to end; 250 ms of averaging measurably flattened its peak. 130
+      ms still irons out frame-to-frame jitter without eating the peak.
+    """
+    tip_norm = _normalize_speed(tip_speed_frames)
+    ang_norm = _normalize_speed(angular_speed_frames)
+    swing_frames = np.clip(np.maximum(tip_norm, ang_norm), 0.0, 1.0)
+    inner = _interp_and_smooth(swing_frames, fps, n, sr=sr, smooth_ms=50.0)
+    outer = _interp_and_smooth(swing_frames, fps, n, sr=sr, smooth_ms=130.0)
+    return inner, outer
 
 
 def _pan_positions(x_frames):
@@ -347,11 +444,29 @@ def synth_swing_hum(
       both, so a swing keeps the saber's voice rather than thinning out to
       a bare oscillator;
     - those two registers are cross-faded per-sample by a fast-smoothed
-      swing-strength track (the ProffieOS "SmoothSwing" low/high crossfade);
-    - the resulting swing tone is cross-faded against the plain idle hum by
-      a more heavily-smoothed "overall" swing strength, so a still saber
-      reads as idle hum and a fast swing reads as the pitched-up register,
-      continuously rather than via a discrete trigger.
+      swing-strength track (the ProffieOS "SmoothSwing" low/high crossfade),
+      using an equal-power law (B-fix) so the blend doesn't dip in loudness
+      partway through;
+    - the crossfaded tone is driven through the waveshaper harder as
+      instantaneous swing strength rises (B-fix, dynamic-range/HF rewrite),
+      adding real upper-harmonic energy that tracks motion -- a swing
+      should gain high-frequency content, not just get louder at the same
+      spectral shape;
+    - the resulting swing tone is cross-faded against the plain idle hum
+      (again equal-power) by a more heavily-smoothed "overall" swing
+      strength, so a still saber reads as idle hum and a fast swing reads
+      as the louder, brighter, pitched-up register, continuously rather
+      than via a discrete trigger, then an explicit loudness boost is
+      applied on top so the swing is unmistakably louder, not just
+      differently coloured.
+
+    The overall-strength crossfade previously carried *all* of the
+    loudness difference implicitly (idle and the swing register are
+    similar-RMS hum textures; cross-fading them changes timbre far more
+    than level) plus a token +35% ceiling -- together too little to read
+    as "louder" against a real swing. The equal-power crossfade plus a
+    larger, explicit boost below fix that; the drive-modulated waveshaper
+    above fixes the tone never actually brightening.
     """
     params = _voice_params(voice)
     n = _n_samples(duration, sr)
@@ -362,12 +477,9 @@ def synth_swing_hum(
     f0_idle = np.full(n, base_freq * params["pitch_mult"], dtype=np.float64)
     idle = _waveshape(_hum_core(f0_idle, params, rng_idle, sr), params["drive"] * 0.35)
 
-    tip_norm = _normalize_speed(tip_speed_frames)
-    ang_norm = _normalize_speed(angular_speed_frames)
-    swing_frames = np.clip(np.maximum(tip_norm, ang_norm), 0.0, 1.0)
-
-    swing_inner = _interp_and_smooth(swing_frames, fps, n, sr=sr, smooth_ms=50.0)
-    swing_outer = _interp_and_smooth(swing_frames, fps, n, sr=sr, smooth_ms=250.0)
+    swing_inner, swing_outer = _swing_envelope(
+        tip_speed_frames, angular_speed_frames, fps, n, sr=sr
+    )
 
     speed_factor = 1.0 + doppler_k * swing_inner  # continuous Doppler (B2.5)
     f0 = base_freq * params["pitch_mult"] * speed_factor
@@ -376,13 +488,20 @@ def synth_swing_hum(
     rng_swing = np.random.default_rng(seed + 97)
     low_register = _hum_core(f0, params, rng_swing, sr)
     high_register = _hum_core(f0 * high_mult, params, rng_swing, sr)
-    registers = low_register * (1.0 - swing_inner) + high_register * swing_inner
-    swing_tone = _waveshape(registers, params["drive"] * 0.35)
+    registers = _equal_power_crossfade(low_register, high_register, swing_inner)
 
-    hum = idle * (1.0 - swing_outer) + swing_tone * swing_outer
-    # Swings are louder as well as brighter -- amplitude follows the same
-    # "overall" strength track used for the timbral crossfade.
-    hum = hum * (1.0 + 0.35 * swing_outer)
+    # Harder drive as the swing speeds up -- real added harmonics, not
+    # just a pitch shift (B-fix).
+    swing_drive = params["drive"] * 0.35 * (1.0 + 2.6 * swing_inner)
+    swing_tone = _waveshape(registers, swing_drive)
+
+    hum = _equal_power_crossfade(idle, swing_tone, swing_outer)
+    # Swings are louder as well as brighter. +35% at full swing (the
+    # original coefficient) was barely audible on top of an equal-power
+    # crossfade that, unlike the old linear one, no longer eats into
+    # loudness on its own; +160% gets a fast swing clearly dominating the
+    # mix the way ignition already does.
+    hum = hum * (1.0 + 1.6 * swing_outer)
     return hum
 
 
@@ -513,7 +632,16 @@ def synthesize_audio(
         hum_gain[n - ramp_len:] *= ((np.arange(ramp_len) / pd_n) ** 2)[::-1]
 
     audio += hum * hum_gain
-    audio += buzz * 0.10  # low-level, per Burtt's "buzzy, sparkling" half
+    # The TV-buzz layer also leans in during a swing (B-fix,
+    # dynamic-range/HF rewrite): physically, sweeping the mic faster past
+    # the tube picks up more of its interference, and practically, buzz's
+    # energy sits squarely in 2-4 kHz -- real, easily-measured
+    # high-frequency content that reinforces both the swing's loudness and
+    # its brightness rather than sitting at a constant level that dilutes
+    # both. Kept modest (base 0.10, +40% at full swing) since it's meant
+    # to stay a low-level "sparkle", not take over from the hum.
+    _, buzz_swing_outer = _swing_envelope(t_spd, a_spd, fps, n, sr=SR)
+    audio += buzz * (0.10 * (1.0 + 0.4 * buzz_swing_outer))
 
     if ign_n:
         audio[:ign_n] += ignition * 0.85

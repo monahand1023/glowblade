@@ -252,6 +252,35 @@ def test_synthesize_audio_swing_modulation_responds_to_tip_speed(tmp_path):
     assert moving_centroid != pytest.approx(still_centroid, rel=0.02)
 
 
+def test_synthesize_audio_swing_dynamic_range_exceeds_threshold(tmp_path):
+    # Regression guard for the dynamic-range/HF rewrite: on a real 10s
+    # bat-swing render, the pre-fix mix measured only ~1.1-1.2x RMS
+    # contrast between idle and swing (excluding the ignition/power-down
+    # transients) -- a swing that should be the most dramatic thing in the
+    # clip barely registered. On this synthetic fast-translation fixture
+    # the pre-fix code (a linear idle<->swing crossfade, which *loses*
+    # power at the midpoint instead of gaining it, topped with a token
+    # "+35% at full swing" loudness coefficient) manages only ~2.1x; this
+    # asserts a substantially higher bar so that regressing back to that
+    # design -- or any other change that quietly re-flattens the swing --
+    # fails loudly here instead of only showing up as a subjective "the
+    # swing sounds subtle" complaint on real footage.
+    motion_path, meta_path = _translating_fixture(tmp_path, n_frames=90, fps=30.0)
+    out_wav = tmp_path / "out.wav"
+
+    synthesize_audio(motion_path, meta_path, str(out_wav), seed=9)
+
+    audio, sr = sf.read(str(out_wav), always_2d=True)
+    assert np.all(np.isfinite(audio))
+    assert np.max(np.abs(audio)) <= 1.0
+
+    mono = audio.mean(axis=1)
+    still = mono[int(0.6 * SR):int(1.0 * SR)]
+    moving = mono[int(1.35 * SR):int(1.75 * SR)]
+
+    assert _rms(moving) > _rms(still) * 2.5
+
+
 def test_synthesize_audio_pivot_in_place_still_produces_swing_modulation(tmp_path):
     # Centroid never moves (the old bug's blind spot); only the angle
     # sweeps. This must still produce audible swing modulation via
