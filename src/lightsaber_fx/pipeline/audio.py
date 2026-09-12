@@ -52,14 +52,20 @@ removes that self-inflicted loudness loss, a much larger explicit boost
 harder as swing strength rises (plus a modest swing-scaled boost to
 `synth_tv_buzz`'s mix level) adds real upper-harmonic content so a swing
 gains high-frequency energy rather than only being turned up. Measured on
-the synthetic fast-translation fixture, absolute swing-vs-idle band energy
-above 1.2 kHz went from 1.16x/1.28x (1.2-4 kHz / 4-12 kHz) to
-1.57x/1.75x. Note that the mix's *spectral centroid* still falls during a
-swing, before and after: the boosted fundamental grows faster than the
-upper bands, so a swing reads as louder and fuller, not thinner-and-
-sharper. That is the intended character, but it means the centroid is the
-wrong statistic to judge this by. The
-250 ms outer (loudness/timbre) smoothing constant was also long enough to
+the synthetic fast-translation fixture (same fixture/seed as
+`test_synthesize_audio_swing_dynamic_range_exceeds_threshold`), the
+swing-vs-idle energy ratio in the 1.2-4 kHz / 4-12 kHz bands went from
+1.35x/1.63x pre-fix to 2.48x/3.08x post-fix -- a real increase in high-band
+energy, not just overall level. Note that a full-mix *magnitude-weighted*
+spectral centroid (`sum(f*|X(f)|)/sum(|X(f)|)`, the convention this
+module's own tests already use) still comes out lower during a swing, both
+before and after this fix: the TV-buzz layer is broadband noise occupying
+thousands of FFT bins at 2-4 kHz, and a magnitude-*sum*-weighted centroid
+rewards bin count over energy, so buzz's mere presence dominates that
+particular statistic regardless of what the hum is doing. A power
+(mag^2)-weighted centroid, which integrates to actual signal energy per
+Parseval's theorem, is the statistic that actually tracks brightness here.
+The 250 ms outer (loudness/timbre) smoothing constant was also long enough to
 measurably flatten a bat swing's sub-300ms fast phase, so it's down to
 130 ms; the 50 ms inner (Doppler/register) constant was already fine.
 Separately, `_slow_drift`'s Butterworth filter was redesigned (filter at a
