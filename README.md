@@ -347,7 +347,7 @@ cleaning a job also makes it un-re-renderable, since it removes the masks.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                              # 129 tests
+pytest -q
 pytest tests/pipeline/test_glow.py -v  # one file
 ```
 
