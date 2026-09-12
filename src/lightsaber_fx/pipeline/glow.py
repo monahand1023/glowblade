@@ -1,7 +1,27 @@
+"""Lightsaber glow compositing (Phase B1 of the fidelity upgrade).
+
+Rewritten around Phase A's ``BladeGeometry`` contract
+(``lightsaber_fx.pipeline.blade``) and the VFX practices catalogued in
+fx-upgrade-plan.md section B1. Each helper below is labelled with the plan
+item it implements.
+
+Old behaviour this replaces: ``colored[mask > 0] = color`` traced the prop's
+exact silhouette (the "glowing bat"), core and colour blurred the same
+mask so the white core was as wide as the blade, there was no temporal
+state, compositing ran in sRGB gamma with a uint8 round-trip per layer, and
+colour washed out on bright plates because nothing pulled the plate down
+first.
+
+Renders a lossless PNG sequence instead of an OpenCV mpeg4 video (B1.10) --
+a later phase encodes it once with libx264.
+"""
+
 import os
 
 import cv2
 import numpy as np
+
+from .blade import load_motion
 
 NAMED_COLORS = {
     "red": (40, 40, 255),
@@ -22,78 +42,463 @@ def parse_color(spec):
     raise ValueError(f"Unrecognized color: {spec!r}. Use red, blue, green, or #RRGGBB.")
 
 
-def screen_blend(base, top):
-    base = base.astype(np.float32) / 255.0
-    top = top.astype(np.float32) / 255.0
-    out = 1 - (1 - base) * (1 - top)
-    return (out * 255).astype(np.uint8)
+# ---------------------------------------------------------------------------
+# B1.1 -- linear-light compositing
+# ---------------------------------------------------------------------------
+# Everything below composites in linear light: convert the plate sRGB ->
+# linear, accumulate every glow contribution additively in float32
+# (allowing values > 1), then tonemap/clip once and convert back to sRGB at
+# the very end of a frame. This replaces the old chain of three
+# `screen_blend` gamma-space passes with a uint8 round-trip between each --
+# the textbook amateur over-bloom signature.
+
+_GAMMA = 2.2
 
 
-def make_glow_layers(mask, shape, color, core_blur, inner_glow_blur, spill_blur, spill_strength):
+def _srgb_to_linear(img_u8):
+    return (img_u8.astype(np.float32) / 255.0) ** _GAMMA
+
+
+def _linear_to_srgb(img_linear):
+    x = np.clip(img_linear, 0.0, 1.0)
+    return np.clip(np.round((x ** (1.0 / _GAMMA)) * 255.0), 0, 255).astype(np.uint8)
+
+
+def _soft_tonemap(x, knee=0.85):
+    """Identity below `knee`, an exponential shoulder above it.
+
+    Plate content that no glow ever touches stays under the knee for any
+    normally-exposed footage, so it renders unchanged; only additive
+    highlights near/above white get a soft roll-off instead of a hard clip
+    (which is where banding comes from)."""
+    span = 1.0 - knee
+    shoulder = knee + span * (1.0 - np.exp(-(x - knee) / span))
+    return np.where(x > knee, shoulder, x)
+
+
+# ---------------------------------------------------------------------------
+# B1.2 -- blade reconstruction as a capsule, not the raw silhouette
+# ---------------------------------------------------------------------------
+# ILM deliberately drew blades longer than the prop with a rounded tip.
+# Rebuild the blade from BladeGeometry -- constant width, rounded tip,
+# extended past the fitted tip, tapered at the hilt end -- instead of
+# tracing the mask, which otherwise carries the prop's knob and wooden
+# taper straight through ("the glowing bat" this phase exists to fix).
+# `--no-blade-extend` (`blade_extend=False`) falls back to the raw mask.
+
+def _capsule_mask(shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac):
+    h, w = shape[:2]
+    out = np.zeros((h, w), dtype=np.uint8)
+    hilt = np.asarray(hilt, dtype=np.float64)
+    tip = np.asarray(tip, dtype=np.float64)
+    half_w = max(0.5, width / 2.0)
+
+    seg = tip - hilt
+    length = float(np.linalg.norm(seg))
+    if length < 1e-6:
+        cv2.circle(out, (round(hilt[0]), round(hilt[1])), max(1, round(half_w)), 255, -1)
+        return out
+
+    axis = seg / length
+    perp = np.array([-axis[1], axis[0]])
+    extended_tip = tip + axis * (length * extend_frac)
+    taper_len = min(length * hilt_taper_frac, length * 0.9)
+    body_start = hilt + axis * taper_len
+
+    # Constant-width body between the (tapered) hilt end and the extended tip.
+    body = np.array([
+        body_start + perp * half_w,
+        extended_tip + perp * half_w,
+        extended_tip - perp * half_w,
+        body_start - perp * half_w,
+    ])
+    cv2.fillConvexPoly(out, np.round(body).astype(np.int32), 255)
+
+    # Rounded tip cap.
+    tip_pt = (round(extended_tip[0]), round(extended_tip[1]))
+    cv2.circle(out, tip_pt, max(1, round(half_w)), 255, -1)
+
+    # Tapered (not hard-cut) hilt wedge, narrowing towards the hilt point.
+    hilt_half_w = half_w * hilt_taper_min_frac
+    wedge = np.array([
+        hilt + perp * hilt_half_w,
+        body_start + perp * half_w,
+        body_start - perp * half_w,
+        hilt - perp * hilt_half_w,
+    ])
+    cv2.fillConvexPoly(out, np.round(wedge).astype(np.int32), 255)
+
+    return out
+
+
+def _build_blade_shape(mask, frame_shape, tip, hilt, width, blade_extend,
+                        extend_frac, hilt_taper_frac, hilt_taper_min_frac):
+    have_geometry = (
+        blade_extend
+        and tip is not None and hilt is not None
+        and not (np.any(np.isnan(tip)) or np.any(np.isnan(hilt)))
+    )
+    if have_geometry:
+        return _capsule_mask(frame_shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac)
+
     mask_u8 = mask.astype(np.uint8) * 255
-    mask_u8 = cv2.resize(mask_u8, (shape[1], shape[0]))
+    if mask_u8.shape[:2] != tuple(frame_shape[:2]):
+        mask_u8 = cv2.resize(mask_u8, (frame_shape[1], frame_shape[0]), interpolation=cv2.INTER_NEAREST)
+    return mask_u8
 
-    core = cv2.GaussianBlur(mask_u8, (0, 0), core_blur)
-    core_bgr = cv2.merge([core, core, core])
 
-    colored = np.zeros((*shape[:2], 3), dtype=np.uint8)
-    colored[mask_u8 > 0] = color
-    inner = cv2.GaussianBlur(colored, (0, 0), inner_glow_blur)
+def _stabilize_tip_hilt(tip, hilt, axis):
+    """Continuity-correct the per-frame tip/hilt/axis sequence.
 
-    spill = cv2.GaussianBlur(colored, (0, 0), spill_blur)
-    spill = (spill.astype(np.float32) * spill_strength).astype(np.uint8)
+    Phase A's tip/hilt call (`classify_tip_by_taper`) is a single-frame
+    heuristic with no memory of its own: near a symmetric taper, it can
+    flip which end is "tip" between adjacent frames that barely moved.
+    Uncorrected, that would make the capsule's rounded cap -- and B1.7's
+    velocity vector, which is read off `tip` frame-to-frame -- jump ~180
+    degrees for no physical reason. Fix it once here by flipping a frame's
+    labeling whenever its axis points opposite the previous valid frame's.
+    """
+    tip = tip.copy()
+    hilt = hilt.copy()
+    axis = axis.copy()
+    prev = None
+    for i in range(len(axis)):
+        a = axis[i]
+        if np.any(np.isnan(a)):
+            continue
+        if prev is not None and np.dot(a, prev) < 0:
+            axis[i] = -a
+            tip[i], hilt[i] = hilt[i].copy(), tip[i].copy()
+        prev = axis[i]
+    return tip, hilt, axis
 
-    return core_bgr, inner, spill
+
+# ---------------------------------------------------------------------------
+# B1.3 -- three distinct elements, with an eroded core
+# ---------------------------------------------------------------------------
+# core: eroded, pure white, tight blur -- must be narrower than the blade.
+# colour band: blade width, the chosen colour, blurred just enough to soften
+# the capsule edge. The wide, coloured "glow" element is B1.4 below.
+
+def _make_core(blade01, kernel, blur_sigma):
+    eroded = cv2.erode(blade01, kernel) if kernel is not None else blade01
+    return cv2.GaussianBlur(eroded, (0, 0), blur_sigma)
+
+
+def _make_colour_band(blade01, blur_sigma):
+    return cv2.GaussianBlur(blade01, (0, 0), blur_sigma)
+
+
+# ---------------------------------------------------------------------------
+# B1.4 -- exponential falloff via stacked, level-crushed gaussians
+# B1.8 -- chromatic bloom (slightly different per-channel radii) folded in
+# ---------------------------------------------------------------------------
+# Blur at 0.5x/1x/2x blade width, weight the scales so the falloff is
+# exponential (w_i ~ exp(-r_i / tau)) rather than linear, and crush levels
+# after blurring (clip(blurred * k, 0, 1)) then re-blur -- the crush is
+# what turns a soft gaussian into a steep-edged broad halo.
+
+def _make_wide_glow(blade01, width, color_lin, scales, tau, crush, chroma_frac):
+    h, w = blade01.shape
+    acc = np.zeros((h, w, 3), dtype=np.float32)
+    weights = np.exp(-np.asarray(scales, dtype=np.float32) / max(tau, 1e-6))
+    weights = weights / weights.sum()
+    # Per-channel radius offset (+-chroma_frac) breaks the "too uniform"
+    # look of a spatially identical bloom on every channel.
+    chroma = np.array([1.0 - chroma_frac, 1.0, 1.0 + chroma_frac], dtype=np.float32)
+    base = max(1.0, width)
+    for scale, weight in zip(scales, weights):
+        for c in range(3):
+            sigma = max(0.8, base * scale * chroma[c])
+            blurred = cv2.GaussianBlur(blade01, (0, 0), sigma)
+            crushed = np.clip(blurred * crush, 0.0, 1.0)
+            level = cv2.GaussianBlur(crushed, (0, 0), max(0.6, sigma * 0.6))
+            acc[..., c] += weight * level * color_lin[c]
+    return acc
+
+
+# ---------------------------------------------------------------------------
+# B1.5 -- darken the plate before adding colour (Knoll)
+# ---------------------------------------------------------------------------
+# "On bright backgrounds you don't get any colour, because you're already
+# so close to being white" -- John Knoll. This is specifically why a
+# blue-on-sky render used to read white. Exposed as a standalone function
+# so the darkening step is directly testable in isolation.
+
+def knoll_darken(plate_linear, blade_u8, dilate_px, darken_factor, feather_sigma, dilate_kernel=None):
+    """Multiply `plate_linear` by `darken_factor` inside a dilated,
+    feathered region around `blade_u8`. Returns (darkened_plate,
+    feathered_mask float32 0..1). `dilate_kernel`, if given, is used
+    instead of building one from `dilate_px` (callers processing many
+    frames should precompute and reuse one kernel)."""
+    if dilate_kernel is None and dilate_px > 0:
+        dilate_kernel = np.ones((dilate_px, dilate_px), np.uint8)
+    dilated = cv2.dilate(blade_u8, dilate_kernel) if dilate_kernel is not None else blade_u8
+    feathered = cv2.GaussianBlur(dilated.astype(np.float32) / 255.0, (0, 0), feather_sigma)
+    feathered = np.clip(feathered, 0.0, 1.0)
+    factor = 1.0 - feathered[..., None] * (1.0 - darken_factor)
+    return plate_linear * factor, feathered
+
+
+# ---------------------------------------------------------------------------
+# B1.6 -- temporal motion trail (state carried across frames in render_glow)
+# ---------------------------------------------------------------------------
+# trail = max(trail * decay, glow) each frame, composited under the
+# current frame's own core/colour/glow. Because max() never lets a decayed
+# old value beat a fresh one, using `trail` as the sole glow contribution
+# for the frame already gives exactly that "current frame on top, faded
+# ghosts underneath" result with no extra layering step.
+
+
+# ---------------------------------------------------------------------------
+# B1.7 -- directional motion blur along the velocity vector
+# ---------------------------------------------------------------------------
+# A line kernel oriented along the blade's frame-to-frame tip displacement,
+# length proportional to speed, applied via cv2.filter2D to the glow layers
+# only -- never the plate.
+
+def _directional_kernel(velocity, gain, max_len):
+    speed = float(np.hypot(velocity[0], velocity[1]))
+    if speed < 1e-3:
+        return None
+    length = int(np.clip(round(speed * gain), 1, max_len))
+    if length < 2:
+        return None
+    direction = np.array(velocity, dtype=np.float32) / speed
+    size = length * 2 + 1
+    kernel = np.zeros((size, size), dtype=np.float32)
+    center = length
+    p1 = (center - direction[0] * length, center - direction[1] * length)
+    p2 = (center + direction[0] * length, center + direction[1] * length)
+    cv2.line(kernel, (round(p1[0]), round(p1[1])), (round(p2[0]), round(p2[1])), 1.0, 1)
+    total = kernel.sum()
+    if total <= 0:
+        return None
+    return kernel / total
+
+
+# ---------------------------------------------------------------------------
+# B1.9 -- light wrap (approximate, lowest priority)
+# ---------------------------------------------------------------------------
+# Blur the glow wide and multiply by a thin ring just outside the blade so
+# nearby surfaces pick up a hint of colour. Honesty note: a proper light
+# wrap needs a matte of the subjects next to the blade, which we don't
+# have, and no amount of 2D blending can change which direction the light
+# actually falls from -- this only adds a plausible colour bleed
+# immediately around the blade's own silhouette edge.
+
+def _light_wrap(blade_u8, color_lin, dilate_kernel, blur_sigma, strength):
+    dilated = cv2.dilate(blade_u8, dilate_kernel)
+    ring = cv2.subtract(dilated, blade_u8).astype(np.float32) / 255.0
+    ring = cv2.GaussianBlur(ring, (0, 0), blur_sigma)
+    out = np.empty((*ring.shape, 3), dtype=np.float32)
+    for c in range(3):
+        out[..., c] = ring * (color_lin[c] * strength)
+    return out
+
+
+def _robust_median(arr, default):
+    """np.nanmedian, but returns `default` (silently, no RuntimeWarning)
+    instead of NaN when every entry is NaN or the array is empty."""
+    arr = np.asarray(arr, dtype=np.float64).ravel()
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return default
+    return float(np.median(finite))
 
 
 def render_glow(
     frames_dir,
     masks_dir,
     video_meta_path,
-    output_video_path,
-    motion_out_path,
+    output_frames_dir,
+    motion_path,
     color=(40, 40, 255),
-    core_blur=5,
-    inner_glow_blur=25,
-    spill_blur=95,
     spill_strength=0.35,
+    blade_extend=True,
+    # B1.2 capsule shape
+    tip_extend_frac=0.10,
+    hilt_taper_frac=0.12,
+    hilt_taper_min_frac=0.35,
+    # B1.3 core / colour band
+    core_erode_frac=0.45,
+    core_blur_frac=0.18,
+    colour_blur_frac=0.35,
+    # B1.4 wide glow, exponential falloff
+    glow_scales=(0.5, 1.0, 2.0),
+    glow_falloff_tau=1.0,
+    glow_crush=4.0,
+    # B1.5 Knoll darken
+    knoll_darken_factor=0.7,
+    knoll_dilate_frac=1.5,
+    knoll_feather_frac=0.8,
+    # B1.6 trail
+    trail_decay=0.7,
+    # B1.7 directional motion blur
+    motion_blur_gain=0.6,
+    motion_blur_max_len=40,
+    # B1.8 chromatic bloom + flicker
+    chromatic_bloom_frac=0.10,
+    flicker_strength=0.04,
+    rng_seed=12345,
+    # B1.9 light wrap
+    light_wrap_strength=0.15,
+    light_wrap_dilate_frac=1.5,
     progress_cb=None,
 ):
+    """Render the glow for every tracked frame as a lossless PNG sequence
+    (B1.10) into `output_frames_dir`, named ``{idx:05d}.png``.
+
+    Reads blade geometry from `motion_path` (see
+    ``lightsaber_fx.pipeline.blade.load_motion``) instead of writing a
+    centroid track -- motion is now produced upstream by the "motion"
+    pipeline stage. Each numbered step below is documented against
+    fx-upgrade-plan.md section B1.
+    """
     def report(pct, message):
         if progress_cb:
             progress_cb(pct, message)
 
+    os.makedirs(output_frames_dir, exist_ok=True)
+
     frame_files = sorted(f for f in os.listdir(frames_dir) if f.endswith(".jpg"))
     with open(video_meta_path) as f:
-        fps = float(f.readline())
+        f.readline()  # fps: not needed for per-frame compositing math, read for parity/validation
+
+    motion = load_motion(motion_path)
+    tip_arr = np.asarray(motion.get("tip", np.zeros((0, 2))), dtype=np.float64)
+    hilt_arr = np.asarray(motion.get("hilt", np.zeros((0, 2))), dtype=np.float64)
+    axis_arr = np.asarray(motion.get("axis", np.zeros((0, 2))), dtype=np.float64)
+    width_arr = np.asarray(motion.get("width", np.zeros(0)), dtype=np.float64)
+    length_arr = np.asarray(motion.get("length", np.zeros(0)), dtype=np.float64)
+
+    # Sign-continuity fix (see _stabilize_tip_hilt) -- do this before
+    # anything reads tip/hilt/axis, since both the capsule and the B1.7
+    # velocity vector depend on a stable tip/hilt labeling.
+    tip_arr, hilt_arr, axis_arr = _stabilize_tip_hilt(tip_arr, hilt_arr, axis_arr)
+
+    velocity = np.zeros_like(tip_arr)
+    if len(tip_arr) > 1:
+        velocity[1:] = np.diff(tip_arr, axis=0)
+    velocity = np.nan_to_num(velocity, nan=0.0)
+
+    # Blade width/length are pinned to the clip's median (not read per
+    # frame) so blur sigmas and kernels below can be built once, outside
+    # the frame loop, instead of being recomputed every frame from a
+    # fluctuating per-frame estimate.
+    canonical_width = _robust_median(width_arr, default=6.0)
+    if canonical_width <= 0:
+        canonical_width = 6.0
+    canonical_length = _robust_median(length_arr, default=canonical_width * 4.0)
+    if canonical_length <= 0:
+        canonical_length = canonical_width * 4.0
+
+    color_lin = (np.asarray(color, dtype=np.float32) / 255.0) ** _GAMMA
 
     first = cv2.imread(os.path.join(frames_dir, frame_files[0]))
     h, w = first.shape[:2]
-    writer = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
-    centroids = []
+    core_erode_px = max(1, round(canonical_width * core_erode_frac))
+    core_erode_kernel = np.ones((core_erode_px, core_erode_px), np.uint8)
+    core_sigma = max(0.6, canonical_width * core_blur_frac)
+    colour_sigma = max(0.6, canonical_width * colour_blur_frac)
+
+    knoll_dilate_px = max(1, round(canonical_width * knoll_dilate_frac))
+    knoll_dilate_kernel = np.ones((knoll_dilate_px, knoll_dilate_px), np.uint8)
+    knoll_feather_sigma = max(1.0, canonical_width * knoll_feather_frac)
+
+    wrap_dilate_px = max(1, round(canonical_width * light_wrap_dilate_frac))
+    wrap_dilate_kernel = np.ones((wrap_dilate_px, wrap_dilate_px), np.uint8)
+    wrap_blur_sigma = max(1.0, canonical_width)
+
+    # Bounding-box margin (constant, computed once): large enough that the
+    # widest glow blur, its crush re-blur, the directional-blur kernel, and
+    # the tip extension are never truncated by the crop -- a clipped glow
+    # would be a visible bug, not just a missed optimisation.
+    max_scale = max(glow_scales) * (1.0 + chromatic_bloom_frac)
+    blur_reach = int(np.ceil(canonical_width * max_scale * 3.5))
+    extend_reach = int(np.ceil(canonical_length * tip_extend_frac))
+    bbox_margin = blur_reach + motion_blur_max_len + extend_reach + 5
+
+    rng = np.random.default_rng(rng_seed)
+    trail = np.zeros((h, w, 3), dtype=np.float32)
+
+    n_motion = len(tip_arr)
     total = len(frame_files)
+
     for n, fname in enumerate(frame_files):
         idx = int(os.path.splitext(fname)[0])
         frame = cv2.imread(os.path.join(frames_dir, fname))
         mask_path = os.path.join(masks_dir, f"{idx:05d}.npy")
+        mask = np.load(mask_path) if os.path.exists(mask_path) else None
+        has_mask = mask is not None and mask.any()
 
-        if os.path.exists(mask_path):
-            mask = np.load(mask_path)
-            ys, xs = np.where(mask)
-            centroids.append((xs.mean(), ys.mean()) if len(xs) else (np.nan, np.nan))
-            core, inner, spill = make_glow_layers(
-                mask, frame.shape, color, core_blur, inner_glow_blur, spill_blur, spill_strength
+        plate_lin = _srgb_to_linear(frame)
+        full_fx = np.zeros((h, w, 3), dtype=np.float32)
+        blade_u8 = np.zeros((h, w), dtype=np.uint8)
+
+        if has_mask:
+            row = n if n < n_motion else None
+            tip_i = tip_arr[row] if row is not None else None
+            hilt_i = hilt_arr[row] if row is not None else None
+
+            blade_u8 = _build_blade_shape(
+                mask, frame.shape, tip_i, hilt_i, canonical_width, blade_extend,
+                tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
             )
-            out = screen_blend(frame, spill)
-            out = screen_blend(out, inner)
-            out = screen_blend(out, core)
-        else:
-            centroids.append((np.nan, np.nan))
-            out = frame
+            ys, xs = np.nonzero(blade_u8)
 
-        writer.write(out)
+            if len(xs):
+                # B1.2/B1.3/B1.4/B1.7 -- confined to a box around the
+                # blade (plus margin) rather than the whole frame; this is
+                # the expensive part (up to 18 Gaussian blurs/frame).
+                x0 = max(0, int(xs.min()) - bbox_margin)
+                y0 = max(0, int(ys.min()) - bbox_margin)
+                x1 = min(w, int(xs.max()) + bbox_margin + 1)
+                y1 = min(h, int(ys.max()) + bbox_margin + 1)
+
+                blade01_local = blade_u8[y0:y1, x0:x1].astype(np.float32) / 255.0
+
+                core_local = _make_core(blade01_local, core_erode_kernel, core_sigma)
+                colour_local = _make_colour_band(blade01_local, colour_sigma)
+                glow_local = _make_wide_glow(
+                    blade01_local, canonical_width, color_lin,
+                    glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
+                ) * spill_strength
+
+                fx_local = np.repeat(core_local[..., None], 3, axis=2)
+                fx_local += colour_local[..., None] * color_lin[None, None, :]
+                fx_local += glow_local
+
+                vel_i = velocity[row] if row is not None else np.zeros(2)
+                kernel = _directional_kernel(vel_i, motion_blur_gain, motion_blur_max_len)
+                if kernel is not None:
+                    fx_local = cv2.filter2D(fx_local, -1, kernel)
+
+                full_fx[y0:y1, x0:x1] = fx_local
+
+        # B1.6 -- decay always runs (even on a no-mask frame), so a trail
+        # left behind by a lost-then-reacquired blade fades out normally
+        # instead of freezing.
+        trail = np.maximum(trail * trail_decay, full_fx)
+
+        # B1.5 -- darken before colour is added.
+        darkened_plate, _ = knoll_darken(
+            plate_lin, blade_u8, knoll_dilate_px, knoll_darken_factor, knoll_feather_sigma,
+            dilate_kernel=knoll_dilate_kernel,
+        )
+        # B1.9 -- approximate light wrap.
+        wrap = _light_wrap(blade_u8, color_lin, wrap_dilate_kernel, wrap_blur_sigma, light_wrap_strength)
+
+        # B1.8 -- per-frame intensity flicker (seeded, reproducible).
+        jitter = 1.0 + float(rng.uniform(-flicker_strength, flicker_strength))
+
+        combined = darkened_plate + (trail + wrap) * jitter
+        combined = _soft_tonemap(combined)
+        out = _linear_to_srgb(combined)
+
+        cv2.imwrite(
+            os.path.join(output_frames_dir, f"{idx:05d}.png"),
+            out, [int(cv2.IMWRITE_PNG_COMPRESSION), 3],
+        )
         report((n + 1) / total * 100, f"frame {n + 1}/{total}")
-
-    writer.release()
-    np.save(motion_out_path, np.array(centroids))
