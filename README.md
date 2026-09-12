@@ -8,7 +8,8 @@ No tape markers, no green screen, no frame-by-frame painting. It finds the
 swung object by itself and shows you what it found;
 [SAM2](https://github.com/facebookresearch/sam2) tracks it through the rest of
 the clip, and the glow, the light it spills onto nearby surfaces, and the audio
-are all generated from that tracking data. If it guesses wrong, one click
+are all generated from that tracking data. If it guesses wrong — or declines to
+guess, which it does rather than propose something it isn't sure of — one click
 overrides it.
 
 The audio is synthesized from scratch — layered sines and shaped noise — so
@@ -88,14 +89,49 @@ pytest -q                # the SAM2 tracking test is skipped if setup hasn't run
 The tracker follows one object all the way through, so the clips that work
 best are the ones where that object stays distinguishable:
 
+- **One straight object.** This is the biggest constraint, and it is
+  structural rather than a tuning problem. The blade is rebuilt as a capsule
+  along a single fitted axis, which is exactly right for a bat, a broom, a
+  stick or a sword — all genuinely one axis. It is wrong for anything
+  L-shaped. A golf club is a shaft with a head roughly perpendicular to it,
+  so fitting one axis to that mask returns a direction the club doesn't
+  actually have, and the blade reads as a streak crossing the club rather
+  than lying along it. See the tested-clips table below: everything with one
+  real axis works, and the golf club is the only thing that doesn't.
 - **Short.** Start with 2–10 seconds. Runtime scales with frame count, and
   you'll want to iterate.
 - **Good contrast** between the object and what's behind it. A bat against open
   sky is ideal; a brown stick against a brown fence is the hard case.
+- **Big enough in frame.** A thin object in a wide shot is hard for automatic
+  detection and hard for the tracker. On a sword-demonstration clip shot wide,
+  with two figures and a busy background, detection declines to guess and asks
+  you to click.
 - **Not too fast.** Heavy motion blur can smear the object badly enough that
-  the mask drifts partway through. Slow-motion footage is excellent.
+  the mask collapses partway through. On a full-speed baseball swing the mask
+  shrinks to a fraction of its usual size at the fastest frames and the blade
+  briefly smears. Slow-motion footage is excellent.
 - **Object stays in frame.** If it leaves the edge and comes back, the mask may
-  not recover.
+  not recover. A tight close-up where the object swings in and out of shot
+  will flicker — on one golf clip 34 of 120 frames had no object in them at
+  all, which is the footage, not a failure.
+
+### What it has actually been tested on
+
+Five clips, all rendered end to end. "Auto" is whether detection proposed the
+right object without being clicked; "masks" is how many frames the tracker
+held the object for.
+
+| Clip | Auto | Masks | Render |
+|---|---|---|---|
+| Baseball bat, 2 s, 640×360 | yes | 60/60 | good |
+| Baseball bat, 10 s, 1280×720 | yes | 300/300 | good, except the mask collapses at the fastest frames of the swing |
+| Broom, indoor, 4 s | yes | 96/96 | good |
+| Sword demonstration, wide shot, 4 s | **no** — declines, so you click | 89/100 | good; the tracker holds a small object (median mask 748 px) fine once pointed at it |
+| Golf club, close-up, 4 s | yes | 86/120 | **half** — lands on the club, but the blade axis is unstable because a club is L-shaped, and the club leaves this tight frame for 34 frames |
+
+The honest summary: the effect is good on anything that is genuinely one
+straight object, automatic detection handles four of the five, and it declines
+rather than guessing wrong on the hard one.
 
 ### Your first render: the browser app
 
