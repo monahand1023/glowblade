@@ -51,7 +51,14 @@ removes that self-inflicted loudness loss, a much larger explicit boost
 (see `synth_swing_hum`) supplies the loudness, and driving the waveshaper
 harder as swing strength rises (plus a modest swing-scaled boost to
 `synth_tv_buzz`'s mix level) adds real upper-harmonic content so a swing
-also gets *brighter*, not just louder at the same spectral shape. The
+gains high-frequency energy rather than only being turned up. Measured on
+the synthetic fast-translation fixture, absolute swing-vs-idle band energy
+above 1.2 kHz went from 1.16x/1.28x (1.2-4 kHz / 4-12 kHz) to
+1.57x/1.75x. Note that the mix's *spectral centroid* still falls during a
+swing, before and after: the boosted fundamental grows faster than the
+upper bands, so a swing reads as louder and fuller, not thinner-and-
+sharper. That is the intended character, but it means the centroid is the
+wrong statistic to judge this by. The
 250 ms outer (loudness/timbre) smoothing constant was also long enough to
 measurably flatten a bat swing's sub-300ms fast phase, so it's down to
 130 ms; the 50 ms inner (Doppler/register) constant was already fine.
