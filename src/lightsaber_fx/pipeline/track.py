@@ -52,6 +52,11 @@ def track_object(
         if progress_cb:
             progress_cb(pct, message)
 
+    # NOTE: torch is already imported by this point (device.py imports it earlier
+    # in the process), so this assignment is plausibly a no-op -- PYTORCH_ENABLE_MPS_FALLBACK
+    # is normally read by torch at import time. Inherited from the original script;
+    # a real MPS render has been verified working with this ordering, so it is left
+    # as-is (known, unverified whether it does anything) rather than moved.
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
     from sam2.build_sam import build_sam2_video_predictor
