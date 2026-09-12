@@ -21,7 +21,7 @@ import os
 import cv2
 import numpy as np
 
-from .blade import load_motion
+from .blade import load_mask_optional, load_motion
 
 NAMED_COLORS = {
     "red": (40, 40, 255),
@@ -429,8 +429,7 @@ def render_glow(
     for n, fname in enumerate(frame_files):
         idx = int(os.path.splitext(fname)[0])
         frame = cv2.imread(os.path.join(frames_dir, fname))
-        mask_path = os.path.join(masks_dir, f"{idx:05d}.npy")
-        mask = np.load(mask_path) if os.path.exists(mask_path) else None
+        mask = load_mask_optional(masks_dir, idx)
         has_mask = mask is not None and mask.any()
 
         plate_lin = _srgb_to_linear(frame)

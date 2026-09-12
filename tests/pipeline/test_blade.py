@@ -7,7 +7,11 @@ from lightsaber_fx.pipeline.blade import (
     classify_tip_by_taper,
     compute_motion,
     fit_blade,
+    load_mask,
+    load_mask_optional,
     load_motion,
+    mask_frame_indices,
+    save_mask,
     save_motion,
     tip_speed,
     wrap_axis_angle_delta,
@@ -166,6 +170,140 @@ def test_wrap_axis_angle_delta_handles_array():
 
 
 # ---------------------------------------------------------------------------
+# save_mask / load_mask -- per-frame mask I/O (compressed .npz, with a
+# fallback that reads the legacy uncompressed .npy format track_object used
+# to write). track.py, blade.py's own compute_motion, and glow.py's
+# render_glow all go through these instead of open-coding np.save/np.load.
+# ---------------------------------------------------------------------------
+
+def test_save_mask_and_load_mask_roundtrip_preserves_dtype_and_values(tmp_path):
+    masks_dir = tmp_path / "masks"
+    mask = np.zeros((48, 64), dtype=bool)
+    mask[10:16, 5:55] = True
+
+    save_mask(str(masks_dir), 3, mask)
+    loaded = load_mask(str(masks_dir), 3)
+
+    assert loaded.dtype == mask.dtype
+    assert loaded.shape == mask.shape
+    assert np.array_equal(loaded, mask)
+
+
+def test_save_mask_and_load_mask_roundtrip_all_false(tmp_path):
+    masks_dir = tmp_path / "masks"
+    mask = np.zeros((48, 64), dtype=bool)
+
+    save_mask(str(masks_dir), 0, mask)
+    loaded = load_mask(str(masks_dir), 0)
+
+    assert loaded.dtype == bool
+    assert not loaded.any()
+    assert np.array_equal(loaded, mask)
+
+
+def test_save_mask_and_load_mask_roundtrip_all_true(tmp_path):
+    masks_dir = tmp_path / "masks"
+    mask = np.ones((48, 64), dtype=bool)
+
+    save_mask(str(masks_dir), 0, mask)
+    loaded = load_mask(str(masks_dir), 0)
+
+    assert loaded.dtype == bool
+    assert loaded.all()
+    assert np.array_equal(loaded, mask)
+
+
+def test_save_mask_creates_masks_dir_if_missing(tmp_path):
+    masks_dir = tmp_path / "does_not_exist_yet"
+    mask = np.zeros((10, 10), dtype=bool)
+    save_mask(str(masks_dir), 0, mask)
+    assert masks_dir.exists()
+    assert (masks_dir / "00000.npz").exists()
+
+
+def test_load_mask_reads_legacy_npy_format(tmp_path):
+    # A job dir written before compression was added has raw .npy masks.
+    # load_mask must read those transparently rather than failing.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    mask = np.zeros((20, 30), dtype=bool)
+    mask[5:10, 5:10] = True
+    np.save(masks_dir / "00007.npy", mask)  # legacy format, written directly
+
+    loaded = load_mask(str(masks_dir), 7)
+
+    assert loaded.dtype == bool
+    assert np.array_equal(loaded, mask)
+
+
+def test_load_mask_raises_when_frame_missing(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    with pytest.raises(FileNotFoundError):
+        load_mask(str(masks_dir), 0)
+
+
+def test_load_mask_optional_returns_none_when_frame_missing(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    assert load_mask_optional(str(masks_dir), 0) is None
+
+
+def test_load_mask_optional_returns_mask_when_present(tmp_path):
+    masks_dir = tmp_path / "masks"
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:5, 2:5] = True
+    save_mask(str(masks_dir), 0, mask)
+    loaded = load_mask_optional(str(masks_dir), 0)
+    assert np.array_equal(loaded, mask)
+
+
+def test_save_mask_never_writes_legacy_npy(tmp_path):
+    masks_dir = tmp_path / "masks"
+    mask = np.zeros((10, 10), dtype=bool)
+    save_mask(str(masks_dir), 0, mask)
+    assert not (masks_dir / "00000.npy").exists()
+    assert (masks_dir / "00000.npz").exists()
+
+
+def test_mask_frame_indices_sorted_numerically_and_mixed_formats(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    save_mask(str(masks_dir), 10, np.zeros((5, 5), dtype=bool))
+    save_mask(str(masks_dir), 2, np.zeros((5, 5), dtype=bool))
+    np.save(masks_dir / "00005.npy", np.zeros((5, 5), dtype=bool))  # legacy sibling
+
+    assert mask_frame_indices(str(masks_dir)) == [2, 5, 10]
+
+
+def test_save_mask_compressed_is_dramatically_smaller_than_raw_for_sparse_mask(tmp_path):
+    # The whole point of this change: a sparse, blade-shaped mask (thin
+    # diagonal band, small fraction of the frame) compresses far better
+    # than plain np.save. Assert a conservative ratio (real measurements on
+    # a representative blade mask were ~350x-470x -- see fx-wave2-plan.md)
+    # so this documents the intent without being brittle to numpy-version
+    # compression differences.
+    height, width = 1080, 1920
+    mask = np.zeros((height, width), dtype=bool)
+    # A thin diagonal-ish band, roughly a couple percent of the frame.
+    for y in range(height):
+        x0 = int(y * 0.3)
+        mask[y, x0:x0 + 25] = True
+
+    masks_dir = tmp_path / "masks"
+    save_mask(str(masks_dir), 0, mask)
+    compressed_size = (masks_dir / "00000.npz").stat().st_size
+
+    raw_path = tmp_path / "raw.npy"
+    np.save(raw_path, mask)
+    raw_size = raw_path.stat().st_size
+
+    assert compressed_size * 20 < raw_size, (
+        f"expected >20x compression, got raw={raw_size} compressed={compressed_size}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # compute_motion -- the "motion" pipeline stage: reads masks, writes motion.npz
 # ---------------------------------------------------------------------------
 
@@ -176,7 +314,7 @@ def test_compute_motion_writes_npz_for_every_mask_file(tmp_path):
     for idx in range(n_frames):
         mask = np.zeros((48, 64), dtype=bool)
         mask[10:16, 5:55] = True
-        np.save(masks_dir / f"{idx:05d}.npy", mask)
+        save_mask(str(masks_dir), idx, mask)
     motion_path = tmp_path / "motion.npz"
     progress_calls = []
 
@@ -195,10 +333,10 @@ def test_compute_motion_writes_npz_for_every_mask_file(tmp_path):
 def test_compute_motion_empty_mask_yields_nan_row(tmp_path):
     masks_dir = tmp_path / "masks"
     masks_dir.mkdir()
-    np.save(masks_dir / "00000.npy", np.zeros((48, 64), dtype=bool))  # object lost
+    save_mask(str(masks_dir), 0, np.zeros((48, 64), dtype=bool))  # object lost
     present = np.zeros((48, 64), dtype=bool)
     present[10:16, 5:55] = True
-    np.save(masks_dir / "00001.npy", present)
+    save_mask(str(masks_dir), 1, present)
     motion_path = tmp_path / "motion.npz"
 
     compute_motion(str(masks_dir), str(motion_path))
@@ -207,6 +345,27 @@ def test_compute_motion_empty_mask_yields_nan_row(tmp_path):
     assert np.isnan(motion["length"][0])
     assert np.all(np.isnan(motion["tip"][0]))
     assert not np.isnan(motion["length"][1])
+
+
+def test_compute_motion_reads_legacy_npy_masks(tmp_path):
+    # A job directory written before compression was added has masks in the
+    # old, uncompressed `.npy` format. compute_motion must still read them
+    # via the loader's fallback rather than silently finding nothing or
+    # failing obscurely.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    n_frames = 3
+    for idx in range(n_frames):
+        mask = np.zeros((48, 64), dtype=bool)
+        mask[10:16, 5:55] = True
+        np.save(masks_dir / f"{idx:05d}.npy", mask)  # legacy format, written directly
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+
+    motion = load_motion(str(motion_path))
+    assert motion["length"].shape == (n_frames,)
+    assert not np.any(np.isnan(motion["length"]))
 
 
 def test_compute_motion_no_masks_writes_empty_arrays(tmp_path):
@@ -304,7 +463,7 @@ def _swing_sequence(base_mask, n_frames=10, max_angle_deg=80.0):
 
 def _write_masks(masks_dir, masks):
     for i, mask in enumerate(masks):
-        np.save(masks_dir / f"{i:05d}.npy", mask)
+        save_mask(str(masks_dir), i, mask)
 
 
 def _dist(p, q):

@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from lightsaber_fx import paths
+from lightsaber_fx.pipeline.blade import load_mask
 from lightsaber_fx.pipeline.track import pick_points_interactive, track_object
 
 requires_sam2_checkpoint = pytest.mark.skipif(
@@ -64,7 +65,7 @@ def test_track_object_writes_a_mask_per_frame(tmp_path):
     )
 
     written = sorted(os.listdir(masks_dir))
-    assert written == [f"{i:05d}.npy" for i in range(n_frames)]
-    for fname in written:
-        mask = np.load(masks_dir / fname)
+    assert written == [f"{i:05d}.npz" for i in range(n_frames)]
+    for i in range(n_frames):
+        mask = load_mask(str(masks_dir), i)
         assert mask.any()

@@ -3,6 +3,8 @@ import os
 import cv2
 import numpy as np
 
+from .blade import save_mask
+
 
 def pick_points_interactive(first_frame_path):
     points, labels = [], []
@@ -74,5 +76,5 @@ def track_object(
     os.makedirs(masks_dir, exist_ok=True)
     for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
         mask = (mask_logits[0] > 0.0).cpu().numpy().squeeze()
-        np.save(os.path.join(masks_dir, f"{frame_idx:05d}.npy"), mask)
+        save_mask(masks_dir, frame_idx, mask)
         report((frame_idx + 1) / n_frames * 100, f"frame {frame_idx + 1}/{n_frames}")

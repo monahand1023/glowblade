@@ -328,6 +328,97 @@ def _orient_by_motion(geometries):
     return _relabel_by_track(geometries, assignments, tip_track)
 
 
+# ---------------------------------------------------------------------------
+# Per-frame mask I/O
+# ---------------------------------------------------------------------------
+# track_object (pipeline/track.py) writes one boolean mask per frame;
+# compute_motion (below) and render_glow (pipeline/glow.py) read them back.
+# This is the single place that owns the on-disk format and the
+# `{idx:05d}` frame-index naming, so no caller open-codes a mask filename
+# or an `np.save`/`np.load` call of its own.
+#
+# A tracked blade mask is a thin, mostly-empty band (on the order of 2%
+# foreground pixels on real footage), so `np.savez_compressed` beats plain
+# `np.save` by two to three orders of magnitude -- far better than
+# `np.packbits`, which only gets the fixed 8x of bit-packing and doesn't
+# exploit the sparsity. That's what keeps a render's masks from being the
+# dominant disk cost (see fx-wave2-plan.md).
+#
+# Loading also transparently accepts the older, uncompressed `.npy` format
+# written by earlier versions of `track_object`, so a job directory created
+# before this change still loads correctly. New masks are never written in
+# the old format.
+
+_MASK_EXT = ".npz"
+_MASK_EXT_LEGACY = ".npy"
+
+
+def _mask_path(masks_dir, frame_idx, ext):
+    return os.path.join(masks_dir, f"{frame_idx:05d}{ext}")
+
+
+def _resolve_mask_path(masks_dir, frame_idx):
+    """Return `(path, is_legacy)` for whichever format is on disk for
+    `frame_idx`, or `(None, False)` if neither is present. Prefers the
+    compressed format on the (should-never-happen, since we never write
+    the legacy format) chance both exist."""
+    npz_path = _mask_path(masks_dir, frame_idx, _MASK_EXT)
+    if os.path.exists(npz_path):
+        return npz_path, False
+    legacy_path = _mask_path(masks_dir, frame_idx, _MASK_EXT_LEGACY)
+    if os.path.exists(legacy_path):
+        return legacy_path, True
+    return None, False
+
+
+def _load_mask_file(path, is_legacy):
+    if is_legacy:
+        return np.load(path)
+    with np.load(path) as data:
+        return data["mask"]
+
+
+def save_mask(masks_dir, frame_idx, mask):
+    """Write a single frame's boolean tracking mask to `masks_dir`,
+    compressed, as the `{idx:05d}.npz` file this module's readers expect.
+    Creates `masks_dir` if it doesn't already exist."""
+    os.makedirs(masks_dir, exist_ok=True)
+    np.savez_compressed(_mask_path(masks_dir, frame_idx, _MASK_EXT), mask=mask)
+
+
+def load_mask(masks_dir, frame_idx):
+    """Load the mask written by `save_mask` for `frame_idx`, falling back
+    to the legacy uncompressed `.npy` format when present instead. Raises
+    `FileNotFoundError` if neither is present."""
+    path, is_legacy = _resolve_mask_path(masks_dir, frame_idx)
+    if path is None:
+        raise FileNotFoundError(f"No mask for frame {frame_idx} in {masks_dir}")
+    return _load_mask_file(path, is_legacy)
+
+
+def load_mask_optional(masks_dir, frame_idx):
+    """Like `load_mask`, but returns `None` instead of raising when no mask
+    file exists for `frame_idx` -- for callers such as render_glow, where a
+    frame the tracker never produced a mask for (object lost) is expected,
+    not an error."""
+    path, is_legacy = _resolve_mask_path(masks_dir, frame_idx)
+    if path is None:
+        return None
+    return _load_mask_file(path, is_legacy)
+
+
+def mask_frame_indices(masks_dir):
+    """Sorted list of frame indices with a saved mask present in
+    `masks_dir`, in either format. Lets compute_motion discover exactly
+    which frames track_object produced without hardcoding an extension."""
+    indices = set()
+    for fname in os.listdir(masks_dir):
+        name, ext = os.path.splitext(fname)
+        if ext in (_MASK_EXT, _MASK_EXT_LEGACY) and name.isdigit():
+            indices.add(int(name))
+    return sorted(indices)
+
+
 _FIELDS = ("centroid", "tip", "hilt", "axis", "length", "width", "angle")
 _VECTOR_FIELDS = ("centroid", "tip", "hilt", "axis")
 
@@ -370,10 +461,12 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     (tip/angular speed) need to *read* -- render_glow producing it as a
     side effect of drawing was the wrong shape once both consumers exist.
 
-    Processes every ``*.npy`` mask file present in `masks_dir`, in
-    filename order (matching track_object's ``{idx:05d}.npy`` naming, one
-    file per frame) -- a frame whose mask is empty (object lost that
-    frame) gets a None geometry, which `save_motion` turns into a NaN row.
+    Processes every mask frame present in `masks_dir` (via
+    `mask_frame_indices`/`load_mask`, which accept both the compressed
+    `.npz` format `track_object` writes and the legacy uncompressed `.npy`
+    format), in frame-index order -- a frame whose mask is empty (object
+    lost that frame) gets a None geometry, which `save_motion` turns into a
+    NaN row.
 
     Each frame's tip/hilt is initially guessed per-frame by `fit_blade`
     (shape/taper only), then `_orient_by_motion` re-decides tip vs hilt
@@ -386,11 +479,11 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
         if progress_cb:
             progress_cb(pct, message)
 
-    mask_files = sorted(f for f in os.listdir(masks_dir) if f.endswith(".npy"))
-    n = len(mask_files)
+    frame_indices = mask_frame_indices(masks_dir)
+    n = len(frame_indices)
     geometries = []
-    for i, fname in enumerate(mask_files):
-        mask = np.load(os.path.join(masks_dir, fname))
+    for i, frame_idx in enumerate(frame_indices):
+        mask = load_mask(masks_dir, frame_idx)
         geometries.append(fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins))
         report((i + 1) / n * 100, f"frame {i + 1}/{n}")
 

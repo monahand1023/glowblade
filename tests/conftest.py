@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import pytest
 
+from lightsaber_fx.pipeline.blade import save_mask
+
 
 def _write_tiny_video(path, n_frames=5, width=64, height=48, fps=10.0):
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
@@ -40,7 +42,7 @@ def synthetic_track_fixture(tmp_path):
         mask = np.zeros((height, width), dtype=bool)
         x = 5 + i * 3
         mask[20:28, x:x + 4] = True
-        np.save(masks_dir / f"{i:05d}.npy", mask)
+        save_mask(str(masks_dir), i, mask)
     video_meta_path = tmp_path / "video_meta.txt"
     video_meta_path.write_text(f"{fps}\n{n_frames}\n")
     return {

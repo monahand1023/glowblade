@@ -62,7 +62,7 @@ def _build_blade_clip(tmp_path, name, n_frames, width=220, height=90, fps=24.0,
             x1 = x0 + blade_len
             mask = np.zeros((height, width), dtype=bool)
             mask[y0:y1, x0:x1] = True
-        np.save(masks_dir / f"{i:05d}.npy", mask)
+        blade.save_mask(str(masks_dir), i, mask)
 
     video_meta_path = base / "video_meta.txt"
     video_meta_path.write_text(f"{fps}\n{n_frames}\n")
@@ -167,7 +167,7 @@ def test_blade_extend_lights_beyond_mask_extent(tmp_path):
 
     # Ground truth geometry for frame 0, from the same fit_blade the
     # pipeline itself uses -- avoids hardcoding which end PCA calls "tip".
-    mask0 = np.load(os.path.join(clip["masks_dir"], "00000.npy"))
+    mask0 = blade.load_mask(clip["masks_dir"], 0)
     geo = blade.fit_blade(mask0)
     tip_extend_frac = 0.10
     extended_tip = np.array(geo.tip) + np.array(geo.axis) * geo.length * tip_extend_frac
@@ -198,7 +198,7 @@ def test_no_blade_extend_falls_back_to_raw_mask(tmp_path):
     # A point well beyond the raw mask's own tip end must NOT light up at
     # all when blade_extend=False (raw-mask tracing only).
     clip = _build_blade_clip(tmp_path, "noextend", n_frames=2, blade_len=90)
-    mask0 = np.load(os.path.join(clip["masks_dir"], "00000.npy"))
+    mask0 = blade.load_mask(clip["masks_dir"], 0)
     geo = blade.fit_blade(mask0)
     far_point = np.array(geo.tip) + np.array(geo.axis) * 40  # far past any plausible extension
     px, py = round(far_point[0]), round(far_point[1])
@@ -234,7 +234,7 @@ def test_core_is_narrower_than_colour_band(tmp_path):
     )
     img = _load_png(out_dir, 0).astype(np.float64)
 
-    mask0 = np.load(os.path.join(clip["masks_dir"], "00000.npy"))
+    mask0 = blade.load_mask(clip["masks_dir"], 0)
     geo = blade.fit_blade(mask0)
     cx = round(geo.centroid[0])
 
@@ -315,7 +315,7 @@ def test_trail_leaves_energy_at_previous_position(tmp_path):
         out_dir, clip["motion_path"], trail_decay=0.75,
     )
 
-    mask0 = np.load(os.path.join(clip["masks_dir"], "00000.npy"))
+    mask0 = blade.load_mask(clip["masks_dir"], 0)
     geo0 = blade.fit_blade(mask0)
     px, py = round(geo0.centroid[0]), round(geo0.centroid[1])
 
