@@ -129,12 +129,27 @@ def test_traversal_style_job_id_cannot_escape_jobs_dir(client, tmp_path):
     # `get_jobs_dir() / job_id / "frame0.jpg"` resolve to tmp_path/"frame0.jpg" —
     # one level above the jobs directory. Plant a file there and confirm the
     # traversal id is rejected before that file is ever served.
+    #
+    # A *literal* ".." segment (e.g. "/api/jobs/../frame0") never reaches this
+    # app: httpx/TestClient normalizes ".." out of the URL client-side before
+    # dispatch, collapsing the request to "/api/frame0" and hitting
+    # Starlette's router-level 404 ("Not Found") -- `get_frame0` and
+    # `_validate_job_id` are never called. Percent-encoding the dots
+    # (%2E%2E) survives that client-side normalization intact and is decoded
+    # back to a literal ".." job_id by Starlette's router when it extracts
+    # the path parameter, so this is the request shape that actually drives
+    # a hostile job_id into the route and its `_validate_job_id` guard.
+    # Verified empirically (see fixwave2-report.md): with the guard
+    # neutered, this same request returns 200 with the planted bytes.
     outside_file = tmp_path / "frame0.jpg"
     outside_file.write_bytes(b"should never be reachable via job_id traversal")
 
-    resp = client.get("/api/jobs/../frame0")
+    resp = client.get("/api/jobs/%2E%2E/frame0")
 
     assert resp.status_code == 404
+    # Confirms this 404 came from `_validate_job_id` (detail="Job not found"),
+    # not Starlette's generic router-miss 404 (detail="Not Found").
+    assert resp.json()["detail"] == "Job not found"
     assert resp.content != b"should never be reachable via job_id traversal"
 
 
