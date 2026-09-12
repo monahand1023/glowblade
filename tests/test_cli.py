@@ -1,6 +1,15 @@
 from click.testing import CliRunner
 
+import lightsaber_fx.paths as paths_module
 from lightsaber_fx.cli import main
+
+
+def _fake_checkpoint(appdata_dir):
+    """Create a stand-in checkpoint file so cli.run's setup pre-flight check passes."""
+    checkpoint = appdata_dir / "checkpoints" / "sam2.1_hiera_small.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"fake checkpoint")
+    return checkpoint
 
 
 def test_cli_help_exits_zero():
@@ -8,9 +17,6 @@ def test_cli_help_exits_zero():
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "lightsaber-fx" in result.output or "Usage" in result.output
-
-
-import lightsaber_fx.paths as paths_module
 
 
 def test_help_lists_all_subcommands():
@@ -46,6 +52,7 @@ def test_run_command_parses_options_and_calls_run_pipeline(tmp_path, monkeypatch
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake video bytes")
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
+    _fake_checkpoint(tmp_path / "appdata")
 
     monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", lambda *a, **k: None)
     monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
@@ -73,6 +80,7 @@ def test_run_command_aborts_when_no_points_selected(tmp_path, monkeypatch):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake video bytes")
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
+    _fake_checkpoint(tmp_path / "appdata")
     monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", lambda *a, **k: None)
     monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([], []))
 
@@ -80,6 +88,39 @@ def test_run_command_aborts_when_no_points_selected(tmp_path, monkeypatch):
     result = runner.invoke(main, ["run", str(video)])
 
     assert result.exit_code != 0
+
+
+def test_run_command_fails_fast_when_sam2_not_set_up(tmp_path, monkeypatch):
+    # No checkpoint file created: cli.run's pre-flight check (A7) should raise
+    # before ever touching extract_first_frame or the interactive picker.
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake video bytes")
+    monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("should not be reached when the checkpoint is missing")
+
+    monkeypatch.setattr("lightsaber_fx.cli.extract_first_frame", fail_if_called)
+    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", fail_if_called)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", str(video)])
+
+    assert result.exit_code != 0
+    assert "lightsaber-fx setup" in result.output
+
+
+def test_run_command_rejects_out_of_range_intensity(tmp_path, monkeypatch):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake video bytes")
+    monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
+    _fake_checkpoint(tmp_path / "appdata")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", str(video), "--intensity", "5"])
+
+    assert result.exit_code != 0
+    assert "0.0" in result.output and "1.0" in result.output
 
 
 def test_serve_command_invokes_uvicorn_with_host_and_port(monkeypatch):

@@ -26,6 +26,8 @@ def run_pipeline(
                 progress_cb(stage, pct, message)
         return cb
 
+    color_bgr = parse_color(color)
+
     frames_dir = os.path.join(job_dir, "frames")
     masks_dir = os.path.join(job_dir, "masks")
     video_meta_path = os.path.join(job_dir, "video_meta.txt")
@@ -49,7 +51,7 @@ def run_pipeline(
 
     render_glow(
         frames_dir, masks_dir, video_meta_path, glow_video_path, motion_path,
-        color=parse_color(color), spill_strength=intensity,
+        color=color_bgr, spill_strength=intensity,
         progress_cb=stage_cb("glow"),
     )
 

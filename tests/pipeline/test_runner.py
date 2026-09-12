@@ -1,3 +1,4 @@
+import inspect
 import shutil
 
 import numpy as np
@@ -6,6 +7,41 @@ import pytest
 from lightsaber_fx.pipeline.runner import run_pipeline
 
 requires_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+
+
+def test_default_config_name_is_the_full_relative_sam2_config_path():
+    # Do-not-regress invariant: Hydra requires the full relative path, not a bare
+    # filename (a bare filename fails with Hydra's MissingConfigException). This
+    # only reliably runs on a machine with the SAM2 checkpoint installed
+    # (tests/pipeline/test_track.py), which is skipped elsewhere -- so this fast,
+    # always-on check pins the default directly against signature inspection.
+    default = inspect.signature(run_pipeline).parameters["config_name"].default
+    assert default == "configs/sam2.1/sam2.1_hiera_s.yaml"
+
+
+def test_run_pipeline_validates_color_before_extracting_frames(tmp_path, monkeypatch, tiny_video_path):
+    # A4: an invalid --color must fail immediately, before the (potentially
+    # minutes-long) extract/track stages ever run.
+    def fail_if_called(*a, **k):
+        raise AssertionError("extract_frames should not run before color is validated")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.extract_frames", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    with pytest.raises(ValueError):
+        run_pipeline(
+            input_video=str(tiny_video_path),
+            points=[[10, 10]],
+            labels=[1],
+            output_path=str(tmp_path / "final.mp4"),
+            job_dir=str(job_dir),
+            checkpoint_path="unused",
+            config_name="unused",
+            device="cpu",
+            color="not-a-real-color",
+        )
 
 
 @requires_ffmpeg

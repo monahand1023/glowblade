@@ -32,10 +32,15 @@ def setup(force):
 @click.argument("input_video", type=click.Path(exists=True))
 @click.option("--output", default="final.mp4", help="Output video path.")
 @click.option("--color", default="red", help="Blade color: red, blue, green, or #RRGGBB.")
-@click.option("--intensity", default=0.35, type=float, help="Light-spill strength, 0.0-1.0.")
+@click.option(
+    "--intensity", default=0.35, type=click.FloatRange(0.0, 1.0), help="Light-spill strength, 0.0-1.0."
+)
 @click.option("--keep-intermediate", is_flag=True, help="Keep the job's frames/masks/intermediate files.")
 def run(input_video, output, color, intensity, keep_intermediate):
     """Run the full pipeline on INPUT_VIDEO, prompting you to click the object to track."""
+    if not paths.get_checkpoint_path().exists():
+        raise click.ClickException("SAM2 is not installed yet — run `lightsaber-fx setup` first.")
+
     job_id = uuid.uuid4().hex[:8]
     job_dir = paths.new_job_dir(job_id)
     preview_path = job_dir / "frame0_preview.jpg"
@@ -51,6 +56,9 @@ def run(input_video, output, color, intensity, keep_intermediate):
         click.echo(f"[{stage}] {pct:5.1f}% {message}")
 
     device = select_device()
+    click.echo(f"Using device: {device}")
+    if device == "cpu":
+        click.echo("No GPU/MPS acceleration available — running on CPU, this will be much slower.")
     result = run_pipeline(
         input_video=input_video,
         points=points,
@@ -78,6 +86,13 @@ def serve(host, port, open_browser):
     """Start the local web app."""
     import uvicorn
 
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        click.echo(
+            f"Warning: binding to {host} exposes this app to your network. "
+            "It has no authentication and accepts arbitrary uploads — anyone who can "
+            "reach this address can fill your disk and read renders."
+        )
+
     if open_browser:
         def opener():
             time.sleep(1.0)
@@ -90,7 +105,12 @@ def serve(host, port, open_browser):
 
 @main.command()
 def clean():
-    """Delete all past render job directories."""
+    """Delete all past render job directories.
+
+    This removes every job's frames/masks/intermediate files, including any
+    render currently in progress -- there is no cross-process lock, so don't
+    run this while another `lightsaber-fx run` or `serve` job is rendering.
+    """
     count = paths.clean_jobs()
     click.echo(f"Removed {count} job director{'y' if count == 1 else 'ies'}.")
 
