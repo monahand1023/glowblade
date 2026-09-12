@@ -1,6 +1,17 @@
 import threading
 import traceback
 from dataclasses import dataclass, field
+from typing import NamedTuple
+
+from ..progress import EtaTracker
+
+
+class ProgressEvent(NamedTuple):
+    stage: str
+    pct: float
+    message: str
+    elapsed: float
+    eta: float | None
 
 
 @dataclass
@@ -29,9 +40,13 @@ class JobManager:
             state = JobState(job_id=job_id)
             self._current = state
 
+        tracker = EtaTracker()
+
         def progress_cb(stage, pct, message):
+            # Timed here, as the work happens — not when a client connects.
+            elapsed, eta = tracker.update(stage, pct)
             with self._lock:
-                state.events.append((stage, pct, message))
+                state.events.append(ProgressEvent(stage, pct, message, elapsed, eta))
 
         def target():
             try:

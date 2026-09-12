@@ -127,8 +127,14 @@ def stream_events(job_id: str):
             if state is None:
                 yield f"data: {json.dumps({'stage': 'error', 'message': 'job not found'})}\n\n"
                 return
-            for stage, pct, message in state.events[last_sent:]:
-                yield f"data: {json.dumps({'stage': stage, 'pct': pct, 'message': message})}\n\n"
+            for event in state.events[last_sent:]:
+                yield "data: " + json.dumps({
+                    "stage": event.stage,
+                    "pct": event.pct,
+                    "message": event.message,
+                    "elapsed": event.elapsed,
+                    "eta": event.eta,
+                }) + "\n\n"
             last_sent = len(state.events)
             if state.status == "done":
                 yield f"data: {json.dumps({'stage': 'done', 'result_url': f'/api/jobs/{job_id}/result'})}\n\n"

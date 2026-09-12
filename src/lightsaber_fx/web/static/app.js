@@ -18,6 +18,14 @@ let jobId = null;
 let frameImage = null;
 let points = []; // [x, y, label]
 
+// Mirrors format_duration() in lightsaber_fx/progress.py.
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+}
+
 function showError(message) {
   errorMessage.hidden = false;
   errorMessage.textContent = message;
@@ -119,7 +127,12 @@ function listenForProgress() {
       showError(data.message);
     } else {
       progressFill.style.width = `${data.pct}%`;
-      progressLabel.textContent = `${data.stage}: ${data.message} (${Math.round(data.pct)}%)`;
+      let label = `${data.stage}: ${data.message} (${Math.round(data.pct)}%)`;
+      if (data.elapsed != null) {
+        label += ` — ${formatDuration(data.elapsed)} elapsed`;
+        if (data.eta != null) label += `, ~${formatDuration(data.eta)} left`;
+      }
+      progressLabel.textContent = label;
     }
   };
   source.onerror = () => {

@@ -19,7 +19,15 @@ def test_start_runs_pipeline_and_records_done_state():
     state = manager.get("job-1")
     assert state.status == "done"
     assert state.result_path == "/tmp/final.mp4"
-    assert ("extract", 50, "halfway") in state.events
+
+    assert [(e.stage, e.pct, e.message) for e in state.events] == [
+        ("extract", 50, "halfway"),
+        ("extract", 100, "done"),
+    ]
+    # Each event carries its own timing, recorded when the work happened.
+    assert all(e.elapsed >= 0 for e in state.events)
+    assert state.events[0].eta is None  # nothing to extrapolate from yet
+    assert state.events[-1].eta == 0.0  # complete
 
 
 def test_start_records_error_state_on_exception():

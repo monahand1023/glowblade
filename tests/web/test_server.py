@@ -1,3 +1,4 @@
+import json
 import threading
 
 import pytest
@@ -69,6 +70,17 @@ def test_points_then_events_then_result(client, tiny_video_bytes, monkeypatch, t
     with client.stream("GET", f"/api/jobs/{job_id}/events") as stream:
         body = b"".join(stream.iter_bytes())
     assert b'"stage": "done"' in body or b'"stage":"done"' in body
+
+    # Every progress event carries timing so the UI can show elapsed/ETA.
+    progress_events = [
+        json.loads(line[len("data: "):])
+        for line in body.decode().splitlines()
+        if line.startswith("data: ") and '"pct"' in line
+    ]
+    assert progress_events, "expected at least one progress event"
+    for event in progress_events:
+        assert "elapsed" in event and event["elapsed"] >= 0
+        assert "eta" in event  # may be null when there is nothing to extrapolate from
 
     result_resp = client.get(f"/api/jobs/{job_id}/result")
     assert result_resp.status_code == 200

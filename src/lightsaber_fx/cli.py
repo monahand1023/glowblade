@@ -11,6 +11,7 @@ from .device import select_device
 from .pipeline.frames import extract_first_frame
 from .pipeline.runner import run_pipeline
 from .pipeline.track import pick_points_interactive
+from .progress import EtaTracker, format_duration
 from .setup import bootstrap
 
 
@@ -52,8 +53,14 @@ def run(input_video, output, color, intensity, keep_intermediate):
         click.echo("No points selected, aborting.")
         raise SystemExit(1)
 
+    eta = EtaTracker()
+
     def progress_cb(stage, pct, message):
-        click.echo(f"[{stage}] {pct:5.1f}% {message}")
+        elapsed, remaining = eta.update(stage, pct)
+        timing = f"elapsed {format_duration(elapsed)}"
+        if remaining is not None:
+            timing += f", ~{format_duration(remaining)} left"
+        click.echo(f"[{stage}] {pct:5.1f}% {message} ({timing})")
 
     device = select_device()
     click.echo(f"Using device: {device}")
