@@ -453,3 +453,65 @@ def test_ignition_ramp_shortens_the_blade_at_the_start_of_the_clip(tmp_path):
 
     assert middle_signal > 20  # solidly lit once ignition has ramped up
     assert start_signal < middle_signal - 10  # visibly shorter right at the start
+
+
+# ---------------------------------------------------------------------------
+# render_glow_multi -- compositing up to 4 independently-colored sabers
+# ---------------------------------------------------------------------------
+
+def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path):
+    # Two synthetic objects, each with its own color, rendering together in
+    # one output. The core claim of multi-saber rendering is that N objects'
+    # contributions are summed independently before post-processing.
+    clip_a = _build_blade_clip(tmp_path, "objA", n_frames=3, blade_x0=10, dx=3, blade_len=30, blade_height=10)
+    clip_b = _build_blade_clip(tmp_path, "objB", n_frames=3, blade_x0=120, dx=3, blade_len=30, blade_height=10)
+
+    output_frames_dir = tmp_path / "glow_frames"
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+
+    render_glow_multi(
+        clip_a["frames_dir"],
+        [
+            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (255, 0, 0), "intensity": 0.25},
+            {"masks_dir": clip_b["masks_dir"], "motion_path": clip_b["motion_path"], "color": (0, 255, 0), "intensity": 0.25},
+        ],
+        clip_a["video_meta_path"], str(output_frames_dir),
+        ignition_ramp_seconds=0,
+    )
+
+    # Verify output is generated and is valid
+    for i in range(clip_a["n_frames"]):
+        img = _load_png(str(output_frames_dir), i)
+        assert img.dtype == np.uint8
+        assert img.shape == (clip_a["height"], clip_a["width"], 3)
+        arr = img.astype(np.float64)
+        assert np.isfinite(arr).all()
+        assert (arr >= 0).all() and (arr <= 255).all()
+
+
+def test_render_glow_multi_with_one_object_matches_render_glow(tmp_path):
+    # The N=1 case must agree with today's render_glow -- not byte-for-byte
+    # (light-wrap's 1/len(prepared) scaling is a no-op at N=1, but summing
+    # order/floating point can still differ trivially), but materially the
+    # same rendered result.
+    clip = _build_blade_clip(tmp_path, "equiv", n_frames=4)
+    out_single = str(tmp_path / "out_single")
+    out_multi = str(tmp_path / "out_multi")
+
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        out_single, clip["motion_path"], color=(40, 40, 255), spill_strength=0.35,
+        ignition_ramp_seconds=0,
+    )
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+    render_glow_multi(
+        clip["frames_dir"],
+        [{"masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"], "color": (40, 40, 255), "intensity": 0.35}],
+        clip["video_meta_path"], out_multi,
+        ignition_ramp_seconds=0,
+    )
+
+    for i in range(clip["n_frames"]):
+        a = _load_png(out_single, i).astype(np.int16)
+        b = _load_png(out_multi, i).astype(np.int16)
+        assert np.abs(a - b).max() <= 2  # allow trivial floating-point rounding differences

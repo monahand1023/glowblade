@@ -596,3 +596,165 @@ def render_glow(
             out, [int(cv2.IMWRITE_PNG_COMPRESSION), 3],
         )
         report((n + 1) / total * 100, f"frame {n + 1}/{total}")
+
+
+def render_glow_multi(
+    frames_dir,
+    objects,
+    video_meta_path,
+    output_frames_dir,
+    blade_extend=True,
+    tip_extend_frac=0.10,
+    hilt_taper_frac=0.12,
+    hilt_taper_min_frac=0.35,
+    core_erode_frac=0.45,
+    core_blur_frac=0.18,
+    colour_blur_frac=0.35,
+    glow_scales=(0.5, 1.0, 2.0),
+    glow_falloff_tau=1.0,
+    glow_crush=4.0,
+    knoll_darken_factor=0.7,
+    knoll_dilate_frac=1.5,
+    knoll_feather_frac=0.8,
+    trail_decay=0.7,
+    ignition_ramp_seconds=IGNITION_RAMP_SECONDS,
+    motion_blur_gain=0.35,
+    motion_blur_max_len=24,
+    chromatic_bloom_frac=0.10,
+    flicker_strength=0.04,
+    rng_seed=12345,
+    light_wrap_strength=0.15,
+    light_wrap_dilate_frac=1.5,
+    progress_cb=None,
+):
+    """Like `render_glow`, but for `len(objects)` (1-4) simultaneously
+    tracked sabers, each with its own mask/motion/color/intensity, summed
+    into one composited PNG sequence. See `_composite_blade_contribution`'s
+    docstring for how a single object's contribution is computed; this
+    function's job is purely to do that once per object per frame, sum the
+    results, and run the shared (object-count-agnostic) trail/knoll-darken/
+    light-wrap/tonemap steps exactly once per frame -- the same steps
+    `render_glow` already runs on its own single contribution.
+    """
+    def report(pct, message):
+        if progress_cb:
+            progress_cb(pct, message)
+
+    os.makedirs(output_frames_dir, exist_ok=True)
+    frame_files = sorted(f for f in os.listdir(frames_dir) if f.endswith(".jpg"))
+    with open(video_meta_path) as f:
+        fps = float(f.readline())
+
+    first = cv2.imread(os.path.join(frames_dir, frame_files[0]))
+    h, w = first.shape[:2]
+    total = len(frame_files)
+    ignition_ramp_frames = round(fps * ignition_ramp_seconds)
+
+    # Per-object setup: everything render_glow computes once from its one
+    # shared masks_dir/motion_path, computed once per object here instead.
+    prepared = []
+    max_canonical_width = 1.0
+    for obj in objects:
+        masks_dir = obj["masks_dir"]
+        motion = load_motion(obj["motion_path"])
+        tip_arr = np.asarray(motion.get("tip", np.zeros((0, 2))), dtype=np.float64)
+        hilt_arr = np.asarray(motion.get("hilt", np.zeros((0, 2))), dtype=np.float64)
+        axis_arr = np.asarray(motion.get("axis", np.zeros((0, 2))), dtype=np.float64)
+        width_arr = np.asarray(motion.get("width", np.zeros(0)), dtype=np.float64)
+        tip_arr, hilt_arr, axis_arr = _stabilize_tip_hilt(tip_arr, hilt_arr, axis_arr)
+        velocity = np.zeros_like(tip_arr)
+        if len(tip_arr) > 1:
+            velocity[1:] = np.diff(tip_arr, axis=0)
+        velocity = np.nan_to_num(velocity, nan=0.0)
+
+        canonical_width = _robust_median(width_arr, default=6.0)
+        if canonical_width <= 0:
+            canonical_width = 6.0
+        max_canonical_width = max(max_canonical_width, canonical_width)
+
+        mask_present = []
+        for fname in frame_files:
+            idx = int(os.path.splitext(fname)[0])
+            m = load_mask_optional(masks_dir, idx)
+            mask_present.append(m is not None and m.any())
+        active_indices = [n for n, present in enumerate(mask_present) if present]
+
+        color_lin = (np.asarray(obj["color"], dtype=np.float32) / 255.0) ** _GAMMA
+        core_erode_px = max(1, round(canonical_width * core_erode_frac))
+        prepared.append({
+            "masks_dir": masks_dir,
+            "tip_arr": tip_arr, "hilt_arr": hilt_arr, "velocity": velocity,
+            "n_motion": len(tip_arr),
+            "canonical_width": canonical_width,
+            "first_active": active_indices[0] if active_indices else None,
+            "last_active": active_indices[-1] if active_indices else None,
+            "color_lin": color_lin,
+            "spill_strength": obj["intensity"],
+            "core_erode_kernel": np.ones((core_erode_px, core_erode_px), np.uint8),
+            "core_sigma": max(0.6, canonical_width * core_blur_frac),
+            "colour_sigma": max(0.6, canonical_width * colour_blur_frac),
+        })
+
+    knoll_dilate_px = max(1, round(max_canonical_width * knoll_dilate_frac))
+    knoll_dilate_kernel = np.ones((knoll_dilate_px, knoll_dilate_px), np.uint8)
+    knoll_feather_sigma = max(1.0, max_canonical_width * knoll_feather_frac)
+    wrap_dilate_px = max(1, round(max_canonical_width * light_wrap_dilate_frac))
+    wrap_dilate_kernel = np.ones((wrap_dilate_px, wrap_dilate_px), np.uint8)
+    wrap_blur_sigma = max(1.0, max_canonical_width)
+
+    max_scale = max(glow_scales) * (1.0 + chromatic_bloom_frac)
+    blur_reach = int(np.ceil(max_canonical_width * max_scale * 3.5))
+    bbox_margin = blur_reach + motion_blur_max_len + 5
+
+    rng = np.random.default_rng(rng_seed)
+    trail = np.zeros((h, w, 3), dtype=np.float32)
+
+    for n, fname in enumerate(frame_files):
+        idx = int(os.path.splitext(fname)[0])
+        frame = cv2.imread(os.path.join(frames_dir, fname))
+        plate_lin = _srgb_to_linear(frame)
+
+        combined_fx = np.zeros((h, w, 3), dtype=np.float32)
+        combined_blade_u8 = np.zeros((h, w), dtype=np.uint8)
+
+        for obj_state in prepared:
+            mask = load_mask_optional(obj_state["masks_dir"], idx)
+            row = n if n < obj_state["n_motion"] else None
+            tip_i = obj_state["tip_arr"][row] if row is not None else None
+            hilt_i = obj_state["hilt_arr"][row] if row is not None else None
+            vel_i = obj_state["velocity"][row] if row is not None else np.zeros(2)
+            frac = ignition_fraction(
+                n, obj_state["first_active"], obj_state["last_active"], ignition_ramp_frames,
+            )
+
+            full_fx, blade_u8 = _composite_blade_contribution(
+                frame.shape, mask, tip_i, hilt_i, vel_i,
+                obj_state["canonical_width"], blade_extend, frac,
+                tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
+                obj_state["core_erode_kernel"], obj_state["core_sigma"], obj_state["colour_sigma"],
+                obj_state["color_lin"], glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
+                obj_state["spill_strength"], motion_blur_gain, motion_blur_max_len, bbox_margin,
+            )
+            combined_fx += full_fx
+            combined_blade_u8 = np.maximum(combined_blade_u8, blade_u8)
+
+        trail = np.maximum(trail * trail_decay, combined_fx)
+        darkened_plate, _ = knoll_darken(
+            plate_lin, combined_blade_u8, knoll_dilate_px, knoll_darken_factor, knoll_feather_sigma,
+            dilate_kernel=knoll_dilate_kernel,
+        )
+        wrap_total = np.zeros((h, w, 3), dtype=np.float32)
+        for obj_state in prepared:
+            wrap_total += _light_wrap(
+                combined_blade_u8, obj_state["color_lin"], wrap_dilate_kernel,
+                wrap_blur_sigma, light_wrap_strength / len(prepared),
+            )
+        jitter = 1.0 + float(rng.uniform(-flicker_strength, flicker_strength))
+        combined = darkened_plate + (trail + wrap_total) * jitter
+        combined = _soft_tonemap(combined)
+        out = _linear_to_srgb(combined)
+        cv2.imwrite(
+            os.path.join(output_frames_dir, f"{idx:05d}.png"),
+            out, [int(cv2.IMWRITE_PNG_COMPRESSION), 3],
+        )
+        report((n + 1) / total * 100, f"frame {n + 1}/{total}")
