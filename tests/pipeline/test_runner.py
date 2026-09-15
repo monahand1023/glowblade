@@ -1,12 +1,19 @@
 import inspect
+import os
 import shutil
 
 import numpy as np
 import pytest
 
 from lightsaber_fx.pipeline import job_meta
+from lightsaber_fx.pipeline.blade import compute_motion, save_mask
 from lightsaber_fx.pipeline.job_meta import JobNotRerenderableError
-from lightsaber_fx.pipeline.runner import rerender_pipeline, run_pipeline
+from lightsaber_fx.pipeline.runner import (
+    rerender_pipeline,
+    rerender_pipeline_multi,
+    run_pipeline,
+    run_pipeline_multi,
+)
 
 requires_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 
@@ -291,6 +298,32 @@ def test_rerender_pipeline_validates_color_before_extracting_frames(monkeypatch,
         )
 
 
+def test_rerender_pipeline_rejects_a_multi_object_job_with_a_clear_message(tmp_path, tiny_video_path):
+    # A multi-object job keeps masks/{obj_id}/ and motion/{obj_id}.npz, which
+    # require_rerenderable checks and passes -- so this function used to sail
+    # through the guard and then die on a bare FileNotFoundError hunting for
+    # the flat motion.npz it expects. The web app writes object_ids even for a
+    # single saber, so this is every web-app job, not an exotic case.
+    job_dir = tmp_path / "job"
+    masks_dir = job_dir / "masks" / "0"
+    for i in range(3):
+        mask = np.zeros((48, 64), dtype=bool)
+        mask[10:20, 5:11] = True
+        save_mask(str(masks_dir), i, mask)
+    (job_dir / "motion").mkdir(parents=True, exist_ok=True)
+    compute_motion(str(masks_dir), str(job_dir / "motion" / "0.npz"))
+    (job_dir / "video_meta.txt").write_text("10.0\n3\n")
+    job_meta.write_job_meta(str(job_dir), source_video=str(tiny_video_path), object_ids=[0])
+
+    with pytest.raises(JobNotRerenderableError) as excinfo:
+        rerender_pipeline(job_dir=str(job_dir), output_path=str(tmp_path / "out.mp4"))
+
+    message = str(excinfo.value)
+    assert "only handles single-object jobs" in message
+    assert "web app" in message
+    assert not (tmp_path / "out.mp4").exists()
+
+
 @requires_ffmpeg
 def test_rerender_pipeline_works_with_legacy_npy_masks(tmp_path, tiny_video_path):
     from lightsaber_fx.pipeline.blade import compute_motion
@@ -477,3 +510,238 @@ def test_compute_motion_reports_how_many_frames_produced_a_blade(tmp_path):
     n_tracked, n_with_blade = compute_motion(str(masks_dir), str(tmp_path / "motion.npz"))
 
     assert (n_tracked, n_with_blade) == (4, 3)
+
+
+# ---------------------------------------------------------------------------
+# run_pipeline_multi
+# ---------------------------------------------------------------------------
+
+
+@requires_ffmpeg
+def test_run_pipeline_multi_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, tiny_video_path):
+    def fake_track_objects(frames_dir, prompts, checkpoint_path, config_name, device, n_frames, progress_cb=None):
+        for prompt in prompts:
+            os.makedirs(prompt["masks_dir"], exist_ok=True)
+            for i in range(n_frames):
+                x = 5 + i * 3
+                mask = np.zeros((48, 64), dtype=bool)
+                mask[10:20, x:x + 6] = True
+                save_mask(prompt["masks_dir"], i, mask)
+            if progress_cb:
+                progress_cb(100, "done")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    output_path = tmp_path / "final.mp4"
+
+    result = run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(output_path),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert result == str(output_path)
+    assert output_path.exists() and output_path.stat().st_size > 0
+    meta = job_meta.read_job_meta(str(job_dir))
+    assert meta["object_ids"] == [0, 1]
+    assert os.path.isdir(job_dir / "masks" / "0")
+    assert os.path.isdir(job_dir / "masks" / "1")
+    assert (job_dir / "motion" / "0.npz").exists()
+    assert (job_dir / "motion" / "1.npz").exists()
+
+
+def test_run_pipeline_multi_validates_every_saber_color_before_tracking(tmp_path, monkeypatch, tiny_video_path):
+    def fail_if_called(*a, **k):
+        raise AssertionError("extract_frames should not run before every color is validated")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.extract_frames", fail_if_called)
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    with pytest.raises(ValueError):
+        run_pipeline_multi(
+            input_video=str(tiny_video_path),
+            sabers=[
+                {"points": [[1, 1]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+                {"points": [[1, 1]], "labels": [1], "color": "not-a-color", "intensity": 0.35, "voice": "neutral"},
+            ],
+            output_path=str(tmp_path / "final.mp4"),
+            job_dir=str(job_dir),
+            checkpoint_path="unused",
+            device="cpu",
+        )
+
+
+def _fake_track_objects_writing(mask_factory_by_obj_id):
+    """Build a `track_objects` stub writing each object's own masks, so a
+    test can make one saber track cleanly while another finds nothing."""
+    def fake_track_objects(frames_dir, prompts, checkpoint_path, config_name,
+                           device, n_frames, progress_cb=None):
+        for prompt in prompts:
+            os.makedirs(prompt["masks_dir"], exist_ok=True)
+            factory = mask_factory_by_obj_id[prompt["obj_id"]]
+            for i in range(n_frames):
+                save_mask(prompt["masks_dir"], i, factory(i))
+    return fake_track_objects
+
+
+def test_run_pipeline_multi_error_for_a_dead_saber_names_which_saber(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # "The click points were wrong" is not actionable when four sabers were
+    # tracked and the message doesn't say whose points. Saber 0 tracks fine
+    # here; saber 1 finds nothing. Stubbing glow to fail if called also keeps
+    # the existing "raise before burning the glow stage" guarantee honest.
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("render_glow_multi ran despite a track finding no blade")
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blank}),
+    )
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.render_glow_multi", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        run_pipeline_multi(
+            input_video=str(tiny_video_path),
+            sabers=[
+                {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+                {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+            ],
+            output_path=str(tmp_path / "final.mp4"),
+            job_dir=str(job_dir),
+            checkpoint_path="unused",
+            device="cpu",
+        )
+
+    message = str(excinfo.value)
+    assert "no blade for saber 1 in any of" in message, message
+    assert "click points" in message  # the existing advice is still there
+
+
+def test_run_pipeline_multi_rejects_an_unsupported_saber_count(tmp_path, monkeypatch, tiny_video_path):
+    # sabers=[] used to raise a bare KeyError from deep inside the per-object
+    # path building instead of saying what was wrong.
+    def fail_if_called(*a, **k):
+        raise AssertionError("extract_frames should not run for an invalid saber count")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.extract_frames", fail_if_called)
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    one = {"points": [[1, 1]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"}
+
+    for sabers in ([], [one] * 5):
+        with pytest.raises(ValueError, match="1-4 sabers"):
+            run_pipeline_multi(
+                input_video=str(tiny_video_path),
+                sabers=sabers,
+                output_path=str(tmp_path / "final.mp4"),
+                job_dir=str(job_dir),
+                checkpoint_path="unused",
+                device="cpu",
+            )
+
+
+def test_run_pipeline_multi_threads_each_sabers_prompt_frame_to_the_tracker(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # Automatic detection reports the frame an object was easiest to find --
+    # usually mid-swing. Dropping it here silently applied those points to
+    # frame 0 instead, against a frame the object had already left.
+    captured = {}
+
+    def fake_track_objects(frames_dir, prompts, checkpoint_path, config_name,
+                           device, n_frames, progress_cb=None):
+        captured["prompts"] = [dict(p) for p in prompts]
+        raise RuntimeError("stop here -- only the prompts matter")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        run_pipeline_multi(
+            input_video=str(tiny_video_path),
+            sabers=[
+                {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35,
+                 "voice": "neutral", "prompt_frame": 3},
+                {"points": [[20, 25]], "labels": [1], "color": "blue", "intensity": 0.35,
+                 "voice": "neutral"},
+            ],
+            output_path=str(tmp_path / "final.mp4"),
+            job_dir=str(job_dir),
+            checkpoint_path="unused",
+            device="cpu",
+        )
+
+    assert captured["prompts"][0]["prompt_frame"] == 3
+    assert captured["prompts"][1]["prompt_frame"] == 0  # defaults when the client omits it
+
+
+# ---------------------------------------------------------------------------
+# rerender_pipeline_multi
+# ---------------------------------------------------------------------------
+
+
+@requires_ffmpeg
+def test_rerender_pipeline_multi_reuses_cached_masks_for_a_new_color(tmp_path, monkeypatch, tiny_video_path):
+    job_dir = tmp_path / "job"
+    for oid in (0, 1):
+        masks_dir = job_dir / "masks" / str(oid)
+        for i in range(5):
+            mask = np.zeros((48, 64), dtype=bool)
+            mask[10:20, 5 + i * 3:11 + i * 3] = True
+            save_mask(str(masks_dir), i, mask)
+        motion_dir = job_dir / "motion"
+        motion_dir.mkdir(exist_ok=True)
+        compute_motion(str(masks_dir), str(motion_dir / f"{oid}.npz"))
+    (job_dir / "video_meta.txt").write_text("10.0\n5\n")
+    job_meta.write_job_meta(str(job_dir), source_video=str(tiny_video_path), object_ids=[0, 1])
+
+    output_path = tmp_path / "final.mp4"
+    result = rerender_pipeline_multi(
+        job_dir=str(job_dir),
+        output_path=str(output_path),
+        sabers=[
+            {"color": "green", "intensity": 0.6, "voice": "neutral"},
+            {"color": "blue", "intensity": 0.3, "voice": "jedi"},
+        ],
+    )
+
+    assert result == str(output_path)
+    assert output_path.exists() and output_path.stat().st_size > 0
+
+
+def test_rerender_pipeline_multi_rejects_a_saber_count_mismatch(tmp_path, tiny_video_path):
+    job_dir = tmp_path / "job"
+    masks_dir = job_dir / "masks" / "0"
+    for i in range(3):
+        mask = np.zeros((48, 64), dtype=bool)
+        mask[10:20, 5:11] = True
+        save_mask(str(masks_dir), i, mask)
+    motion_dir = job_dir / "motion"
+    motion_dir.mkdir(exist_ok=True)
+    compute_motion(str(masks_dir), str(motion_dir / "0.npz"))
+    (job_dir / "video_meta.txt").write_text("10.0\n3\n")
+    job_meta.write_job_meta(str(job_dir), source_video=str(tiny_video_path), object_ids=[0])
+
+    with pytest.raises(ValueError, match="1 tracked object"):
+        rerender_pipeline_multi(
+            job_dir=str(job_dir),
+            output_path=str(tmp_path / "final.mp4"),
+            sabers=[
+                {"color": "red", "intensity": 0.35, "voice": "neutral"},
+                {"color": "blue", "intensity": 0.35, "voice": "neutral"},
+            ],
+        )

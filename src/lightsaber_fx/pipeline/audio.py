@@ -224,6 +224,27 @@ def _soft_limit(x, ceiling=0.95):
     return ceiling * np.tanh(x / ceiling)
 
 
+def mix_hums(wav_paths, out_path):
+    """Sum 1-4 same-length, same-sample-rate stereo WAV files (one hum per
+    tracked saber) into a single track, soft-limited (`_soft_limit`, the
+    same tanh ceiling `synthesize_audio` already uses) so multiple sabers
+    moving in sync don't clip. `wav_paths` are guaranteed equal-length by
+    the caller -- every object's `synthesize_audio` call derives its
+    duration from the same shared `video_meta_path`.
+    """
+    mixed = None
+    sr = None
+    for path in wav_paths:
+        data, file_sr = sf.read(path)
+        if mixed is None:
+            mixed = np.zeros_like(data, dtype=np.float64)
+            sr = file_sr
+        mixed += data
+    mixed = _soft_limit(mixed, ceiling=0.95)
+    mixed = np.nan_to_num(mixed, nan=0.0, posinf=0.95, neginf=-0.95)
+    sf.write(out_path, mixed.astype(np.float32), sr)
+
+
 def _normalize_speed(speed, ref_percentile=90.0):
     """Map a non-negative speed array to a roughly-[0, 1.5] "how hard is
     this motion" scale, robust to outliers, without a hard discrete

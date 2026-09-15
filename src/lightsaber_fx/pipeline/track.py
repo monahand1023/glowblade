@@ -139,3 +139,88 @@ def track_object(
             save_mask(masks_dir, frame_idx, mask)
             written += 1
             report(min(written / n_frames * 100, 100.0), f"frame {written}/{n_frames}")
+
+
+def track_objects(
+    frames_dir,
+    prompts,
+    checkpoint_path,
+    config_name,
+    device,
+    n_frames,
+    progress_cb=None,
+):
+    """Like `track_object`, but for `len(prompts)` (1-4) objects tracked
+    together in one shared SAM2 session -- cheaper than N separate sessions,
+    since each frame's image features are encoded once regardless of object
+    count.
+
+    Each prompt carries its own `prompt_frame` (default 0), so an object
+    found by automatic detection is prompted on the frame it was actually
+    found in -- usually mid-swing, rarely frame 0. Propagation then runs
+    forward from those prompts and then backward, for the same reason
+    `track_object` does both: a prompt in the middle of the clip would
+    otherwise leave every earlier frame unmasked. When every prompt_frame
+    is 0 the reverse pass has only that one frame to do, so the behaviour
+    is unchanged from propagating forward alone.
+
+    Both passes emit the prompt frames themselves, so those masks are
+    written twice. That is a redundant write, not a conflict -- the same
+    logits produce the same mask -- and it keeps the loop free of special
+    cases.
+
+    Hard constraint: every object in one call must share the same
+    prompt_frame, and this rejects the call if they don't. Measured against
+    the pinned SAM2 build, conditioning objects on different frames within
+    one shared session breaks SAM2's memory attention -- a BFloat16/Float
+    dtype RuntimeError on CPU, and a hard Metal assertion on MPS that kills
+    the process outright rather than raising something a caller could
+    report. The frame itself is free to be any frame; it is only mixing
+    that is forbidden, which is what keeps single-saber auto-detect (one
+    object, one mid-swing frame) working.
+    """
+    # The two ways to support a mixed set would be one SAM2 session per
+    # distinct prompt frame -- giving up the shared image-feature encoding
+    # that makes this cheaper than N separate tracks -- or this: refuse it.
+    # Refusing is the current choice; a multi-slot picker that detects each
+    # saber separately is where that decision would need revisiting.
+    prompt_frames = {p.get("prompt_frame", 0) for p in prompts}
+    if len(prompt_frames) > 1:
+        raise ValueError(
+            "track_objects: all objects in one session must share the same "
+            "prompt_frame (mixing prompt frames crashes SAM2's memory attention, "
+            f"uncatchable on MPS) -- got {sorted(prompt_frames)}"
+        )
+
+    def report(pct, message):
+        if progress_cb:
+            progress_cb(pct, message)
+
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+    from sam2.build_sam import build_sam2_video_predictor
+    predictor = build_sam2_video_predictor(config_name, checkpoint_path, device=device)
+
+    state = predictor.init_state(video_path=frames_dir)
+    for prompt in prompts:
+        predictor.add_new_points_or_box(
+            state,
+            frame_idx=prompt.get("prompt_frame", 0),
+            obj_id=prompt["obj_id"],
+            points=np.array(prompt["points"], dtype=np.float32),
+            labels=np.array(prompt["labels"], dtype=np.int32),
+        )
+
+    masks_dir_by_obj_id = {p["obj_id"]: p["masks_dir"] for p in prompts}
+    for masks_dir in masks_dir_by_obj_id.values():
+        os.makedirs(masks_dir, exist_ok=True)
+
+    written = 0
+    total_writes = n_frames * len(prompts)
+    for reverse in (False, True):
+        for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state, reverse=reverse):
+            for i, obj_id in enumerate(obj_ids):
+                mask = (mask_logits[i] > 0.0).cpu().numpy().squeeze()
+                save_mask(masks_dir_by_obj_id[obj_id], frame_idx, mask)
+                written += 1
+            report(min(written / total_writes * 100, 100.0), f"frame {frame_idx + 1}/{n_frames}")

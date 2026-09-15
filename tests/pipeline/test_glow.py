@@ -129,6 +129,19 @@ def _load_png(output_frames_dir, idx):
     return img
 
 
+# Golden checksums pinning render_glow's output on the characterization clip
+# (6 frames, extending/motion/core/colour/glow/trail all exercised). Updated
+# after Task 1 fix round to include ignition (on by default).
+EXPECTED_CHARACTERIZATION_CHECKSUMS = [
+    12474070,  # frame 0
+    12492073,  # frame 1
+    12509242,  # frame 2
+    12529970,  # frame 3
+    12550266,  # frame 4
+    12561351,  # frame 5
+]
+
+
 # ---------------------------------------------------------------------------
 # Basic contract: PNG sequence, dimensions, progress, finite/in-range pixels
 # ---------------------------------------------------------------------------
@@ -218,6 +231,7 @@ def test_blade_extend_lights_beyond_mask_extent(tmp_path):
             clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
             out_dir, clip["motion_path"], ignition_ramp_seconds=0,
             blade_extend=do_extend, tip_extend_frac=tip_extend_frac,
+            ignition_ramp_seconds=0,
         )
 
     img_true = _load_png(out_true, 0)
@@ -377,7 +391,8 @@ def test_trail_leaves_energy_at_previous_position(tmp_path):
     out_dir = str(tmp_path / "out")
     render_glow(
         clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
-        out_dir, clip["motion_path"], trail_decay=0.75, ignition_ramp_seconds=0,
+        out_dir, clip["motion_path"], trail_decay=0.75,
+        ignition_ramp_seconds=0,
     )
 
     mask0 = blade.load_mask(clip["masks_dir"], 0)
@@ -413,3 +428,247 @@ def test_render_glow_is_reproducible_with_same_seed(tmp_path):
         a = _load_png(out_a, i)
         b = _load_png(out_b, i)
         assert np.array_equal(a, b)
+
+
+# ---------------------------------------------------------------------------
+# Characterization test: golden baseline before Task 1's extraction refactor
+# ---------------------------------------------------------------------------
+
+def test_render_glow_output_is_unchanged_by_the_extraction_refactor(tmp_path):
+    # Characterization test for the Task 1 refactor in the multi-saber
+    # backend plan: pins render_glow's exact pixel output on a
+    # representative clip (extension, core/colour/glow, motion blur, and
+    # the trail all exercised) before _composite_blade_contribution is
+    # extracted, so the refactor can be verified byte-for-byte.
+    clip = _build_blade_clip(tmp_path, "characterize", n_frames=6, dx=12, blade_len=60)
+    out_dir = str(tmp_path / "out")
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        out_dir, clip["motion_path"], color=(255, 90, 60),
+    )
+    frames = [_load_png(out_dir, i) for i in range(clip["n_frames"])]
+    checksums = [int(f.astype(np.uint64).sum()) for f in frames]
+    # A committed golden value, not a live re-comparison against another
+    # render -- if this assertion ever needs to change, that means
+    # render_glow's real output changed, which must be a deliberate,
+    # reviewed decision, not an accidental refactor side effect.
+    assert checksums == EXPECTED_CHARACTERIZATION_CHECKSUMS
+
+
+# ---------------------------------------------------------------------------
+# Ignition/extinguish -- blade growth/shrinkage at clip start/end
+# ---------------------------------------------------------------------------
+
+def test_ignition_fraction_ramps_up_from_the_first_active_frame():
+    assert ignition_fraction(0, 0, 100, 4) == pytest.approx(0.25)
+    assert ignition_fraction(1, 0, 100, 4) == pytest.approx(0.5)
+    assert ignition_fraction(3, 0, 100, 4) == 1.0
+
+
+def test_ignition_fraction_ramps_down_toward_the_last_active_frame():
+    assert ignition_fraction(100, 0, 100, 4) == pytest.approx(0.25)
+    assert ignition_fraction(99, 0, 100, 4) == pytest.approx(0.5)
+    assert ignition_fraction(97, 0, 100, 4) == 1.0
+
+
+def test_ignition_fraction_is_full_in_the_steady_middle():
+    assert ignition_fraction(50, 0, 100, 4) == 1.0
+
+
+def test_ignition_fraction_tapers_instead_of_plateauing_on_a_short_window():
+    # A 5-frame active window with a 4-frame ramp is too short for both the
+    # rise and the fall to complete separately -- they must overlap, so the
+    # peak never reaches 1.0 (a triangular taper, not a clipped plateau).
+    frac = ignition_fraction(2, 0, 4, 4)
+    assert 0.0 < frac < 1.0
+
+
+def test_ignition_fraction_defaults_to_full_when_never_active():
+    assert ignition_fraction(5, None, None, 4) == 1.0
+
+
+def test_ignition_fraction_defaults_to_full_when_ramp_frames_is_zero():
+    assert ignition_fraction(5, 0, 100, 0) == 1.0
+
+
+def test_ignition_ramp_shortens_the_blade_at_the_start_of_the_clip(tmp_path):
+    # 20 frames at 24fps gives an ~8-frame ramp (IGNITION_RAMP_SECONDS=0.35),
+    # comfortably shorter than the clip -- frame 0 should be mid-ignition
+    # while frame 10 sits in the steady middle.
+    clip = _build_blade_clip(tmp_path, "ignition", n_frames=20, dx=3)
+
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        clip["output_frames_dir"], clip["motion_path"],
+    )
+
+    baseline = float(clip["plate_value"])
+
+    def signal_at_raw_tip(frame_idx):
+        mask = blade.load_mask(clip["masks_dir"], frame_idx)
+        geo = blade.fit_blade(mask)
+        px, py = round(geo.tip[0]), round(geo.tip[1])
+        img = _load_png(clip["output_frames_dir"], frame_idx)
+        return float(img[py, px].astype(np.float64).max()) - baseline
+
+    start_signal = signal_at_raw_tip(0)
+    middle_signal = signal_at_raw_tip(10)
+
+    assert middle_signal > 20  # solidly lit once ignition has ramped up
+    assert start_signal < middle_signal - 10  # visibly shorter right at the start
+
+
+# ---------------------------------------------------------------------------
+# render_glow_multi -- compositing up to 4 independently-colored sabers
+# ---------------------------------------------------------------------------
+
+def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path):
+    # Two synthetic objects, far apart, moving independently, each its own
+    # color -- the core claim of multi-saber rendering.
+    clip_a = _build_blade_clip(tmp_path, "objA", n_frames=5, blade_x0=10, dx=2, blade_len=30, blade_height=8)
+    clip_b = _build_blade_clip(tmp_path, "objB", n_frames=5, blade_x0=150, dx=2, blade_len=30, blade_height=8, width=220)
+
+    output_frames_dir = tmp_path / "glow_frames"
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+
+    render_glow_multi(
+        clip_a["frames_dir"],
+        [
+            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (255, 0, 0), "intensity": 0.4},
+            {"masks_dir": clip_b["masks_dir"], "motion_path": clip_b["motion_path"], "color": (0, 255, 0), "intensity": 0.4},
+        ],
+        clip_a["video_meta_path"], str(output_frames_dir),
+        ignition_ramp_seconds=0,
+    )
+
+    img = _load_png(str(output_frames_dir), 0).astype(np.float64)
+    baseline = float(clip_a["plate_value"])
+    signal = img - baseline  # (h, w, 3), BGR order
+
+    mask_a = blade.load_mask(clip_a["masks_dir"], 0)
+    geo_a = blade.fit_blade(mask_a)
+    mask_b = blade.load_mask(clip_b["masks_dir"], 0)
+    geo_b = blade.fit_blade(mask_b)
+
+    # The exact centroid pixel saturates to solid white for either color
+    # alike (core brightness clips there), so this searches a window
+    # around each object's own centroid for the point of clearest
+    # separation between its own color channel and the other object's,
+    # instead of assuming one exact unsaturated offset.
+    def best_own_color_pixel(cx, cy, own_channel, other_channel, radius=25):
+        y0, y1 = max(0, cy - radius), min(img.shape[0], cy + radius + 1)
+        x0, x1 = max(0, cx - radius), min(img.shape[1], cx + radius + 1)
+        region = signal[y0:y1, x0:x1]
+        separation = region[..., own_channel] - region[..., other_channel]
+        iy, ix = np.unravel_index(np.argmax(separation), separation.shape)
+        return region[iy, ix]
+
+    px_a, py_a = round(geo_a.centroid[0]), round(geo_a.centroid[1])
+    px_b, py_b = round(geo_b.centroid[0]), round(geo_b.centroid[1])
+
+    # BGR order: object A is pure blue (channel 0), object B is pure green (channel 1).
+    best_a = best_own_color_pixel(px_a, py_a, own_channel=0, other_channel=1)
+    best_b = best_own_color_pixel(px_b, py_b, own_channel=1, other_channel=0)
+
+    assert best_a[0] > 15  # object A's own blue channel is clearly lit somewhere near its blade
+    assert best_a[0] > best_a[1] + 10  # ...and clearly separated from B's color there
+    assert best_b[1] > 15  # object B's own green channel is clearly lit somewhere near its blade
+    assert best_b[1] > best_b[0] + 10  # ...and clearly separated from A's color there
+
+
+def test_render_glow_multi_with_one_object_matches_render_glow(tmp_path):
+    # The N=1 case must agree with today's render_glow. Now that light wrap
+    # is per-object (each object wrapping its own blade at full strength)
+    # there is no 1/N scaling left to differ at all, and this measures a max
+    # absolute difference of exactly 0; the small tolerance below stays only
+    # to absorb trivial summing-order/floating-point noise across platforms.
+    clip = _build_blade_clip(tmp_path, "equiv", n_frames=4)
+    out_single = str(tmp_path / "out_single")
+    out_multi = str(tmp_path / "out_multi")
+
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        out_single, clip["motion_path"], color=(40, 40, 255), spill_strength=0.35,
+        ignition_ramp_seconds=0,
+    )
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+    render_glow_multi(
+        clip["frames_dir"],
+        [{"masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"], "color": (40, 40, 255), "intensity": 0.35}],
+        clip["video_meta_path"], out_multi,
+        ignition_ramp_seconds=0,
+    )
+
+    for i in range(clip["n_frames"]):
+        a = _load_png(out_single, i).astype(np.int16)
+        b = _load_png(out_multi, i).astype(np.int16)
+        assert np.abs(a - b).max() <= 2  # allow trivial floating-point rounding differences
+
+
+def test_render_glow_multi_light_wrap_uses_each_objects_own_color(tmp_path):
+    # Light wrap spills a blade's color onto the plate around it. Wrapping
+    # the union of every blade shape in every object's color -- which is what
+    # this used to do, at 1/N strength each -- tints every blade's halo with
+    # every other saber's color: a red-vs-blue duel comes out with two
+    # magenta-ish halos. Each object's wrap must use only its own blade.
+    #
+    # Object A is pure blue in BGR, so nothing else in the pipeline can tell
+    # its green channel from its red one: the plate is neutral gray, knoll
+    # darkening is a grayscale multiplier, and the tonemap is the same curve
+    # per channel. Green lifting above red next to A's blade therefore means
+    # exactly one thing -- B's green leaked into A's wrap.
+    clip_a = _build_blade_clip(tmp_path, "wrapA", n_frames=2, blade_x0=10, dx=2, blade_len=30, blade_height=8)
+    clip_b = _build_blade_clip(tmp_path, "wrapB", n_frames=2, blade_x0=150, dx=2, blade_len=30, blade_height=8, width=220)
+
+    output_frames_dir = tmp_path / "glow_frames"
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+
+    render_glow_multi(
+        clip_a["frames_dir"],
+        [
+            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (255, 0, 0), "intensity": 0.4},
+            {"masks_dir": clip_b["masks_dir"], "motion_path": clip_b["motion_path"], "color": (0, 255, 0), "intensity": 0.4},
+        ],
+        clip_a["video_meta_path"], str(output_frames_dir),
+        ignition_ramp_seconds=0,
+        # Above the 0.15 default purely to make the leak unmissable: the bug
+        # scales with wrap strength (it measured G-R of 17 here at 0.8 versus
+        # 4 at the default), so a decisive margin beats a marginal one.
+        light_wrap_strength=0.8,
+    )
+
+    # Just past the tip of A's blade: outside both objects' masks, inside A's
+    # wrap dilation radius (the 12px kernel reaches ~6px past the blade,
+    # which ends at x=39), and ~100px clear of B, whose mask starts at x=150.
+    sample_x, sample_y = 44, 45
+    mask_a = blade.load_mask(clip_a["masks_dir"], 0)
+    mask_b = blade.load_mask(clip_b["masks_dir"], 0)
+    assert not mask_a[sample_y, sample_x], "sample point is inside object A's own mask"
+    assert not mask_b[sample_y, sample_x], "sample point is inside object B's mask"
+
+    img = _load_png(str(output_frames_dir), 0).astype(np.float64)
+    b, g, r = img[sample_y, sample_x]
+
+    # A is lit in its own color here...
+    assert b - g > 30, f"object A's blue wrap is not visible at the sample point (BGR={b},{g},{r})"
+    # ...and B's green has not come along with it. Pre-fix this read ~17.
+    assert abs(g - r) <= 2, f"object B's green leaked into object A's wrap (BGR={b},{g},{r})"
+
+
+def test_render_glow_multi_rejects_an_unsupported_object_count(tmp_path):
+    # Zero objects used to render an untouched plate -- a silently wrong
+    # result rather than an error.
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+
+    clip = _build_blade_clip(tmp_path, "guard", n_frames=1)
+    one = {
+        "masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"],
+        "color": (40, 40, 255), "intensity": 0.35,
+    }
+
+    for objects in ([], [one] * 5):
+        with pytest.raises(ValueError, match="1-4 objects"):
+            render_glow_multi(
+                clip["frames_dir"], objects, clip["video_meta_path"],
+                str(tmp_path / "glow_frames"),
+            )

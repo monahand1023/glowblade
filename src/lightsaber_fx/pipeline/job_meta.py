@@ -39,24 +39,30 @@ class JobInfo(NamedTuple):
     created_at: Optional[float]
     rerenderable: bool
     reason: Optional[str]  # None when rerenderable; otherwise names what's missing
+    object_ids: Optional[list] = None
 
 
 def _job_meta_path(job_dir):
     return os.path.join(str(job_dir), JOB_META_FILENAME)
 
 
-def write_job_meta(job_dir, source_video):
+def write_job_meta(job_dir, source_video, object_ids=None):
     """Record `source_video`'s path (resolved to absolute, so it stays
     correct even if the working directory changes before a later
     `rerender`) alongside a creation timestamp.
 
     Called once, by `run_pipeline`, right after extract -- this is the only
     bookkeeping a job needs beyond its masks/motion.npz to be re-renderable
-    later without re-running SAM2."""
+    later without re-running SAM2.
+
+    For multi-object jobs, `object_ids` (a list of object IDs being tracked)
+    is also recorded, enabling per-object mask/motion rerenderability checks."""
     meta = {
         "source_video": os.path.abspath(str(source_video)),
         "created_at": time.time(),
     }
+    if object_ids is not None:
+        meta["object_ids"] = list(object_ids)
     with open(_job_meta_path(job_dir), "w") as f:
         json.dump(meta, f)
     return meta
@@ -94,20 +100,38 @@ def describe_job(job_dir):
     and a source clip that still exists on disk at its recorded path.
     frames/ is deliberately NOT required: it is re-extracted from the source
     clip, which costs seconds against the hundreds of megabytes keeping it
-    would cost (docs/design-notes.md, "Two storage trade-offs")."""
+    would cost (docs/design-notes.md, "Two storage trade-offs").
+
+    For multi-object jobs (when `object_ids` is in the recorded metadata),
+    this checks per-object mask directories (`masks/{obj_id}/`) and motion
+    files (`motion/{obj_id}.npz`) instead of the flat layout."""
     job_dir = str(job_dir)
     job_id = os.path.basename(job_dir.rstrip(os.sep))
     meta = read_job_meta(job_dir)
     source_video = meta.get("source_video") if meta else None
     created_at = meta.get("created_at") if meta else None
+    object_ids = meta.get("object_ids") if meta else None
     frame_count = _read_frame_count(job_dir)
 
     reasons = []
-    masks_dir = os.path.join(job_dir, "masks")
-    if not os.path.isdir(masks_dir) or not mask_frame_indices(masks_dir):
-        reasons.append("no masks/ (tracking was never run, or the job was cleaned)")
-    if not os.path.exists(os.path.join(job_dir, "motion.npz")):
-        reasons.append("no motion.npz")
+    if object_ids is not None:
+        for obj_id in object_ids:
+            # int() rather than str(): the ids come straight out of the job's
+            # JSON, and a malformed one ("0 ", "../x") would otherwise build a
+            # path that quietly does not exist and be reported as a missing
+            # mask dir instead of as the bad metadata it is.
+            obj_masks_dir = os.path.join(job_dir, "masks", str(int(obj_id)))
+            if not os.path.isdir(obj_masks_dir) or not mask_frame_indices(obj_masks_dir):
+                reasons.append(f"no masks/ for object {obj_id} (tracking was never run, or the job was cleaned)")
+            if not os.path.exists(os.path.join(job_dir, "motion", f"{int(obj_id)}.npz")):
+                reasons.append(f"no motion/{obj_id}.npz")
+    else:
+        masks_dir = os.path.join(job_dir, "masks")
+        if not os.path.isdir(masks_dir) or not mask_frame_indices(masks_dir):
+            reasons.append("no masks/ (tracking was never run, or the job was cleaned)")
+        if not os.path.exists(os.path.join(job_dir, "motion.npz")):
+            reasons.append("no motion.npz")
+
     if not os.path.exists(os.path.join(job_dir, "video_meta.txt")):
         reasons.append("no video_meta.txt")
     if source_video is None:
@@ -122,6 +146,7 @@ def describe_job(job_dir):
         created_at=created_at,
         rerenderable=not reasons,
         reason="; ".join(reasons) if reasons else None,
+        object_ids=object_ids,
     )
 
 

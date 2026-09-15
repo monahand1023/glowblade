@@ -2,12 +2,12 @@ import os
 import shutil
 
 from . import job_meta
-from .audio import synthesize_audio
+from .audio import mix_hums, synthesize_audio
 from .blade import compute_motion
 from .frames import extract_frames
-from .glow import parse_color, render_glow
+from .glow import parse_color, render_glow, render_glow_multi
 from .mux import encode
-from .track import track_object
+from .track import track_object, track_objects
 
 
 def _job_paths(job_dir):
@@ -70,7 +70,7 @@ def _render_from_masks(job_dir, paths, fps, output_path, color_bgr, intensity, b
 _LOW_COVERAGE_FRAC = 0.5
 
 
-def _require_usable_track(n_tracked, n_with_blade, report):
+def _require_usable_track(n_tracked, n_with_blade, report, obj_id=None):
     """Stop a doomed render at the motion stage instead of at the end of it.
 
     A track that found nothing still costs the full glow stage -- on a 10 s
@@ -90,19 +90,27 @@ def _require_usable_track(n_tracked, n_with_blade, report):
     back -- so low coverage reports a warning through the normal progress
     channel (the CLI prints it, the web app streams it) and the render
     proceeds.
+
+    With several objects tracked at once, "the points were wrong" is not
+    actionable unless the user knows *which* saber's points, so callers
+    that track more than one pass `obj_id` and it is named in both
+    messages. Omitting it (the single-object callers) leaves the messages
+    exactly as they were.
     """
     if n_tracked and not n_with_blade:
+        where = f" for saber {obj_id}" if obj_id is not None else ""
         raise RuntimeError(
-            f"Tracking produced no blade in any of {n_tracked} frames, so there is "
-            "nothing to render. This almost always means the click points were "
-            "wrong: an include point that wasn't on the object, or an exclude "
+            f"Tracking produced no blade{where} in any of {n_tracked} frames, so "
+            "there is nothing to render. This almost always means the click points "
+            "were wrong: an include point that wasn't on the object, or an exclude "
             "point that landed on it. Check the points against the first frame "
             "and try again."
         )
     if n_with_blade and n_with_blade < _LOW_COVERAGE_FRAC * n_tracked:
+        where = f" for saber {obj_id}" if obj_id is not None else ""
         report(
             100,
-            f"warning: a blade was found in only {n_with_blade} of {n_tracked} "
+            f"warning: a blade was found{where} in only {n_with_blade} of {n_tracked} "
             "frames -- the mask was lost for most of the clip, so expect the glow "
             "to flicker or disappear. Rendering anyway.",
         )
@@ -159,6 +167,119 @@ def run_pipeline(
     )
 
 
+def _multi_job_paths(job_dir, object_ids):
+    """Per-object mask/motion paths for a multi-saber job, plus the shared
+    (object-count-agnostic) paths every job already uses."""
+    return {
+        "frames_dir": os.path.join(job_dir, "frames"),
+        "video_meta_path": os.path.join(job_dir, "video_meta.txt"),
+        "glow_frames_dir": os.path.join(job_dir, "glow_frames"),
+        "masks_dirs": {oid: os.path.join(job_dir, "masks", str(oid)) for oid in object_ids},
+        "motion_paths": {oid: os.path.join(job_dir, "motion", f"{oid}.npz") for oid in object_ids},
+        "audio_paths": {oid: os.path.join(job_dir, f"saber_audio_{oid}.wav") for oid in object_ids},
+        "mixed_audio_path": os.path.join(job_dir, "saber_audio.wav"),
+    }
+
+
+def _render_multi_from_masks(job_dir, paths, object_ids, sabers, color_bgrs, fps, output_path, blade_extend, stage_cb):
+    """The tail both `run_pipeline_multi` and `rerender_pipeline_multi` share:
+    glow -> per-object audio -> mix -> mux against whatever frames/masks/
+    motion currently sit in `job_dir`, plus cleanup of the glow stage's own
+    PNG-sequence intermediate. Mirrors `_render_from_masks`'s role for the
+    single-object pair, and exists for the same reason: a full render and a
+    rerender diverging on stage order/arguments here is exactly the kind of
+    drift a reviewer flagged earlier in this project."""
+    objects = [
+        {
+            "masks_dir": paths["masks_dirs"][oid],
+            "motion_path": paths["motion_paths"][oid],
+            "color": color_bgrs[i],
+            "intensity": sabers[i]["intensity"],
+        }
+        for i, oid in enumerate(object_ids)
+    ]
+    render_glow_multi(
+        paths["frames_dir"], objects, paths["video_meta_path"], paths["glow_frames_dir"],
+        blade_extend=blade_extend, progress_cb=stage_cb("glow"),
+    )
+
+    for i, oid in enumerate(object_ids):
+        synthesize_audio(
+            paths["motion_paths"][oid], paths["video_meta_path"], paths["audio_paths"][oid],
+            voice=sabers[i]["voice"], progress_cb=stage_cb("audio"),
+        )
+    mix_hums(list(paths["audio_paths"].values()), paths["mixed_audio_path"])
+
+    encode(paths["glow_frames_dir"], fps, paths["mixed_audio_path"], output_path, progress_cb=stage_cb("mux"))
+    shutil.rmtree(paths["glow_frames_dir"], ignore_errors=True)
+
+    return output_path
+
+
+def run_pipeline_multi(
+    input_video,
+    sabers,
+    output_path,
+    job_dir,
+    checkpoint_path,
+    device,
+    config_name="configs/sam2.1/sam2.1_hiera_s.yaml",
+    blade_extend=True,
+    progress_cb=None,
+):
+    """Like `run_pipeline`, but for 1-4 simultaneously tracked sabers, each
+    with its own color/intensity/voice, tracked together in one SAM2
+    session via `track_objects`.
+
+    Each saber carries its own optional `prompt_frame` (default 0): the
+    frame its points were placed on. Automatic detection reports the frame
+    where an object was easiest to find, which is usually mid-swing rather
+    than frame 0, so this travels through to `track_objects`, which
+    prompts there and propagates both ways.
+    """
+    if not 1 <= len(sabers) <= 4:
+        raise ValueError("run_pipeline_multi supports 1-4 sabers")
+    stage_cb = _make_stage_cb(progress_cb)
+    color_bgrs = [parse_color(s["color"]) for s in sabers]  # validate every color up front
+
+    object_ids = list(range(len(sabers)))
+    paths = _multi_job_paths(job_dir, object_ids)
+    os.makedirs(os.path.dirname(paths["masks_dirs"][0]), exist_ok=True)
+    os.makedirs(os.path.dirname(paths["motion_paths"][0]), exist_ok=True)
+
+    if progress_cb:
+        progress_cb("extract", 0, "extracting frames")
+    fps, n_frames = extract_frames(input_video, paths["frames_dir"])
+    with open(paths["video_meta_path"], "w") as f:
+        f.write(f"{fps}\n{n_frames}\n")
+    job_meta.write_job_meta(job_dir, source_video=input_video, object_ids=object_ids)
+    if progress_cb:
+        progress_cb("extract", 100, f"{n_frames} frames at {fps:.2f} fps")
+
+    prompts = [
+        {
+            "obj_id": oid, "masks_dir": paths["masks_dirs"][oid],
+            "points": s["points"], "labels": s["labels"],
+            "prompt_frame": s.get("prompt_frame", 0),
+        }
+        for oid, s in zip(object_ids, sabers)
+    ]
+    track_objects(
+        paths["frames_dir"], prompts, checkpoint_path, config_name, device, n_frames,
+        progress_cb=stage_cb("track"),
+    )
+
+    for oid in object_ids:
+        n_tracked, n_with_blade = compute_motion(
+            paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
+        )
+        _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"), obj_id=oid)
+
+    return _render_multi_from_masks(
+        job_dir, paths, object_ids, sabers, color_bgrs, fps, output_path, blade_extend, stage_cb,
+    )
+
+
 def rerender_pipeline(
     job_dir,
     output_path,
@@ -201,6 +322,15 @@ def rerender_pipeline(
     color_bgr = parse_color(color)
 
     info = job_meta.require_rerenderable(job_dir)
+    # A multi-object job has masks/{obj_id}/ and motion/{obj_id}.npz, not the
+    # flat masks/ + motion.npz this function reads -- require_rerenderable
+    # passes it (it checks the per-object layout), and the next stage would
+    # then die on a bare FileNotFoundError for motion.npz. Say so instead.
+    if info.object_ids is not None:
+        raise job_meta.JobNotRerenderableError(
+            f"This job tracked {len(info.object_ids)} objects; `lightsaber-fx rerender` "
+            "only handles single-object jobs. Re-render it from the web app."
+        )
 
     paths = _job_paths(job_dir)
 
@@ -214,4 +344,43 @@ def rerender_pipeline(
 
     return _render_from_masks(
         job_dir, paths, fps, output_path, color_bgr, intensity, blade_extend, voice, stage_cb,
+    )
+
+
+def rerender_pipeline_multi(
+    job_dir,
+    output_path,
+    sabers,
+    blade_extend=True,
+    progress_cb=None,
+):
+    """Re-render an existing multi-saber job with new color/intensity/voice
+    per saber, reusing every object's cached tracking masks -- `track_objects`
+    never runs. Mirrors `rerender_pipeline`'s re-extract-frames-but-reuse-
+    masks trade-off, generalized to N objects.
+    """
+    stage_cb = _make_stage_cb(progress_cb)
+    color_bgrs = [parse_color(s["color"]) for s in sabers]  # validate before touching the job dir
+
+    info = job_meta.require_rerenderable(job_dir)
+    object_ids = info.object_ids
+    if object_ids is None:
+        raise ValueError("This job has no recorded object_ids -- it isn't a multi-saber job")
+    if len(sabers) != len(object_ids):
+        raise ValueError(
+            f"This job has {len(object_ids)} tracked object(s), but {len(sabers)} saber(s) were given"
+        )
+
+    paths = _multi_job_paths(job_dir, object_ids)
+
+    if progress_cb:
+        progress_cb("extract", 0, "re-extracting frames from source clip")
+    fps, n_frames = extract_frames(info.source_video, paths["frames_dir"])
+    with open(paths["video_meta_path"], "w") as f:
+        f.write(f"{fps}\n{n_frames}\n")
+    if progress_cb:
+        progress_cb("extract", 100, f"{n_frames} frames at {fps:.2f} fps")
+
+    return _render_multi_from_masks(
+        job_dir, paths, object_ids, sabers, color_bgrs, fps, output_path, blade_extend, stage_cb,
     )

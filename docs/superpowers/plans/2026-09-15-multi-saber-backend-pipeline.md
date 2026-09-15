@@ -26,21 +26,49 @@ OpenCV, NumPy, soundfile, FastAPI, pytest.
 
 ## Global Constraints
 
+> **Amended 2026-09-15, after implementation and final whole-branch review.**
+> Two constraints below no longer describe what shipped; corrected here
+> rather than silently rewritten, since the original text is still the
+> record of what was originally intended:
+>
+> - **`prompt_frame`**: the final review found that hardcoding every saber's
+>   SAM2 prompt at frame 0 silently broke the existing single-object
+>   mid-clip auto-detect flow (`/detect` finds a mid-swing frame, the UI
+>   shows it, the user's points landed on frame 0 instead with no error).
+>   Fixed: each saber now carries its own `prompt_frame` (default 0),
+>   threaded through `server.py` -> `run_pipeline_multi` -> `track_objects`,
+>   with `track_objects` propagating both directions (matching the existing
+>   single-object `track_object`) whenever any prompt frame is non-zero.
+>   A defensive guard (`track_objects`, and `_parse_saber_specs` at the web
+>   layer) rejects a request where different objects specify *different*
+>   prompt frames in the same SAM2 session -- discovered during this fix to
+>   crash SAM2's memory attention, uncatchable on MPS. So: mid-clip
+>   prompting works again (the bug this fixes), genuine multi-object
+>   auto-detect (several *different* mid-clip frames in one render) is not
+>   supported and is explicitly rejected rather than silently broken.
+> - **`render_glow` byte-for-byte unchanged**: true of the Task 1 refactor
+>   itself (extracting `_composite_blade_contribution` changed nothing).
+>   Task 1's *fix round* then deliberately changed `render_glow`'s real
+>   default behavior on top of that refactor -- porting in an already-
+>   approved, already-tested ignition-ramp effect and reduced motion-blur
+>   defaults from unrelated, uncommitted work earlier in the same session,
+>   because the plan (this document) had been written assuming that work
+>   already existed on this branch, when it didn't. See the SDD ledger's
+>   "## Task 1" entry for the full ruling. The refactor's own behavior-
+>   preservation guarantee held (verified via a characterization test);
+>   the *defaults* changed on purpose immediately after.
+
 - Up to 4 objects per job (`len(sabers) in range(1, 5)`, validated at the API layer).
-- Every saber prompt uses `prompt_frame=0` -- auto-detect and mid-clip
-  prompting are not extended to multi-object in this plan (see spec,
-  "Explicitly out of scope"). `propagate_in_video` runs forward-only, once,
-  for the whole shared session.
-- The CLI (`lightsaber-fx run`/`rerender`) is untouched -- it keeps calling
-  `track_object`/`render_glow`/`rerender_pipeline` exactly as today.
+- The CLI (`lightsaber-fx run`/`rerender`) is untouched for rendering -- it
+  keeps calling `track_object`/`render_glow`/`rerender_pipeline` exactly as
+  today. (The final review added one guard: single-object `rerender_pipeline`
+  now rejects a multi-object job with a clear error instead of crashing,
+  since `job_meta.describe_job` -- shared by both the CLI and the web app --
+  started reporting such jobs as rerenderable in Task 5.)
 - New job directory layout (`masks/{obj_id}/`, `motion/{obj_id}.npz`,
   `object_ids` in `job_meta.json`) is **not** backward compatible with job
   directories created before this change -- those become non-rerenderable.
   Acceptable per spec; no migration code.
-- `render_glow` (existing, single-object) must remain byte-for-byte
-  unchanged in its public signature and behavior. Its existing 20 tests in
-  `tests/pipeline/test_glow.py` must all still pass, unmodified, after the
-  Task 1 refactor.
 - `blade_extend` stays one job-level toggle shared by every object -- never
   per-object.
 
