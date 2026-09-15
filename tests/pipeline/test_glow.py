@@ -6,6 +6,7 @@ import pytest
 
 from lightsaber_fx.pipeline import blade
 from lightsaber_fx.pipeline.glow import (
+    ignition_fraction,
     knoll_darken,
     parse_color,
     render_glow,
@@ -93,15 +94,15 @@ def _load_png(output_frames_dir, idx):
 
 
 # Golden checksums pinning render_glow's output on the characterization clip
-# (6 frames, extending/motion/core/colour/glow/trail all exercised). Computed
-# from the current, unrefactored render_glow before Task 1's extraction.
+# (6 frames, extending/motion/core/colour/glow/trail all exercised). Updated
+# after Task 1 fix round to include ignition (on by default).
 EXPECTED_CHARACTERIZATION_CHECKSUMS = [
-    12551030,  # frame 0
-    12578321,  # frame 1
-    12600557,  # frame 2
-    12614188,  # frame 3
-    12622850,  # frame 4
-    12630675,  # frame 5
+    12474070,  # frame 0
+    12492073,  # frame 1
+    12509242,  # frame 2
+    12529970,  # frame 3
+    12550266,  # frame 4
+    12561351,  # frame 5
 ]
 
 
@@ -194,6 +195,7 @@ def test_blade_extend_lights_beyond_mask_extent(tmp_path):
             clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
             out_dir, clip["motion_path"],
             blade_extend=do_extend, tip_extend_frac=tip_extend_frac,
+            ignition_ramp_seconds=0,
         )
 
     img_true = _load_png(out_true, 0)
@@ -244,6 +246,7 @@ def test_core_is_narrower_than_colour_band(tmp_path):
     render_glow(
         clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
         out_dir, clip["motion_path"], color=(255, 0, 0), blade_extend=True,
+        ignition_ramp_seconds=0,
     )
     img = _load_png(out_dir, 0).astype(np.float64)
 
@@ -326,6 +329,7 @@ def test_trail_leaves_energy_at_previous_position(tmp_path):
     render_glow(
         clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
         out_dir, clip["motion_path"], trail_decay=0.75,
+        ignition_ramp_seconds=0,
     )
 
     mask0 = blade.load_mask(clip["masks_dir"], 0)
@@ -386,3 +390,66 @@ def test_render_glow_output_is_unchanged_by_the_extraction_refactor(tmp_path):
     # render_glow's real output changed, which must be a deliberate,
     # reviewed decision, not an accidental refactor side effect.
     assert checksums == EXPECTED_CHARACTERIZATION_CHECKSUMS
+
+
+# ---------------------------------------------------------------------------
+# Ignition/extinguish -- blade growth/shrinkage at clip start/end
+# ---------------------------------------------------------------------------
+
+def test_ignition_fraction_ramps_up_from_the_first_active_frame():
+    assert ignition_fraction(0, 0, 100, 4) == pytest.approx(0.25)
+    assert ignition_fraction(1, 0, 100, 4) == pytest.approx(0.5)
+    assert ignition_fraction(3, 0, 100, 4) == 1.0
+
+
+def test_ignition_fraction_ramps_down_toward_the_last_active_frame():
+    assert ignition_fraction(100, 0, 100, 4) == pytest.approx(0.25)
+    assert ignition_fraction(99, 0, 100, 4) == pytest.approx(0.5)
+    assert ignition_fraction(97, 0, 100, 4) == 1.0
+
+
+def test_ignition_fraction_is_full_in_the_steady_middle():
+    assert ignition_fraction(50, 0, 100, 4) == 1.0
+
+
+def test_ignition_fraction_tapers_instead_of_plateauing_on_a_short_window():
+    # A 5-frame active window with a 4-frame ramp is too short for both the
+    # rise and the fall to complete separately -- they must overlap, so the
+    # peak never reaches 1.0 (a triangular taper, not a clipped plateau).
+    frac = ignition_fraction(2, 0, 4, 4)
+    assert 0.0 < frac < 1.0
+
+
+def test_ignition_fraction_defaults_to_full_when_never_active():
+    assert ignition_fraction(5, None, None, 4) == 1.0
+
+
+def test_ignition_fraction_defaults_to_full_when_ramp_frames_is_zero():
+    assert ignition_fraction(5, 0, 100, 0) == 1.0
+
+
+def test_ignition_ramp_shortens_the_blade_at_the_start_of_the_clip(tmp_path):
+    # 20 frames at 24fps gives an ~8-frame ramp (IGNITION_RAMP_SECONDS=0.35),
+    # comfortably shorter than the clip -- frame 0 should be mid-ignition
+    # while frame 10 sits in the steady middle.
+    clip = _build_blade_clip(tmp_path, "ignition", n_frames=20, dx=3)
+
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        clip["output_frames_dir"], clip["motion_path"],
+    )
+
+    baseline = float(clip["plate_value"])
+
+    def signal_at_raw_tip(frame_idx):
+        mask = blade.load_mask(clip["masks_dir"], frame_idx)
+        geo = blade.fit_blade(mask)
+        px, py = round(geo.tip[0]), round(geo.tip[1])
+        img = _load_png(clip["output_frames_dir"], frame_idx)
+        return float(img[py, px].astype(np.float64).max()) - baseline
+
+    start_signal = signal_at_raw_tip(0)
+    middle_signal = signal_at_raw_tip(10)
+
+    assert middle_signal > 20  # solidly lit once ignition has ramped up
+    assert start_signal < middle_signal - 10  # visibly shorter right at the start

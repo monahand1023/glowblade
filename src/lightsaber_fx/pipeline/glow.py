@@ -307,9 +307,50 @@ def _robust_median(arr, default):
     return float(np.median(finite))
 
 
+# ---------------------------------------------------------------------------
+# Ignite/extinguish -- the blade grows out of the hilt at the start of its
+# tracked appearance and shrinks back into it at the end, instead of just
+# appearing/disappearing at full length. Exposed as a standalone function
+# (matching knoll_darken) so the ramp math is directly testable without
+# rendering a whole clip.
+# ---------------------------------------------------------------------------
+
+IGNITION_RAMP_SECONDS = 0.35
+
+
+def ignition_fraction(n, first_active, last_active, ramp_frames):
+    """Blade-length fraction (0..1) for frame `n`: ramps 0->1 over
+    `ramp_frames` after `first_active`, holds at 1 through the steady
+    middle, and ramps 1->0 over `ramp_frames` before `last_active`.
+
+    On an active window shorter than 2*ramp_frames, the rise and fall
+    overlap and the peak never reaches 1.0 -- a triangular taper rather
+    than a plateau, so a short appearance never looks like it snapped to
+    full length. Returns 1.0 (no-op) when there's no active window at all
+    or no ramp to apply, so callers can pass this through unconditionally.
+    """
+    if ramp_frames <= 0 or first_active is None or last_active is None:
+        return 1.0
+    rise = (n - first_active + 1) / ramp_frames
+    fall = (last_active - n + 1) / ramp_frames
+    return max(0.0, min(1.0, rise, fall))
+
+
+def _apply_ignition(tip, hilt, frac):
+    """Lerp `tip` toward `hilt` by `frac` (1.0 = full length, 0.0 =
+    collapsed onto the hilt). A no-op when tip/hilt aren't valid geometry
+    (None or NaN) -- callers fall back to the raw mask in that case exactly
+    as they did before this existed."""
+    if tip is None or hilt is None or np.any(np.isnan(tip)) or np.any(np.isnan(hilt)):
+        return tip
+    tip = np.asarray(tip, dtype=np.float64)
+    hilt = np.asarray(hilt, dtype=np.float64)
+    return hilt + (tip - hilt) * frac
+
+
 def _composite_blade_contribution(
     frame_shape, mask, tip, hilt, velocity,
-    canonical_width, blade_extend,
+    canonical_width, blade_extend, ignition_frac,
     tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
     core_erode_kernel, core_sigma, colour_sigma,
     color_lin, glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
@@ -318,6 +359,10 @@ def _composite_blade_contribution(
     """One object's core/colour/wide-glow/motion-blur contribution for one
     frame, confined to a local bounding box. Returns full-frame-sized arrays
     so callers can sum/OR them directly without tracking per-object offsets.
+
+    Args:
+    - ignition_frac: this object's own ignite/extinguish length fraction for
+      this frame, from `ignition_fraction()`.
 
     Returns (full_fx, blade_u8) where:
     - full_fx: np.ndarray[h,w,3] float32, zero everywhere outside this
@@ -332,8 +377,12 @@ def _composite_blade_contribution(
     if mask is None or not mask.any():
         return full_fx, blade_u8
 
+    effective_tip = tip
+    if blade_extend:
+        effective_tip = _apply_ignition(tip, hilt, ignition_frac)
+
     blade_u8 = _build_blade_shape(
-        mask, frame_shape, tip, hilt, canonical_width, blade_extend,
+        mask, frame_shape, effective_tip, hilt, canonical_width, blade_extend,
         tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
     )
     ys, xs = np.nonzero(blade_u8)
@@ -392,9 +441,11 @@ def render_glow(
     knoll_feather_frac=0.8,
     # B1.6 trail
     trail_decay=0.7,
+    # Ignite/extinguish
+    ignition_ramp_seconds=IGNITION_RAMP_SECONDS,
     # B1.7 directional motion blur
-    motion_blur_gain=0.6,
-    motion_blur_max_len=40,
+    motion_blur_gain=0.35,
+    motion_blur_max_len=24,
     # B1.8 chromatic bloom + flicker
     chromatic_bloom_frac=0.10,
     flicker_strength=0.04,
@@ -421,7 +472,21 @@ def render_glow(
 
     frame_files = sorted(f for f in os.listdir(frames_dir) if f.endswith(".jpg"))
     with open(video_meta_path) as f:
-        f.readline()  # fps: not needed for per-frame compositing math, read for parity/validation
+        fps = float(f.readline())
+
+    # Ignite/extinguish needs to know the clip's first/last frame with a
+    # blade before the main loop reaches them, so it's a cheap separate pass
+    # over mask presence rather than something the main loop can discover
+    # about itself as it goes.
+    mask_present = []
+    for fname in frame_files:
+        idx = int(os.path.splitext(fname)[0])
+        m = load_mask_optional(masks_dir, idx)
+        mask_present.append(m is not None and m.any())
+    active_indices = [n for n, present in enumerate(mask_present) if present]
+    first_active = active_indices[0] if active_indices else None
+    last_active = active_indices[-1] if active_indices else None
+    ignition_ramp_frames = round(fps * ignition_ramp_seconds)
 
     motion = load_motion(motion_path)
     tip_arr = np.asarray(motion.get("tip", np.zeros((0, 2))), dtype=np.float64)
@@ -496,9 +561,10 @@ def render_glow(
         hilt_i = hilt_arr[row] if row is not None else None
         vel_i = velocity[row] if row is not None else np.zeros(2)
 
+        frac = ignition_fraction(n, first_active, last_active, ignition_ramp_frames)
         full_fx, blade_u8 = _composite_blade_contribution(
             frame.shape, mask, tip_i, hilt_i, vel_i,
-            canonical_width, blade_extend,
+            canonical_width, blade_extend, frac,
             tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
             core_erode_kernel, core_sigma, colour_sigma,
             color_lin, glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
