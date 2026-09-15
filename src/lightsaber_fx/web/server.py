@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import paths
 from ..device import select_device
-from ..pipeline.detect import detect_blade
+from ..pipeline.detect import _build_image_predictor, detect_blade
 from ..pipeline.frames import extract_first_frame, extract_frame_at
 from ..pipeline.job_meta import JobNotRerenderableError, require_rerenderable
 from ..pipeline.runner import rerender_pipeline_multi, run_pipeline_multi
@@ -25,6 +25,21 @@ VALID_VOICES = ("neutral", "jedi", "sith")
 
 app = FastAPI()
 manager = JobManager()
+
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """Static files (index.html/app.js/style.css) ship with no explicit
+    cache headers, so browsers apply heuristic caching and can silently
+    keep serving an old version after a reload -- confirmed directly: a
+    CSS change was invisible after a normal reload because Chrome served
+    the previous style.css from its disk cache without revalidating.
+    This is a local dev tool under active iteration, so correctness of a
+    reload matters far more than the bandwidth saved by caching it."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _validate_job_id(job_id: str) -> None:
@@ -74,6 +89,20 @@ def get_frame0(job_id: str):
 DETECT_TINT = (0, 255, 0)  # BGR; matches the CLI picker's overlay.
 
 
+def _mask_overlay_png(mask, tint=DETECT_TINT, alpha=110):
+    """A transparent RGBA tint of `mask`, in the same style `/detect` has
+    always used -- shared so the manual-selection preview looks like the
+    same kind of thing as an automatic proposal, not a different feature."""
+    height, width = mask.shape[:2]
+    overlay = np.zeros((height, width, 4), dtype=np.uint8)
+    overlay[mask, :3] = tint
+    overlay[mask, 3] = alpha
+    ok, buf = cv2.imencode(".png", overlay)
+    if not ok:
+        raise RuntimeError("failed to encode mask overlay")
+    return buf.tobytes()
+
+
 @app.post("/api/jobs/{job_id}/detect")
 def detect(job_id: str):
     """Look for the swung object and return a proposal to confirm.
@@ -120,10 +149,7 @@ def detect(job_id: str):
         return {"found": False}
 
     height, width = proposal.mask.shape[:2]
-    overlay = np.zeros((height, width, 4), dtype=np.uint8)
-    overlay[proposal.mask, :3] = DETECT_TINT
-    overlay[proposal.mask, 3] = 110
-    cv2.imwrite(str(job_dir / "detect_mask.png"), overlay)
+    (job_dir / "detect_mask.png").write_bytes(_mask_overlay_png(proposal.mask))
 
     return {
         "found": True,
@@ -152,6 +178,73 @@ def get_detect_mask(job_id: str):
     path = paths.get_jobs_dir() / job_id / "detect_mask.png"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Job not found")
+    return FileResponse(path, media_type="image/png")
+
+
+@app.post("/api/jobs/{job_id}/preview_mask")
+def preview_mask(job_id: str, body: dict):
+    """Segment the points the user has placed so far on a single frame and
+    return the mask as an overlay, so an obviously-wrong selection (SAM2
+    latching onto the background instead of the thin object clicked near)
+    is visible before committing to a full track-and-render.
+
+    Deliberately cheap compared to `/points`: one SAM2 *image* pass on one
+    frame, not video propagation across the whole clip -- this exists to be
+    called after every click/drag while the user is still choosing.
+    Same sync-route reasoning as `/detect`: this blocks on real CPU/GPU
+    work, so it must not be `async def`.
+    """
+    _validate_job_id(job_id)
+    job_dir = paths.get_jobs_dir() / job_id
+    input_path = job_dir / "input.mp4"
+    if not input_path.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not paths.get_checkpoint_path().exists():
+        raise HTTPException(
+            status_code=400,
+            detail="SAM2 is not installed yet — run `lightsaber-fx setup` first.",
+        )
+
+    points_and_labels = body.get("points", [])
+    if not any(p[2] == 1 for p in points_and_labels):
+        raise HTTPException(status_code=400, detail="at least one include point is required")
+    prompt_frame = int(body.get("prompt_frame", 0))
+    if prompt_frame < 0:
+        raise HTTPException(status_code=400, detail="prompt_frame must not be negative")
+
+    frame_path = job_dir / "preview_mask_frame.jpg"
+    try:
+        extract_frame_at(str(input_path), prompt_frame, str(frame_path))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Could not read frame {prompt_frame}")
+
+    frame = cv2.imread(str(frame_path))
+    predictor = _build_image_predictor(
+        str(paths.get_checkpoint_path()), "configs/sam2.1/sam2.1_hiera_s.yaml", select_device(),
+    )
+    predictor.set_image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    masks, scores, _ = predictor.predict(
+        point_coords=np.array([[p[0], p[1]] for p in points_and_labels], dtype=np.float32),
+        point_labels=np.array([p[2] for p in points_and_labels], dtype=np.int32),
+        multimask_output=False,
+    )
+    mask = np.asarray(masks)[0].astype(bool)
+
+    (job_dir / "preview_mask.png").write_bytes(_mask_overlay_png(mask))
+    height, width = mask.shape[:2]
+    return {
+        "mask_url": f"/api/jobs/{job_id}/preview-mask-image",
+        "score": round(float(np.asarray(scores)[0]), 3),
+        "area_frac": round(float(mask.sum()) / (height * width), 4),
+    }
+
+
+@app.get("/api/jobs/{job_id}/preview-mask-image")
+def get_preview_mask_image(job_id: str):
+    _validate_job_id(job_id)
+    path = paths.get_jobs_dir() / job_id / "preview_mask.png"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No preview available")
     return FileResponse(path, media_type="image/png")
 
 

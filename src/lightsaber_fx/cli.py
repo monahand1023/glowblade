@@ -12,6 +12,7 @@ from .device import select_device
 from .pipeline import job_meta
 from .pipeline.detect import detect_blade
 from .pipeline.frames import extract_frame_at
+from .pipeline.inspect_job import inspect_job
 from .pipeline.runner import rerender_pipeline, run_pipeline
 from .pipeline.track import pick_points_interactive
 from .progress import EtaTracker, format_duration
@@ -222,6 +223,53 @@ def list_jobs():
             )
         else:
             click.echo(f"{info.job_id}  [NOT re-renderable: {info.reason}]")
+
+
+@main.command()
+@click.argument("job_id")
+@click.option("--frames", default=6, type=int, help="How many sample frames + mask overlays to dump.")
+def inspect(job_id, frames):
+    """Dump debugging artifacts for JOB_ID: what points/line were actually
+    submitted, per-object tracking stats with anomaly warnings (a mask far
+    wider than a blade, or spanning nearly the whole frame -- signs it
+    locked onto the background), plus sample frames and mask overlays on
+    the raw footage written to <job dir>/debug/ for a closer look.
+    """
+    job_dir = paths.get_jobs_dir() / job_id
+    if not job_dir.is_dir():
+        raise click.ClickException(f"No such job: {job_id!r}. Run `lightsaber-fx jobs` to see what's available.")
+
+    out_dir = job_dir / "debug"
+    result = inspect_job(str(job_dir), str(out_dir), n_samples=frames)
+    meta = result["meta"]
+
+    click.echo(f"Job {job_id}  ({result['width']}x{result['height']})")
+    click.echo(f"  source: {meta.get('source_video', 'unknown')}")
+    status = "yes" if result["rerenderable"] else f"no ({result['reason']})"
+    click.echo(f"  rerenderable: {status}")
+
+    prompts = meta.get("prompts")
+    if prompts:
+        click.echo("  prompts submitted:")
+        for i, p in enumerate(prompts):
+            click.echo(
+                f"    saber {i}: prompt_frame={p.get('prompt_frame', 0)} "
+                f"points={p.get('points')} labels={p.get('labels')}"
+            )
+    else:
+        click.echo("  prompts submitted: not recorded (job predates prompt logging)")
+
+    click.echo("  tracking:")
+    for oid, report in result["object_reports"].items():
+        label = "legacy object" if oid is None else f"object {oid}"
+        click.echo(f"    {label}: {report['n_tracked']} frame(s) tracked")
+        for anomaly in report["anomalies"]:
+            click.echo(f"      WARNING: {anomaly}")
+
+    click.echo(
+        f"  wrote {len(result['sample_frames'])} sample frame(s) and "
+        f"{len(result['mask_overlays'])} mask overlay(s) to {out_dir}"
+    )
 
 
 @main.command()

@@ -60,25 +60,19 @@ than a low-confidence guess.
 import cv2
 import numpy as np
 
-from .blade import fit_blade
+from .blade import MIN_ELONGATION, fit_blade
 
 # Work at this long edge for the flow pass regardless of source resolution.
 # Optical flow at 720p or 1080p costs several times more for no benefit: we
 # need the location of a large moving object, not sub-pixel accuracy.
 FLOW_LONG_EDGE = 480
 
-# A SAM2 mask must be at least this elongated (length/width, from the same fit
-# the renderer uses) to be called a blade.
-#
-# 3.5 was too permissive, measured: a *standing person* fits at 3.7, which is
-# how a sword clip came to propose the swordsman rather than his sword. Correct
-# proposals, once every candidate is scored rather than the first acceptable
-# one, come in far higher -- 15.1 on the baseball clip and 21.0 on a golf club.
-# So the bar is set where a human body cannot reach it, and the cost is that
-# genuinely ambiguous footage returns None. That is the right trade: None means
-# "click it yourself", which is what the user would have done anyway, while a
-# confident wrong guess costs them a full render to discover.
-MIN_ELONGATION = 6.0
+# MIN_ELONGATION (a SAM2 mask must be at least this elongated -- length/width,
+# from the same fit the renderer uses -- to be called a blade) now lives in
+# blade.py: it's a property of the fitted geometry itself, and runner.py and
+# inspect_job.py both need the same bar downstream of this module's proposal.
+# See its docstring there for the calibration story (3.5 was too permissive;
+# it fit a standing person).
 
 # Area bounds as a fraction of the frame. Applied to flow components (below
 # the floor is flow speckle) and again to SAM2 masks (above the ceiling the

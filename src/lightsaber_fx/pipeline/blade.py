@@ -452,6 +452,56 @@ def load_motion(path):
         return {k: data[k].copy() for k in data.files}
 
 
+# A fitted shape needs at least this much length-to-width ratio to be
+# accepted as a blade rather than whatever else got fitted -- a body, a
+# shield, a patch of cloth. Lives here (not in detect.py, which imports it)
+# because elongation is a property of the geometry itself, used at both the
+# point `detect.py` proposes a candidate and every point downstream
+# (`inspect_job.py`'s diagnostics, `runner.py`'s in-flight quality check)
+# asks the same question of an already-fitted BladeGeometry.
+#
+# 3.5 was too permissive, measured: a *standing person* fits at 3.7, which is
+# how a sword clip came to propose the swordsman rather than his sword. Correct
+# proposals, once every candidate is scored rather than the first acceptable
+# one, come in far higher -- 15.1 on the baseball clip and 21.0 on a golf club.
+# So the bar is set where a human body cannot reach it, and the cost (at
+# proposal time) is that genuinely ambiguous footage returns None. That is the
+# right trade there: None means "click it yourself", which is what the user
+# would have done anyway, while a confident wrong guess costs them a full
+# render to discover.
+MIN_ELONGATION = 6.0
+
+
+# How much of a tracked object's frames must be below MIN_ELONGATION before
+# "sometimes blob-shaped" becomes "actually a blob" -- not a single frame,
+# since a real blade can legitimately foreshorten toward the camera for a
+# frame or two mid-swing, but a sustained majority is a different object
+# entirely. Shared by `inspect_job.py`'s diagnostics and `runner.py`'s
+# in-flight warning so the two can't quietly drift onto different bars for
+# what is, underneath, the same question.
+LOW_ELONGATION_FRAC_THRESHOLD = 0.3
+
+
+def elongation_stats(motion):
+    """Summarize how blade-shaped `motion` (a dict loaded by `load_motion`)
+    looks across its tracked frames: `(mean_elongation, low_elongation_frac)`,
+    where the latter is the fraction of frames with elongation (length /
+    width) below `MIN_ELONGATION`.
+
+    Computed only over frames with a valid, nonzero width -- a NaN width
+    (never tracked) or a zero width (a real degenerate case `fit_blade` can
+    produce, e.g. a single-row mask) makes elongation undefined rather than
+    bad, so those frames are excluded instead of divided-by-zero or counted
+    as an anomaly either way. Returns `(None, None)` if no frame qualifies.
+    """
+    width, length = motion["width"], motion["length"]
+    valid = ~np.isnan(width) & (width > 0)
+    if not valid.any():
+        return None, None
+    elongation = length[valid] / width[valid]
+    return float(elongation.mean()), float((elongation < MIN_ELONGATION).sum() / valid.sum())
+
+
 def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=20, progress_cb=None):
     """The motion pipeline stage: fit blade geometry for every tracked
     frame and write it to `motion_out_path` (see `save_motion`).

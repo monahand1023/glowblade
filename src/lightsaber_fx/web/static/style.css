@@ -168,6 +168,77 @@ h1 {
 }
 
 /* ------------------------------------------------------------------ */
+/* Saber slots                                                         */
+/* ------------------------------------------------------------------ */
+
+#saber-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+}
+
+.saber-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  box-shadow: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.saber-pill::before {
+  content: "";
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--pill-color, var(--accent));
+}
+
+.saber-pill.active {
+  color: var(--text);
+  border-color: var(--pill-color, var(--accent));
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.35);
+}
+
+.saber-pill-remove {
+  color: var(--text-dim);
+  font-weight: 400;
+  line-height: 1;
+  padding: 0 0.15rem;
+}
+
+.saber-pill-remove:hover {
+  color: var(--danger);
+}
+
+#add-saber-button {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px dashed var(--panel-border);
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+  box-shadow: none;
+}
+
+#add-saber-button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  box-shadow: none;
+  transform: none;
+}
+
+/* ------------------------------------------------------------------ */
 /* Controls                                                             */
 /* ------------------------------------------------------------------ */
 

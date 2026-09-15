@@ -407,6 +407,17 @@ def _blade(_i):
     return mask
 
 
+def _blob(_i):
+    # A compact square, not a blade: elongation ~1, well under MIN_ELONGATION
+    # (6) -- the shape job 01 (a Mixkit knights-battling test clip) actually
+    # produced when tracking locked onto a patch of tunic cloth instead of
+    # the sword. `fit_blade` succeeds on it (it's a perfectly good shape,
+    # just the wrong one), so this is a distinct case from `_blank`.
+    mask = np.zeros((48, 64), dtype=bool)
+    mask[10:34, 20:44] = True
+    return mask
+
+
 def test_run_pipeline_raises_before_glow_when_tracking_found_nothing(
     tmp_path, monkeypatch, tiny_video_path
 ):
@@ -496,6 +507,66 @@ def test_run_pipeline_warns_but_renders_when_the_blade_is_found_in_few_frames(
     warnings = [m for stage, m in messages if stage == "motion" and m.startswith("warning:")]
     assert len(warnings) == 1
     assert "only 1 of" in warnings[0]
+
+
+@requires_ffmpeg
+def test_run_pipeline_warns_but_renders_for_a_consistently_blob_shaped_track(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # A track that is fully covered (every frame has *a* blade-fit shape)
+    # but never actually blade-shaped -- job 01's real failure, invisible to
+    # the coverage guard above since nothing here is missing or empty. Same
+    # "warn and render anyway" contract as low coverage: degraded quality,
+    # not doomed, and the render is still the user's fastest way to look.
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blob))
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    output_path = tmp_path / "final.mp4"
+    messages = []
+
+    run_pipeline(
+        input_video=str(tiny_video_path),
+        points=[[10, 10]],
+        labels=[1],
+        output_path=str(output_path),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+        progress_cb=lambda stage, pct, message: messages.append((stage, message)),
+    )
+
+    warnings = [m for stage, m in messages if stage == "motion" and m.startswith("warning:")]
+    assert len(warnings) == 1
+    assert "elongation" in warnings[0]
+    assert "100%" in warnings[0]
+    assert output_path.exists()
+
+
+@requires_ffmpeg
+def test_run_pipeline_does_not_warn_about_elongation_for_a_properly_elongated_track(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blade))
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    output_path = tmp_path / "final.mp4"
+    messages = []
+
+    run_pipeline(
+        input_video=str(tiny_video_path),
+        points=[[10, 10]],
+        labels=[1],
+        output_path=str(output_path),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+        progress_cb=lambda stage, pct, message: messages.append((stage, message)),
+    )
+
+    warnings = [m for stage, m in messages if stage == "motion" and m.startswith("warning:")]
+    assert warnings == []
     assert output_path.exists()
 
 
@@ -628,6 +699,42 @@ def test_run_pipeline_multi_error_for_a_dead_saber_names_which_saber(
     message = str(excinfo.value)
     assert "no blade for saber 1 in any of" in message, message
     assert "click points" in message  # the existing advice is still there
+
+
+@requires_ffmpeg
+def test_run_pipeline_multi_warns_for_the_specific_saber_that_is_blob_shaped(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # Saber 0 tracks a real blade the whole time; saber 1 tracks a blob the
+    # whole time. Both render_glow_multi allowed to run (not blocked, same
+    # as single-object) -- what matters is that the warning names saber 1,
+    # not saber 0, and there's exactly one of it.
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blob}),
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    messages = []
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+        progress_cb=lambda stage, pct, message: messages.append((stage, message)),
+    )
+
+    warnings = [m for stage, m in messages if stage == "motion" and m.startswith("warning:")]
+    assert len(warnings) == 1
+    assert "saber 1" in warnings[0]
+    assert "elongation" in warnings[0]
 
 
 def test_run_pipeline_multi_rejects_an_unsupported_saber_count(tmp_path, monkeypatch, tiny_video_path):

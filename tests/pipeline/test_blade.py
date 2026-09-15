@@ -2,10 +2,12 @@ import numpy as np
 import pytest
 
 from lightsaber_fx.pipeline.blade import (
+    MIN_ELONGATION,
     BladeGeometry,
     angular_speed,
     classify_tip_by_taper,
     compute_motion,
+    elongation_stats,
     fit_blade,
     load_mask,
     load_mask_optional,
@@ -722,3 +724,41 @@ def test_angular_speed_nan_gap_does_not_poison_whole_array():
     assert speed[2] == 0.0
     assert speed[3] == 0.0
     assert speed[4] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# elongation_stats
+# ---------------------------------------------------------------------------
+
+
+def test_elongation_stats_all_elongated_frames_report_zero_low_fraction():
+    motion = {"length": np.array([200.0, 220.0, 180.0]), "width": np.array([20.0, 20.0, 20.0])}
+    mean_elongation, low_frac = elongation_stats(motion)
+    assert mean_elongation == pytest.approx((10.0 + 11.0 + 9.0) / 3)
+    assert low_frac == 0.0
+
+
+def test_elongation_stats_flags_a_majority_of_blob_shaped_frames():
+    # length=40, width=35 -> elongation ~1.14, well under MIN_ELONGATION (6).
+    motion = {"length": np.full(10, 40.0), "width": np.full(10, 35.0)}
+    mean_elongation, low_frac = elongation_stats(motion)
+    assert mean_elongation < MIN_ELONGATION
+    assert low_frac == 1.0
+
+
+def test_elongation_stats_excludes_nan_and_zero_width_frames():
+    # frame 0: never tracked (NaN). frame 1: a real degenerate fit_blade can
+    # produce (zero width) -- elongation is undefined for it, not evidence of
+    # anything, so it must not raise (divide-by-zero) or count as low.
+    motion = {
+        "length": np.array([np.nan, 100.0, 200.0, 220.0]),
+        "width": np.array([np.nan, 0.0, 20.0, 20.0]),
+    }
+    mean_elongation, low_frac = elongation_stats(motion)
+    assert mean_elongation == pytest.approx((10.0 + 11.0) / 2)
+    assert low_frac == 0.0
+
+
+def test_elongation_stats_returns_none_when_no_frame_has_a_usable_width():
+    motion = {"length": np.array([np.nan, 100.0]), "width": np.array([np.nan, 0.0])}
+    assert elongation_stats(motion) == (None, None)

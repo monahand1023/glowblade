@@ -46,7 +46,7 @@ def _job_meta_path(job_dir):
     return os.path.join(str(job_dir), JOB_META_FILENAME)
 
 
-def write_job_meta(job_dir, source_video, object_ids=None):
+def write_job_meta(job_dir, source_video, object_ids=None, prompts=None):
     """Record `source_video`'s path (resolved to absolute, so it stays
     correct even if the working directory changes before a later
     `rerender`) alongside a creation timestamp.
@@ -56,13 +56,22 @@ def write_job_meta(job_dir, source_video, object_ids=None):
     later without re-running SAM2.
 
     For multi-object jobs, `object_ids` (a list of object IDs being tracked)
-    is also recorded, enabling per-object mask/motion rerenderability checks."""
+    is also recorded, enabling per-object mask/motion rerenderability checks.
+
+    `prompts`, when given, is the raw list of per-object seed data (points,
+    labels, prompt_frame -- whatever the caller was given to track with),
+    recorded purely for debugging: when tracking locks onto the wrong thing,
+    this is what tells you where the click/line that caused it actually
+    landed, instead of having to reverse-engineer it from the resulting
+    mask. It is never read back by the pipeline itself."""
     meta = {
         "source_video": os.path.abspath(str(source_video)),
         "created_at": time.time(),
     }
     if object_ids is not None:
         meta["object_ids"] = list(object_ids)
+    if prompts is not None:
+        meta["prompts"] = prompts
     with open(_job_meta_path(job_dir), "w") as f:
         json.dump(meta, f)
     return meta

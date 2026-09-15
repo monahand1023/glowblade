@@ -3,7 +3,7 @@ import shutil
 
 from . import job_meta
 from .audio import mix_hums, synthesize_audio
-from .blade import compute_motion
+from .blade import LOW_ELONGATION_FRAC_THRESHOLD, MIN_ELONGATION, compute_motion, elongation_stats, load_motion
 from .frames import extract_frames
 from .glow import parse_color, render_glow, render_glow_multi
 from .mux import encode
@@ -70,7 +70,7 @@ def _render_from_masks(job_dir, paths, fps, output_path, color_bgr, intensity, b
 _LOW_COVERAGE_FRAC = 0.5
 
 
-def _require_usable_track(n_tracked, n_with_blade, report, obj_id=None):
+def _require_usable_track(n_tracked, n_with_blade, report, motion_path, obj_id=None):
     """Stop a doomed render at the motion stage instead of at the end of it.
 
     A track that found nothing still costs the full glow stage -- on a 10 s
@@ -89,12 +89,19 @@ def _require_usable_track(n_tracked, n_with_blade, report, obj_id=None):
     Partial coverage is legitimate -- an object can leave frame and come
     back -- so low coverage reports a warning through the normal progress
     channel (the CLI prints it, the web app streams it) and the render
-    proceeds.
+    proceeds. Sustained low elongation (the mask is *present* every frame
+    but shaped like a blob, not a blade -- tracking locked onto the wrong
+    thing without ever losing it) gets the same treatment: it is exactly as
+    real a problem as low coverage, and exactly as legitimate to render
+    anyway and let the user look, so it is a warning, not the raise above.
+    "Sustained" (LOW_ELONGATION_FRAC_THRESHOLD) rather than "any" -- a real
+    blade can legitimately foreshorten toward the camera for a frame or two
+    mid-swing.
 
     With several objects tracked at once, "the points were wrong" is not
     actionable unless the user knows *which* saber's points, so callers
-    that track more than one pass `obj_id` and it is named in both
-    messages. Omitting it (the single-object callers) leaves the messages
+    that track more than one pass `obj_id` and it is named in every
+    message. Omitting it (the single-object callers) leaves the messages
     exactly as they were.
     """
     if n_tracked and not n_with_blade:
@@ -114,6 +121,17 @@ def _require_usable_track(n_tracked, n_with_blade, report, obj_id=None):
             "frames -- the mask was lost for most of the clip, so expect the glow "
             "to flicker or disappear. Rendering anyway.",
         )
+    if n_with_blade:
+        mean_elongation, low_elongation_frac = elongation_stats(load_motion(motion_path))
+        if low_elongation_frac is not None and low_elongation_frac > LOW_ELONGATION_FRAC_THRESHOLD:
+            where = f" for saber {obj_id}" if obj_id is not None else ""
+            report(
+                100,
+                f"warning: the tracked mask{where} has elongation below {MIN_ELONGATION:.0f} "
+                f"(blob-shaped, not blade-shaped) in {low_elongation_frac:.0%} of frames "
+                f"(mean {mean_elongation:.1f}) -- this usually means tracking locked onto "
+                "the wrong thing partway through the clip. Rendering anyway.",
+            )
 
 
 def run_pipeline(
@@ -146,7 +164,10 @@ def run_pipeline(
     # source clip without keeping frames/ around in the meantime (see
     # docs/design-notes.md) -- this is the one piece of bookkeeping a job
     # needs beyond its masks/motion.npz to be re-renderable.
-    job_meta.write_job_meta(job_dir, source_video=input_video)
+    job_meta.write_job_meta(
+        job_dir, source_video=input_video,
+        prompts=[{"points": points, "labels": labels, "prompt_frame": prompt_frame}],
+    )
     if progress_cb:
         progress_cb("extract", 100, f"{n_frames} frames at {fps:.2f} fps")
 
@@ -160,7 +181,7 @@ def run_pipeline(
     n_tracked, n_with_blade = compute_motion(
         paths["masks_dir"], paths["motion_path"], progress_cb=stage_cb("motion"),
     )
-    _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"))
+    _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"), paths["motion_path"])
 
     return _render_from_masks(
         job_dir, paths, fps, output_path, color_bgr, intensity, blade_extend, voice, stage_cb,
@@ -252,7 +273,13 @@ def run_pipeline_multi(
     fps, n_frames = extract_frames(input_video, paths["frames_dir"])
     with open(paths["video_meta_path"], "w") as f:
         f.write(f"{fps}\n{n_frames}\n")
-    job_meta.write_job_meta(job_dir, source_video=input_video, object_ids=object_ids)
+    job_meta.write_job_meta(
+        job_dir, source_video=input_video, object_ids=object_ids,
+        prompts=[
+            {"points": s["points"], "labels": s["labels"], "prompt_frame": s.get("prompt_frame", 0)}
+            for s in sabers
+        ],
+    )
     if progress_cb:
         progress_cb("extract", 100, f"{n_frames} frames at {fps:.2f} fps")
 
@@ -273,7 +300,7 @@ def run_pipeline_multi(
         n_tracked, n_with_blade = compute_motion(
             paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
         )
-        _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"), obj_id=oid)
+        _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"), paths["motion_paths"][oid], obj_id=oid)
 
     return _render_multi_from_masks(
         job_dir, paths, object_ids, sabers, color_bgrs, fps, output_path, blade_extend, stage_cb,
