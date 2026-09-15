@@ -599,16 +599,85 @@ def test_points_threads_each_sabers_prompt_frame_through(client, tiny_video_byte
 
     resp = client.post(
         f"/api/jobs/{job_id}/points",
-        json={"sabers": [
-            {"points": [[10, 20, 1]], "prompt_frame": 17},
-            {"points": [[30, 40, 1]]},
-        ]},
+        json={"sabers": [{"points": [[10, 20, 1]], "prompt_frame": 17}]},
     )
     assert resp.status_code == 200
     server_module.manager.wait(timeout=10)
 
     assert captured["sabers"][0]["prompt_frame"] == 17
-    assert captured["sabers"][1]["prompt_frame"] == 0  # defaults when the client omits it
+
+
+def test_points_defaults_prompt_frame_to_zero_when_the_client_omits_it(
+    client, tiny_video_bytes, monkeypatch
+):
+    captured = {}
+
+    def fake_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
+        captured.update(kwargs)
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+        return output_path
+
+    monkeypatch.setattr(server_module, "run_pipeline_multi", fake_run_pipeline_multi)
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[10, 20, 1]]}, {"points": [[30, 40, 1]]}]},
+    )
+    assert resp.status_code == 200
+    server_module.manager.wait(timeout=10)
+
+    assert [s["prompt_frame"] for s in captured["sabers"]] == [0, 0]
+
+
+def test_points_rejects_sabers_with_different_prompt_frames(client, tiny_video_bytes):
+    # Mixing conditioning frames inside one SAM2 session breaks its memory
+    # attention -- on MPS with a Metal assertion that kills the process, which
+    # the JobManager cannot turn into an error event. Caught here so it is a
+    # 400 on the POST rather than a dead server seconds later.
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [
+            {"points": [[10, 20, 1]], "prompt_frame": 0},
+            {"points": [[30, 40, 1]], "prompt_frame": 12},
+        ]},
+    )
+
+    assert resp.status_code == 400
+    assert "same prompt_frame" in resp.json()["detail"]
+
+
+def test_points_accepts_sabers_sharing_one_non_zero_prompt_frame(client, tiny_video_bytes, monkeypatch):
+    # Only the mix is refused -- a shared mid-clip frame is exactly what
+    # automatic detection produces and must still go through.
+    captured = {}
+
+    def fake_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
+        captured.update(kwargs)
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+        return output_path
+
+    monkeypatch.setattr(server_module, "run_pipeline_multi", fake_run_pipeline_multi)
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [
+            {"points": [[10, 20, 1]], "prompt_frame": 12},
+            {"points": [[30, 40, 1]], "prompt_frame": 12},
+        ]},
+    )
+
+    assert resp.status_code == 200
+    server_module.manager.wait(timeout=10)
+    assert [s["prompt_frame"] for s in captured["sabers"]] == [12, 12]
 
 
 def test_points_rejects_a_negative_prompt_frame(client, tiny_video_bytes):

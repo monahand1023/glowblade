@@ -205,6 +205,17 @@ def _parse_saber_specs(body: dict):
             "voice": voice,
             "prompt_frame": prompt_frame,
         })
+
+    # Caught here as well as in track_objects so a bad request fails as a
+    # 400 on the POST, rather than being accepted and then killing the
+    # background render seconds later.
+    prompt_frames = {s["prompt_frame"] for s in parsed}
+    if len(prompt_frames) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="All sabers must share the same prompt_frame in this release "
+                   f"(mixing frames isn't supported yet) -- got {sorted(prompt_frames)}",
+        )
     return parsed
 
 

@@ -169,16 +169,29 @@ def track_objects(
     logits produce the same mask -- and it keeps the loop free of special
     cases.
 
-    Known limitation, measured against the pinned SAM2 build: every object
-    has to be prompted on the *same* frame. Conditioning objects on
-    different frames within one shared session breaks SAM2's memory
-    attention -- a BFloat16/Float dtype RuntimeError on CPU, and a hard
-    (uncatchable) Metal assertion on MPS. Nothing here enforces it because
-    nothing upstream can currently produce a mixed set: the web app sends
-    one saber, and automatic detection reports one frame. A multi-slot
-    picker that lets each saber be detected separately would need either
-    one SAM2 session per prompt frame, or a check that rejects the mix.
+    Hard constraint: every object in one call must share the same
+    prompt_frame, and this rejects the call if they don't. Measured against
+    the pinned SAM2 build, conditioning objects on different frames within
+    one shared session breaks SAM2's memory attention -- a BFloat16/Float
+    dtype RuntimeError on CPU, and a hard Metal assertion on MPS that kills
+    the process outright rather than raising something a caller could
+    report. The frame itself is free to be any frame; it is only mixing
+    that is forbidden, which is what keeps single-saber auto-detect (one
+    object, one mid-swing frame) working.
     """
+    # The two ways to support a mixed set would be one SAM2 session per
+    # distinct prompt frame -- giving up the shared image-feature encoding
+    # that makes this cheaper than N separate tracks -- or this: refuse it.
+    # Refusing is the current choice; a multi-slot picker that detects each
+    # saber separately is where that decision would need revisiting.
+    prompt_frames = {p.get("prompt_frame", 0) for p in prompts}
+    if len(prompt_frames) > 1:
+        raise ValueError(
+            "track_objects: all objects in one session must share the same "
+            "prompt_frame (mixing prompt frames crashes SAM2's memory attention, "
+            f"uncatchable on MPS) -- got {sorted(prompt_frames)}"
+        )
+
     def report(pct, message):
         if progress_cb:
             progress_cb(pct, message)

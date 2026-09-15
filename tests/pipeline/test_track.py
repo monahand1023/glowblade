@@ -293,3 +293,36 @@ def test_track_objects_covers_the_whole_clip_when_prompted_mid_way(tmp_path):
 
     # Still two distinct objects, not one mask duplicated across both ids.
     assert not np.any(load_mask(str(masks_dir_a), 0) & load_mask(str(masks_dir_b), 0))
+
+
+# Deliberately NOT marked @requires_sam2_checkpoint: the guard has to fire
+# before the predictor is built, so this passes a checkpoint path and a
+# frames dir that do not exist. If the guard ever moved below
+# build_sam2_video_predictor, this would fail with a different error (a
+# missing checkpoint/import failure) rather than passing by luck on a
+# machine that happens to have SAM2 installed.
+def test_track_objects_rejects_objects_prompted_on_different_frames(tmp_path):
+    # SAM2 conditions every object in one shared session, and mixing
+    # conditioning frames breaks its memory attention: a BFloat16/Float dtype
+    # RuntimeError on CPU, and on MPS a Metal assertion that kills the process
+    # outright -- which no caller can catch or report. Refusing the call is
+    # the only version of this that can be surfaced to a user.
+    with pytest.raises(ValueError, match="same prompt_frame"):
+        track_objects(
+            str(tmp_path / "frames-that-do-not-exist"),
+            [
+                {"obj_id": 0, "masks_dir": str(tmp_path / "0"),
+                 "points": [[15, 25]], "labels": [1], "prompt_frame": 0},
+                {"obj_id": 1, "masks_dir": str(tmp_path / "1"),
+                 "points": [[95, 25]], "labels": [1], "prompt_frame": 3},
+            ],
+            checkpoint_path=str(tmp_path / "checkpoint-that-does-not-exist.pt"),
+            config_name="configs/sam2.1/sam2.1_hiera_s.yaml",
+            device="cpu",
+            n_frames=5,
+        )
+
+    # Nothing was created on the way to the refusal.
+    assert not (tmp_path / "0").exists()
+    assert not (tmp_path / "1").exists()
+
