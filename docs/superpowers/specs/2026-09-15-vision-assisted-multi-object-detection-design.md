@@ -1,6 +1,6 @@
 # lightsaber_fx: vision-assisted multi-object auto-detection
 
-Status: draft (pending Gemini gap-review + Dan's review)
+Status: draft (Gemini gap-review incorporated; pending Dan's review)
 Date: 2026-09-15
 
 ## Problem
@@ -108,33 +108,60 @@ def detect_blades_vlm(video_path, checkpoint_path, config_name, device,
 
 Pipeline, step by step:
 
-1. **Pick a frame.** The middle frame of the clip (`n_frames // 2`) --
-   simplest possible choice, and it matches `detect.py`'s own bias toward
-   mid-swing frames (its own docstring: motion-based detection finds the
-   frame "where the object was easiest to find, which is usually
-   mid-swing"). No optical flow involved here; this is just "give the VLM
-   a frame where people are mid-action, not standing still at frame 0."
+1. **Pick a frame.** *Not* a blind middle-frame guess (Gemini's review
+   caught this: the exact middle frame is a single point of failure --
+   motion blur, blades overlapping, or a body occluding the prop at that
+   one instant, and the whole vision path fails over to single-object
+   fallback for a reason that had nothing to do with vision quality).
+   Instead, reuse `propose_motion_seeds`' existing frame-scoring (already
+   in `detect.py`, already computes per-frame motion magnitude across a
+   sampled set of frames) to pick whichever sampled frame has the
+   strongest overall motion signal, then hand that whole frame to Gemini.
+   This doesn't feed Gemini any seed *points* -- just a better-chosen
+   frame -- so it's a small reuse, not a new dependency on the
+   single-object seed-extraction logic.
 2. **One Gemini call.** Send the frame plus a prompt asking for a bounding
-   box (`[x_min, y_min, x_max, y_max]` in the frame's own pixel coordinates)
-   around every person-held sword/bat/staff-like object, using
-   `response_json_schema` for a typed, parseable response (a JSON array of
-   `{box: [x0,y0,x1,y1], label: str}`) rather than free text -- avoids
-   writing a JSON-extraction regex against prose.
+   box around every person-held sword/bat/staff-like object, requesting
+   coordinates in **Gemini's own native grounding format**: normalized
+   `[ymin, xmin, ymax, xmax]` on a 0-1000 scale (confirmed against Google's
+   own documentation -- this is how Gemini is actually trained to emit
+   spatial coordinates; asking it to do pixel arithmetic and emit absolute
+   `[x_min, y_min, x_max, y_max]` itself, which the first draft of this
+   spec called for, measurably degrades grounding accuracy). Use
+   `response_json_schema` for a typed response (a JSON array of
+   `{box_2d: [y0,x0,y1,x1], label: str}`) rather than free text. Convert
+   to absolute pixel coordinates in Python immediately after parsing
+   (`x * frame_width / 1000`, `y * frame_height / 1000`) -- everything
+   downstream of that conversion works in ordinary pixel space and never
+   needs to know the normalized format existed.
 3. **Validate the response shape.** Malformed JSON, an empty array, boxes
    with non-numeric or out-of-frame coordinates, or more than 4 entries
    (truncate to 4, keeping the first 4 -- the model isn't asked to rank
    them, so "first 4" is as good a cut as any) are all handled here, not
    left to blow up downstream.
-4. **Per box, run the existing SAM2 + `fit_blade` gate.** For each
-   validated box: `_build_image_predictor(...).predict(box=box,
-   multimask_output=False)` (the same box-prompt API path tonight's
-   drift-investigation spike already exercised and confirmed works), then
-   `fit_blade` on the resulting mask, then the same `MIN_ELONGATION` check
-   `detect.py`'s own `_candidate_masks` already applies. A box Gemini
-   proposed that doesn't actually segment into a blade-shaped mask (e.g. it
-   pointed at a shield, or at a person rather than tightly at their weapon)
-   is dropped here -- defense in depth, not a decision to trust the VLM's
-   labeling blindly.
+4. **Per box, run a box-specific SAM2 + `fit_blade` gate.** Build the SAM2
+   image predictor and call `.set_image(frame)` **once** for the whole
+   detection call, then call `.predict(box=box, multimask_output=False)`
+   once per validated box on that same predictor instance (Gemini's review
+   caught a real bug in the first draft here: it read as rebuilding/
+   reloading the predictor inside the per-box loop, which would reload
+   SAM2's weights up to 4 times in one request -- slow and wasteful, worth
+   stating explicitly as a mistake to not make). This mirrors
+   `detect.py`'s own `_candidate_masks`, which already does exactly this
+   one-image/many-predictions pattern for its motion-seeded points.
+
+   The validation gate itself is **not** a reuse of `_candidate_masks` as
+   a whole function -- only its `MIN_ELONGATION` check applies. The rest
+   of that function's gates (`MAX_MASK_TO_MOTION_RATIO`, `_moving_fraction`
+   against `seed.hot`) are keyed to a `MotionSeed`'s optical-flow data, which
+   a VLM-proposed box simply doesn't have. `vision_detect.py` needs its own
+   small validation function: `fit_blade` the segmented mask, check
+   elongation against `MIN_ELONGATION`, and apply the existing absolute
+   area bounds (`MAX_MASK_AREA_FRAC` etc., which only need the frame size,
+   not motion data). A box Gemini proposed that doesn't actually segment
+   into a blade-shaped mask (e.g. it pointed at a shield, or at a person
+   rather than tightly at their weapon) is dropped here -- defense in
+   depth, not a decision to trust the VLM's labeling blindly.
 5. **Return proposals.** Each surviving candidate becomes a `BladeProposal`
    (reusing the existing type from `detect.py`) with `frame_index` (the one
    chosen frame, shared by all of them -- satisfies `track_objects`' "all
@@ -163,9 +190,19 @@ The endpoint itself tries `detect_blades_vlm` first (when a Gemini client
 can be constructed -- i.e. an API key is present); on any failure at any
 step above (import error building the client, network error, zero validated
 proposals), it falls back to today's `detect_blade` and wraps its single
-result as a one-entry `proposals` list. The frontend never needs to know
-which path ran except via the informational `source` field (useful for a
-"found via AI" vs. "found via motion" hint in the UI, not load-bearing).
+result as a one-entry `proposals` list.
+
+**The `source` field is a real requirement, not a nice-to-have.** Gemini's
+review flagged this correctly: falling back silently from "found 3 swords"
+to "found 1" with no explanation reads as a bug, not as expected behavior,
+to someone who doesn't know an API key is missing or a network call timed
+out. `pickerHint`'s existing text-swap pattern (`MANUAL_HINT`,
+`PREVIEW_READY_HINT`, the "Couldn't find it automatically" auto-detect-
+failure message) already exists for exactly this kind of state-dependent
+guidance -- `source: "motion"` gets its own hint text along the same lines,
+e.g. "Found 1 object via motion detection (AI detection unavailable) --
+add more sabers manually if there are others." No new UI pattern needed,
+just one more case of a pattern already in the file.
 
 **Partial success is still success, not a fallback trigger.** If Gemini
 finds 2 of the 3 swords actually in frame, the endpoint returns those 2
@@ -174,11 +211,11 @@ fill the third slot, and it does not treat "fewer than expected" as a
 failure. The user sees 2 pre-filled slots and adds the third manually via
 "+ Add saber," same interaction as adding any slot today. Mixing a VLM
 proposal and a motion-detected proposal in the same response would mean
-reasoning about two different `frame_index` values (the VLM's chosen middle
-frame vs. whatever frame motion detection independently picks), which
-breaks the "all objects share one prompt_frame" constraint `track_objects`
-depends on -- not worth the complexity for a case the manual add-a-slot
-flow already handles.
+reasoning about two different `frame_index` values (the VLM's chosen frame
+vs. whatever frame motion detection independently picks), which breaks the
+"all objects share one prompt_frame" constraint `track_objects` depends on
+-- not worth the complexity for a case the manual add-a-slot flow already
+handles.
 
 `source` is also useful for debugging -- worth threading into
 `job_meta.json`'s already-existing `prompts` bookkeeping (added earlier
