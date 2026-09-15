@@ -304,3 +304,64 @@ def rerender_pipeline(
     return _render_from_masks(
         job_dir, paths, fps, output_path, color_bgr, intensity, blade_extend, voice, stage_cb,
     )
+
+
+def rerender_pipeline_multi(
+    job_dir,
+    output_path,
+    sabers,
+    blade_extend=True,
+    progress_cb=None,
+):
+    """Re-render an existing multi-saber job with new color/intensity/voice
+    per saber, reusing every object's cached tracking masks -- `track_objects`
+    never runs. Mirrors `rerender_pipeline`'s re-extract-frames-but-reuse-
+    masks trade-off, generalized to N objects.
+    """
+    stage_cb = _make_stage_cb(progress_cb)
+    color_bgrs = [parse_color(s["color"]) for s in sabers]  # validate before touching the job dir
+
+    info = job_meta.require_rerenderable(job_dir)
+    object_ids = info.object_ids
+    if object_ids is None:
+        raise ValueError("This job has no recorded object_ids -- it isn't a multi-saber job")
+    if len(sabers) != len(object_ids):
+        raise ValueError(
+            f"This job has {len(object_ids)} tracked object(s), but {len(sabers)} saber(s) were given"
+        )
+
+    paths = _multi_job_paths(job_dir, object_ids)
+
+    if progress_cb:
+        progress_cb("extract", 0, "re-extracting frames from source clip")
+    fps, n_frames = extract_frames(info.source_video, paths["frames_dir"])
+    with open(paths["video_meta_path"], "w") as f:
+        f.write(f"{fps}\n{n_frames}\n")
+    if progress_cb:
+        progress_cb("extract", 100, f"{n_frames} frames at {fps:.2f} fps")
+
+    objects = [
+        {
+            "masks_dir": paths["masks_dirs"][oid],
+            "motion_path": paths["motion_paths"][oid],
+            "color": color_bgrs[i],
+            "intensity": sabers[i]["intensity"],
+        }
+        for i, oid in enumerate(object_ids)
+    ]
+    render_glow_multi(
+        paths["frames_dir"], objects, paths["video_meta_path"], paths["glow_frames_dir"],
+        blade_extend=blade_extend, progress_cb=stage_cb("glow"),
+    )
+
+    for i, oid in enumerate(object_ids):
+        synthesize_audio(
+            paths["motion_paths"][oid], paths["video_meta_path"], paths["audio_paths"][oid],
+            voice=sabers[i]["voice"], progress_cb=stage_cb("audio"),
+        )
+    mix_hums(list(paths["audio_paths"].values()), paths["mixed_audio_path"])
+
+    encode(paths["glow_frames_dir"], fps, paths["mixed_audio_path"], output_path, progress_cb=stage_cb("mux"))
+    shutil.rmtree(paths["glow_frames_dir"], ignore_errors=True)
+
+    return output_path

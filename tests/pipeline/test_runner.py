@@ -6,9 +6,14 @@ import numpy as np
 import pytest
 
 from lightsaber_fx.pipeline import job_meta
-from lightsaber_fx.pipeline.blade import save_mask
+from lightsaber_fx.pipeline.blade import compute_motion, save_mask
 from lightsaber_fx.pipeline.job_meta import JobNotRerenderableError
-from lightsaber_fx.pipeline.runner import rerender_pipeline, run_pipeline, run_pipeline_multi
+from lightsaber_fx.pipeline.runner import (
+    rerender_pipeline,
+    rerender_pipeline_multi,
+    run_pipeline,
+    run_pipeline_multi,
+)
 
 requires_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 
@@ -546,4 +551,62 @@ def test_run_pipeline_multi_validates_every_saber_color_before_tracking(tmp_path
             job_dir=str(job_dir),
             checkpoint_path="unused",
             device="cpu",
+        )
+
+
+# ---------------------------------------------------------------------------
+# rerender_pipeline_multi
+# ---------------------------------------------------------------------------
+
+
+@requires_ffmpeg
+def test_rerender_pipeline_multi_reuses_cached_masks_for_a_new_color(tmp_path, monkeypatch, tiny_video_path):
+    job_dir = tmp_path / "job"
+    for oid in (0, 1):
+        masks_dir = job_dir / "masks" / str(oid)
+        for i in range(5):
+            mask = np.zeros((48, 64), dtype=bool)
+            mask[10:20, 5 + i * 3:11 + i * 3] = True
+            save_mask(str(masks_dir), i, mask)
+        motion_dir = job_dir / "motion"
+        motion_dir.mkdir(exist_ok=True)
+        compute_motion(str(masks_dir), str(motion_dir / f"{oid}.npz"))
+    (job_dir / "video_meta.txt").write_text("10.0\n5\n")
+    job_meta.write_job_meta(str(job_dir), source_video=str(tiny_video_path), object_ids=[0, 1])
+
+    output_path = tmp_path / "final.mp4"
+    result = rerender_pipeline_multi(
+        job_dir=str(job_dir),
+        output_path=str(output_path),
+        sabers=[
+            {"color": "green", "intensity": 0.6, "voice": "neutral"},
+            {"color": "blue", "intensity": 0.3, "voice": "jedi"},
+        ],
+    )
+
+    assert result == str(output_path)
+    assert output_path.exists() and output_path.stat().st_size > 0
+
+
+def test_rerender_pipeline_multi_rejects_a_saber_count_mismatch(tmp_path, tiny_video_path):
+    job_dir = tmp_path / "job"
+    masks_dir = job_dir / "masks" / "0"
+    for i in range(3):
+        mask = np.zeros((48, 64), dtype=bool)
+        mask[10:20, 5:11] = True
+        save_mask(str(masks_dir), i, mask)
+    motion_dir = job_dir / "motion"
+    motion_dir.mkdir(exist_ok=True)
+    compute_motion(str(masks_dir), str(motion_dir / "0.npz"))
+    (job_dir / "video_meta.txt").write_text("10.0\n3\n")
+    job_meta.write_job_meta(str(job_dir), source_video=str(tiny_video_path), object_ids=[0])
+
+    with pytest.raises(ValueError, match="1 tracked object"):
+        rerender_pipeline_multi(
+            job_dir=str(job_dir),
+            output_path=str(tmp_path / "final.mp4"),
+            sabers=[
+                {"color": "red", "intensity": 0.35, "voice": "neutral"},
+                {"color": "blue", "intensity": 0.35, "voice": "neutral"},
+            ],
         )
