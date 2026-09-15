@@ -2,12 +2,12 @@ import os
 import shutil
 
 from . import job_meta
-from .audio import synthesize_audio
+from .audio import mix_hums, synthesize_audio
 from .blade import compute_motion
 from .frames import extract_frames
-from .glow import parse_color, render_glow
+from .glow import parse_color, render_glow, render_glow_multi
 from .mux import encode
-from .track import track_object
+from .track import track_object, track_objects
 
 
 def _job_paths(job_dir):
@@ -157,6 +157,95 @@ def run_pipeline(
     return _render_from_masks(
         job_dir, paths, fps, output_path, color_bgr, intensity, blade_extend, voice, stage_cb,
     )
+
+
+def _multi_job_paths(job_dir, object_ids):
+    """Per-object mask/motion paths for a multi-saber job, plus the shared
+    (object-count-agnostic) paths every job already uses."""
+    return {
+        "frames_dir": os.path.join(job_dir, "frames"),
+        "video_meta_path": os.path.join(job_dir, "video_meta.txt"),
+        "glow_frames_dir": os.path.join(job_dir, "glow_frames"),
+        "masks_dirs": {oid: os.path.join(job_dir, "masks", str(oid)) for oid in object_ids},
+        "motion_paths": {oid: os.path.join(job_dir, "motion", f"{oid}.npz") for oid in object_ids},
+        "audio_paths": {oid: os.path.join(job_dir, f"saber_audio_{oid}.wav") for oid in object_ids},
+        "mixed_audio_path": os.path.join(job_dir, "saber_audio.wav"),
+    }
+
+
+def run_pipeline_multi(
+    input_video,
+    sabers,
+    output_path,
+    job_dir,
+    checkpoint_path,
+    device,
+    config_name="configs/sam2.1/sam2.1_hiera_s.yaml",
+    blade_extend=True,
+    progress_cb=None,
+):
+    """Like `run_pipeline`, but for 1-4 simultaneously tracked sabers, each
+    with its own color/intensity/voice. Every saber is prompted at frame 0
+    (see Global Constraints in the multi-saber backend plan) and tracked
+    together in one SAM2 session via `track_objects`.
+    """
+    stage_cb = _make_stage_cb(progress_cb)
+    color_bgrs = [parse_color(s["color"]) for s in sabers]  # validate every color up front
+
+    object_ids = list(range(len(sabers)))
+    paths = _multi_job_paths(job_dir, object_ids)
+    os.makedirs(os.path.dirname(paths["masks_dirs"][0]), exist_ok=True)
+    os.makedirs(os.path.dirname(paths["motion_paths"][0]), exist_ok=True)
+
+    if progress_cb:
+        progress_cb("extract", 0, "extracting frames")
+    fps, n_frames = extract_frames(input_video, paths["frames_dir"])
+    with open(paths["video_meta_path"], "w") as f:
+        f.write(f"{fps}\n{n_frames}\n")
+    job_meta.write_job_meta(job_dir, source_video=input_video, object_ids=object_ids)
+    if progress_cb:
+        progress_cb("extract", 100, f"{n_frames} frames at {fps:.2f} fps")
+
+    prompts = [
+        {"obj_id": oid, "masks_dir": paths["masks_dirs"][oid], "points": s["points"], "labels": s["labels"]}
+        for oid, s in zip(object_ids, sabers)
+    ]
+    track_objects(
+        paths["frames_dir"], prompts, checkpoint_path, config_name, device, n_frames,
+        progress_cb=stage_cb("track"),
+    )
+
+    for oid in object_ids:
+        n_tracked, n_with_blade = compute_motion(
+            paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
+        )
+        _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"))
+
+    objects = [
+        {
+            "masks_dir": paths["masks_dirs"][oid],
+            "motion_path": paths["motion_paths"][oid],
+            "color": color_bgrs[i],
+            "intensity": sabers[i]["intensity"],
+        }
+        for i, oid in enumerate(object_ids)
+    ]
+    render_glow_multi(
+        paths["frames_dir"], objects, paths["video_meta_path"], paths["glow_frames_dir"],
+        blade_extend=blade_extend, progress_cb=stage_cb("glow"),
+    )
+
+    for i, oid in enumerate(object_ids):
+        synthesize_audio(
+            paths["motion_paths"][oid], paths["video_meta_path"], paths["audio_paths"][oid],
+            voice=sabers[i]["voice"], progress_cb=stage_cb("audio"),
+        )
+    mix_hums(list(paths["audio_paths"].values()), paths["mixed_audio_path"])
+
+    encode(paths["glow_frames_dir"], fps, paths["mixed_audio_path"], output_path, progress_cb=stage_cb("mux"))
+    shutil.rmtree(paths["glow_frames_dir"], ignore_errors=True)
+
+    return output_path
 
 
 def rerender_pipeline(
