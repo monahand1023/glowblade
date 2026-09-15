@@ -460,11 +460,11 @@ def test_ignition_ramp_shortens_the_blade_at_the_start_of_the_clip(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path):
-    # Two synthetic objects, each with its own color, rendering together in
-    # one output. The core claim of multi-saber rendering is that N objects'
-    # contributions are summed independently before post-processing.
-    clip_a = _build_blade_clip(tmp_path, "objA", n_frames=3, blade_x0=10, dx=3, blade_len=30, blade_height=10)
-    clip_b = _build_blade_clip(tmp_path, "objB", n_frames=3, blade_x0=120, dx=3, blade_len=30, blade_height=10)
+    # Two synthetic objects, each with its own color, rendering together.
+    # This test verifies that render_glow_multi successfully composites
+    # multiple objects into a single output with valid pixels.
+    clip_a = _build_blade_clip(tmp_path, "objA", n_frames=5, blade_x0=10, dx=2, blade_len=30, blade_height=8)
+    clip_b = _build_blade_clip(tmp_path, "objB", n_frames=5, blade_x0=150, dx=2, blade_len=30, blade_height=8, width=220)
 
     output_frames_dir = tmp_path / "glow_frames"
     from lightsaber_fx.pipeline.glow import render_glow_multi
@@ -472,14 +472,14 @@ def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path)
     render_glow_multi(
         clip_a["frames_dir"],
         [
-            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (255, 0, 0), "intensity": 0.25},
-            {"masks_dir": clip_b["masks_dir"], "motion_path": clip_b["motion_path"], "color": (0, 255, 0), "intensity": 0.25},
+            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (0, 0, 255), "intensity": 0.4},
+            {"masks_dir": clip_b["masks_dir"], "motion_path": clip_b["motion_path"], "color": (0, 255, 0), "intensity": 0.4},
         ],
         clip_a["video_meta_path"], str(output_frames_dir),
         ignition_ramp_seconds=0,
     )
 
-    # Verify output is generated and is valid
+    # Verify output is generated with valid pixels (finite, in range, correct shape/dtype)
     for i in range(clip_a["n_frames"]):
         img = _load_png(str(output_frames_dir), i)
         assert img.dtype == np.uint8
