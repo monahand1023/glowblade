@@ -541,3 +541,43 @@ def test_detect_reports_not_found_when_its_frame_cannot_be_extracted(
 
     assert resp.status_code == 200
     assert resp.json() == {"found": False}
+
+
+# --------------------------------------------------------------------------
+# Live preview: the glow stage's own in-progress PNG sequence, so the page
+# can show what the render currently looks like instead of a bare percentage.
+# --------------------------------------------------------------------------
+
+
+def test_preview_404s_before_the_glow_stage_has_written_any_frame(
+    client, tiny_video_bytes
+):
+    # Right after upload there is no glow_frames/ dir at all yet -- the render
+    # hasn't even started tracking, let alone reached the glow stage.
+    job_id = _upload(client, tiny_video_bytes)
+
+    resp = client.get(f"/api/jobs/{job_id}/preview")
+
+    assert resp.status_code == 404
+
+
+def test_preview_returns_the_most_recently_written_glow_frame(
+    client, tiny_video_bytes
+):
+    job_id = _upload(client, tiny_video_bytes)
+    glow_dir = paths_module.get_jobs_dir() / job_id / "glow_frames"
+    glow_dir.mkdir(parents=True)
+    (glow_dir / "00000.png").write_bytes(b"oldest frame")
+    (glow_dir / "00001.png").write_bytes(b"newest frame")
+
+    resp = client.get(f"/api/jobs/{job_id}/preview")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content == b"newest frame"
+
+
+def test_preview_rejects_traversal_style_job_ids(client):
+    resp = client.get("/api/jobs/%2E%2E/preview")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Job not found"

@@ -13,11 +13,38 @@ const rerenderButton = document.getElementById("rerender-button");
 const progressSection = document.getElementById("progress-section");
 const progressFill = document.getElementById("progress-fill");
 const progressLabel = document.getElementById("progress-label");
+const previewImage = document.getElementById("preview-image");
 const resultSection = document.getElementById("result-section");
 const resultPlayer = document.getElementById("result-player");
 const downloadLink = document.getElementById("download-link");
 const errorMessage = document.getElementById("error-message");
 const pickerHint = document.getElementById("picker-hint");
+const stepItems = document.querySelectorAll("#steps li");
+
+const STEP_ORDER = ["upload", "confirm", "render", "result"];
+
+function setStep(current) {
+  const idx = STEP_ORDER.indexOf(current);
+  stepItems.forEach((li) => {
+    const stepIdx = STEP_ORDER.indexOf(li.dataset.step);
+    li.classList.toggle("done", stepIdx < idx);
+    li.classList.toggle("active", stepIdx === idx);
+  });
+}
+
+// Saber color -> UI accent. Purely cosmetic (page chrome), independent of
+// the exact BGR values the renderer uses for the glow itself.
+const ACCENT_COLORS = {
+  red: ["#ff3b3b", "255, 59, 59"],
+  blue: ["#3b82f6", "59, 130, 246"],
+  green: ["#22c55e", "34, 197, 94"],
+};
+
+function updateAccentColor() {
+  const [hex, rgb] = ACCENT_COLORS[colorSelect.value] || ACCENT_COLORS.red;
+  document.documentElement.style.setProperty("--accent", hex);
+  document.documentElement.style.setProperty("--accent-rgb", rgb);
+}
 
 const MANUAL_HINT =
   "Click the object to track. Shift-click to exclude a spot (e.g. a hand).";
@@ -33,6 +60,11 @@ let hasRendered = false; // true once this job has completed at least one render
 let promptFrame = 0;
 // The detected mask, drawn under the points until the user overrides it.
 let detectOverlay = null;
+// Throttles /preview polling to roughly 1/s -- the glow stage emits one SSE
+// progress event per rendered frame, and fetching a preview image on every
+// single one of those would mean one HTTP request per frame.
+let lastPreviewFetch = 0;
+const PREVIEW_MIN_INTERVAL_MS = 800;
 
 // Mirrors format_duration() in lightsaber_fx/progress.py.
 function formatDuration(seconds) {
@@ -98,11 +130,31 @@ function showFrame(url, width, height) {
       redrawPoints();
       pickerSection.hidden = false;
       controlsSection.hidden = false;
+      setStep("confirm");
       resolve();
     };
     frameImage.onerror = () => resolve();
     frameImage.src = url;
   });
+}
+
+// Shows the glow stage's latest in-progress frame, throttled to avoid one
+// request per rendered frame. Loads off-DOM first so a 404 (no frame
+// written yet) never flashes a broken-image icon in the visible <img>.
+function maybeUpdatePreview(stage) {
+  if (stage !== "glow") {
+    previewImage.hidden = true;
+    return;
+  }
+  const now = Date.now();
+  if (now - lastPreviewFetch < PREVIEW_MIN_INTERVAL_MS) return;
+  lastPreviewFetch = now;
+  const probe = new Image();
+  probe.onload = () => {
+    previewImage.src = probe.src;
+    previewImage.hidden = false;
+  };
+  probe.src = `/api/jobs/${jobId}/preview?t=${now}`;
 }
 
 function loadImage(url) {
@@ -182,9 +234,14 @@ dropzone.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
   if (fileInput.files[0]) uploadFile(fileInput.files[0]);
 });
-dropzone.addEventListener("dragover", (event) => event.preventDefault());
+dropzone.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  dropzone.classList.add("dragover");
+});
+dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
 dropzone.addEventListener("drop", (event) => {
   event.preventDefault();
+  dropzone.classList.remove("dragover");
   if (event.dataTransfer.files[0]) uploadFile(event.dataTransfer.files[0]);
 });
 
@@ -204,6 +261,9 @@ submitButton.addEventListener("click", async () => {
   submitButton.hidden = true;
   rerenderButton.hidden = true;
   progressSection.hidden = false;
+  previewImage.hidden = true;
+  lastPreviewFetch = 0;
+  setStep("render");
   listenForProgress();
 });
 
@@ -225,6 +285,9 @@ rerenderButton.addEventListener("click", async () => {
   resultSection.hidden = true;
   rerenderButton.hidden = true;
   progressSection.hidden = false;
+  previewImage.hidden = true;
+  lastPreviewFetch = 0;
+  setStep("render");
   listenForProgress();
 });
 
@@ -236,21 +299,26 @@ function listenForProgress() {
       source.close();
       hasRendered = true;
       progressSection.hidden = true;
+      previewImage.hidden = true;
       resultSection.hidden = false;
       rerenderButton.hidden = false;
       resultPlayer.src = data.result_url + `?t=${Date.now()}`; // bust the cache: same URL, new content
       downloadLink.href = data.result_url;
+      setStep("result");
     } else if (data.stage === "error") {
       source.close();
       progressSection.hidden = true;
+      previewImage.hidden = true;
       showError(data.message);
       // A render (first or re-) failing shouldn't force starting over: bring
       // back whichever action was available before this attempt.
       if (hasRendered) {
         resultSection.hidden = false;
         rerenderButton.hidden = false;
+        setStep("result");
       } else {
         submitButton.hidden = false;
+        setStep("confirm");
       }
     } else {
       progressFill.style.width = `${data.pct}%`;
@@ -260,6 +328,7 @@ function listenForProgress() {
         if (data.eta != null) label += `, ~${formatDuration(data.eta)} left`;
       }
       progressLabel.textContent = label;
+      maybeUpdatePreview(data.stage);
     }
   };
   source.onerror = () => {
@@ -267,3 +336,7 @@ function listenForProgress() {
     showError("Lost connection to the server while rendering.");
   };
 }
+
+colorSelect.addEventListener("change", updateAccentColor);
+updateAccentColor();
+setStep("upload");

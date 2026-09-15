@@ -269,6 +269,28 @@ async def rerender_job(job_id: str, body: dict):
     return {"status": "started"}
 
 
+@app.get("/api/jobs/{job_id}/preview")
+def get_preview(job_id: str):
+    """The most recently written frame of the glow stage's in-progress PNG
+    sequence, so the page can show what the render currently looks like
+    instead of a bare percentage.
+
+    `glow_frames/` only exists while the glow stage is running -- it is
+    absent before that stage starts and removed once it finishes -- so both
+    "not created yet" and "already cleaned up" are the same ordinary 404,
+    not an error.
+    """
+    _validate_job_id(job_id)
+    glow_dir = paths.get_jobs_dir() / job_id / "glow_frames"
+    try:
+        frames = sorted(glow_dir.glob("*.png"))
+    except OSError:
+        frames = []
+    if not frames:
+        raise HTTPException(status_code=404, detail="No preview available yet")
+    return FileResponse(frames[-1], media_type="image/png")
+
+
 @app.get("/api/jobs/{job_id}/events")
 def stream_events(job_id: str):
     _validate_job_id(job_id)

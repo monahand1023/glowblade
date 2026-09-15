@@ -2,61 +2,76 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>lightsaber_fx</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <h1>lightsaber_fx</h1>
+  <main id="app">
+    <h1>lightsaber<span id="title-dash">_</span>fx</h1>
 
-  <div id="dropzone">Drag and drop a video here, or click to choose a file</div>
-  <input type="file" id="file-input" accept="video/mp4" hidden>
+    <ol id="steps">
+      <li data-step="upload">Upload</li>
+      <li data-step="confirm">Confirm</li>
+      <li data-step="render">Render</li>
+      <li data-step="result">Result</li>
+    </ol>
 
-  <div id="picker-section" hidden>
-    <p id="picker-hint">Click the object to track. Shift-click to exclude a spot (e.g. a hand).</p>
-    <canvas id="picker-canvas"></canvas>
-  </div>
-
-  <div id="controls-section" hidden>
-    <div id="controls">
-      <label>Color:
-        <select id="color-select">
-          <option value="red">Red</option>
-          <option value="blue">Blue</option>
-          <option value="green">Green</option>
-        </select>
-      </label>
-      <label>Intensity:
-        <input type="range" id="intensity-input" min="0" max="1" step="0.05" value="0.35">
-      </label>
-      <label>Voice:
-        <select id="voice-select">
-          <option value="neutral">Neutral</option>
-          <option value="jedi">Jedi</option>
-          <option value="sith">Sith</option>
-        </select>
-      </label>
-      <label>
-        <input type="checkbox" id="blade-extend-input" checked>
-        Extend blade
-      </label>
-      <button id="submit-button" disabled>Track &amp; Render</button>
-      <button id="rerender-button" hidden>Re-render</button>
+    <div id="dropzone">
+      <span id="dropzone-label">Drag and drop a video here, or click to choose a file</span>
     </div>
-  </div>
+    <input type="file" id="file-input" accept="video/mp4" hidden>
 
-  <div id="progress-section" hidden>
-    <div id="progress-bar"><div id="progress-fill"></div></div>
-    <p id="progress-label"></p>
-  </div>
+    <div id="picker-section" hidden>
+      <p id="picker-hint">Click the object to track. Shift-click to exclude a spot (e.g. a hand).</p>
+      <canvas id="picker-canvas"></canvas>
+    </div>
 
-  <div id="result-section" hidden>
-    <video id="result-player" controls></video>
-    <a id="download-link" download="final.mp4">Download</a>
-    <p id="rerender-hint">Not the right look? Adjust color/intensity/voice above and click Re-render --
-      it reuses the tracking from this render instead of starting over.</p>
-  </div>
+    <div id="controls-section" hidden>
+      <div id="controls">
+        <label>Color
+          <select id="color-select">
+            <option value="red">Red</option>
+            <option value="blue">Blue</option>
+            <option value="green">Green</option>
+          </select>
+        </label>
+        <label>Intensity
+          <input type="range" id="intensity-input" min="0" max="1" step="0.05" value="0.35">
+        </label>
+        <label>Voice
+          <select id="voice-select">
+            <option value="neutral">Neutral</option>
+            <option value="jedi">Jedi</option>
+            <option value="sith">Sith</option>
+          </select>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="blade-extend-input" checked>
+          Extend blade
+        </label>
+        <button id="submit-button" disabled>Track &amp; Render</button>
+        <button id="rerender-button" hidden>Re-render</button>
+      </div>
+    </div>
 
-  <p id="error-message" hidden></p>
+    <div id="progress-section" hidden>
+      <div id="progress-bar"><div id="progress-fill"></div></div>
+      <p id="progress-label"></p>
+      <img id="preview-image" hidden alt="Live render preview">
+    </div>
+
+    <div id="result-section" hidden>
+      <video id="result-player" controls></video>
+      <div id="result-actions">
+        <a id="download-link" download="final.mp4">Download</a>
+        <p id="rerender-hint">Not the right look? Adjust color/intensity/voice above and click Re-render --
+          it reuses the tracking from this render instead of starting over.</p>
+      </div>
+    </div>
+
+    <p id="error-message" hidden></p>
+  </main>
 
   <script src="/static/app.js"></script>
 </body>
