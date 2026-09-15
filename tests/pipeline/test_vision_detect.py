@@ -64,7 +64,7 @@ def test_parse_gemini_response_drops_a_box_with_non_numeric_coordinates():
 def test_parse_gemini_response_drops_a_box_with_inverted_or_out_of_range_coordinates():
     text = _response([
         {"box_2d": [300, 100, 100, 300], "label": "inverted-y"},  # ymin > ymax
-        {"box_2d": [0, 0, 1200, 100], "label": "out-of-range-x"},  # xmax > 1000
+        {"box_2d": [0, 0, 100, 1200], "label": "out-of-range-x"},  # xmax > 1000
         {"box_2d": [0, 0, 100, 100], "label": "valid"},
     ])
 
