@@ -129,3 +129,206 @@ def test_validate_box_mask_rejects_a_speckled_mask():
     mask[ys, xs] = True
 
     assert _validate_box_mask(mask, MAX_MASK_AREA) is None
+
+
+from lightsaber_fx.pipeline.vision_detect import detect_blades_vlm
+
+
+class _FakeGenaiResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeGenaiClient:
+    """Stands in for genai.Client. `response_text` is what
+    models.generate_content returns; `calls` records each call's kwargs so
+    a test can assert on the model name / schema used."""
+
+    def __init__(self, response_text):
+        self.response_text = response_text
+        self.calls = []
+        self.models = self
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeGenaiResponse(self.response_text)
+
+
+class _RaisingGenaiClient:
+    def __init__(self, exc):
+        self._exc = exc
+        self.models = self
+
+    def generate_content(self, **kwargs):
+        raise self._exc
+
+
+class _FakePredictor:
+    """Stands in for SAM2's image predictor -- box-prompt only, matching
+    what detect_blades_vlm actually calls. `masks_for_box` maps a box
+    (rounded to ints, as a tuple) to the mask SAM2 would return for it."""
+
+    def __init__(self, masks_for_box):
+        self.masks_for_box = masks_for_box
+        self.set_image_calls = 0
+
+    def set_image(self, image):
+        self.set_image_calls += 1
+
+    def predict(self, box, multimask_output=False):
+        key = tuple(int(round(v)) for v in box)
+        mask = self.masks_for_box(key)
+        return np.asarray([mask]), np.ones(1), None
+
+
+def _bar_mask_at(x0, y0, x1, y1):
+    mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    cv2.rectangle(mask, (x0, y0), (x1, y1), 1, -1)
+    return mask.astype(bool)
+
+
+def test_detect_blades_vlm_returns_one_proposal_per_validated_box(
+    monkeypatch, rotating_bar_video,
+):
+    text = json.dumps({"objects": [
+        {"box_2d": [100, 100, 150, 900], "label": "sword"},
+    ]})
+    client = _FakeGenaiClient(text)
+    predictor = _FakePredictor(lambda box: _bar_mask_at(*box))
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        lambda *a, **k: predictor,
+    )
+
+    proposals = detect_blades_vlm(
+        str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client,
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0].elongation >= 6.0
+    assert predictor.set_image_calls == 1  # built/set once, not per box
+
+
+def test_detect_blades_vlm_calls_predict_once_per_box_on_one_predictor(
+    monkeypatch, rotating_bar_video,
+):
+    text = json.dumps({"objects": [
+        {"box_2d": [50, 50, 100, 900], "label": "a"},
+        {"box_2d": [500, 50, 550, 900], "label": "b"},
+    ]})
+    client = _FakeGenaiClient(text)
+    predictor = _FakePredictor(lambda box: _bar_mask_at(*box))
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        lambda *a, **k: predictor,
+    )
+
+    proposals = detect_blades_vlm(
+        str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client,
+    )
+
+    assert len(proposals) == 2
+    assert predictor.set_image_calls == 1  # still just once for both boxes
+
+
+def test_detect_blades_vlm_drops_a_box_that_fails_validation(
+    monkeypatch, rotating_bar_video,
+):
+    text = json.dumps({"objects": [
+        {"box_2d": [100, 100, 150, 900], "label": "sword"},   # -> elongated bar
+        {"box_2d": [400, 400, 600, 600], "label": "blob"},    # -> square blob
+    ]})
+    client = _FakeGenaiClient(text)
+
+    def masks_for_box(box):
+        x0, y0, x1, y1 = box
+        if (x1 - x0) > (y1 - y0) * 3:  # the elongated one
+            return _bar_mask_at(x0, y0, x1, y1)
+        mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        cv2.circle(mask, ((x0 + x1) // 2, (y0 + y1) // 2), 60, 1, -1)
+        return mask.astype(bool)
+
+    predictor = _FakePredictor(masks_for_box)
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        lambda *a, **k: predictor,
+    )
+
+    proposals = detect_blades_vlm(
+        str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client,
+    )
+
+    assert len(proposals) == 1  # the blob was dropped
+
+
+def test_detect_blades_vlm_returns_empty_list_when_gemini_finds_nothing(
+    rotating_bar_video,
+):
+    client = _FakeGenaiClient(json.dumps({"objects": []}))
+
+    proposals = detect_blades_vlm(
+        str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client,
+    )
+
+    assert proposals == []
+
+
+def test_detect_blades_vlm_propagates_a_real_client_error(rotating_bar_video):
+    # A network/auth failure is not "found nothing" -- it's an error the
+    # caller (the /detect endpoint) needs to see, to decide whether to fall
+    # back to motion-based detection. Swallowing it here would make that
+    # decision invisible to the one place that needs to make it.
+    client = _RaisingGenaiClient(RuntimeError("connection refused"))
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        detect_blades_vlm(str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client)
+
+
+def test_detect_blades_vlm_all_proposals_share_one_frame_index(
+    monkeypatch, rotating_bar_video,
+):
+    text = json.dumps({"objects": [
+        {"box_2d": [50, 50, 100, 900], "label": "a"},
+        {"box_2d": [500, 50, 550, 900], "label": "b"},
+    ]})
+    client = _FakeGenaiClient(text)
+    predictor = _FakePredictor(lambda box: _bar_mask_at(*box))
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        lambda *a, **k: predictor,
+    )
+
+    proposals = detect_blades_vlm(
+        str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client,
+    )
+
+    assert len({p.frame_index for p in proposals}) == 1
+
+
+import os
+
+requires_gemini_key = pytest.mark.skipif(
+    not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"),
+    reason="GEMINI_API_KEY not set",
+)
+
+
+@requires_gemini_key
+def test_detect_blades_vlm_finds_multiple_swords_in_a_real_clip():
+    # The one place this test file touches a real network call and real
+    # SAM2 inference -- skipped everywhere except a machine with both a
+    # Gemini key and the SAM2 checkpoint installed, matching how
+    # test_track.py already skips its own real-SAM2 tests.
+    from lightsaber_fx import paths
+    from lightsaber_fx.device import select_device
+
+    clip = "/Users/danm/Desktop/lightsaber/test-clips-mixkit/trimmed/01_knights_battling.mp4"
+    if not os.path.exists(clip):
+        pytest.skip("test clip not present on this machine")
+
+    proposals = detect_blades_vlm(
+        clip, str(paths.get_checkpoint_path()),
+        "configs/sam2.1/sam2.1_hiera_s.yaml", select_device(),
+    )
+
+    assert len(proposals) >= 2

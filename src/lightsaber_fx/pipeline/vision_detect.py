@@ -10,10 +10,21 @@ per-call cost -- so this lives in its own file rather than inside it.
 
 import json
 
+import cv2
 import numpy as np
 
 from .blade import fit_blade
-from .detect import MAX_SPECKLES, MIN_ELONGATION, _speckle_count
+from .detect import (
+    MAX_MASK_AREA_FRAC,
+    MAX_SPECKLES,
+    MIN_ELONGATION,
+    BladeProposal,
+    _build_image_predictor,
+    _points_on_axis,
+    _read_frame,
+    _speckle_count,
+    propose_motion_seeds,
+)
 
 DETECTION_PROMPT = (
     "Find every sword, bat, staff, or similar elongated object that a "
@@ -124,3 +135,97 @@ def _validate_box_mask(mask, max_mask_area):
     if elongation < MIN_ELONGATION:
         return None
     return elongation, geometry
+
+
+GEMINI_MODEL = "gemini-3.8-flash"
+
+
+def detect_blades_vlm(video_path, checkpoint_path, config_name, device, client=None):
+    """Ask Gemini to find every held, swung prop in one representative
+    frame, then validate each candidate through SAM2 + fit_blade. Returns
+    0-4 `BladeProposal` (the same type `detect.detect_blade` returns),
+    sorted by elongation descending.
+
+    Raises on a real failure (network error, bad auth, the SDK not
+    installed) rather than swallowing it -- the caller decides whether to
+    fall back to motion-based detection; this function's only "normal, not
+    an error" empty case is Gemini genuinely finding nothing.
+
+    `client` is injectable (a `genai.Client`, or a test double) so tests
+    never make a real network call -- same pattern as `detect.py`'s own
+    `_build_image_predictor`: "Isolated so tests can replace the whole
+    dependency in one place."
+    """
+    if client is None:
+        from google import genai
+        client = genai.Client()
+
+    from google.genai import types
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        cap.release()
+        raise ValueError(f"Could not read a frame from {video_path}")
+    try:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Not a blind middle-frame guess: reuse the same motion-scoring
+        # detect_blade itself relies on (ranked fastest-first) to pick a
+        # frame where the action is actually visible, not one that happens
+        # to land on motion blur or an occlusion. This only uses the
+        # winning seed's *frame*, not its point -- Gemini gets the whole
+        # frame, no seed information leaks into the vision prompt.
+        seeds = propose_motion_seeds(str(video_path))
+        frame_index = seeds[0].frame_index if seeds else 0
+        frame = _read_frame(cap, frame_index)
+        if frame is None:
+            return []
+
+        ok, encoded = cv2.imencode(".jpg", frame)
+        if not ok:
+            return []
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                types.Part.from_bytes(data=encoded.tobytes(), mime_type="image/jpeg"),
+                DETECTION_PROMPT,
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_json_schema=DETECTION_SCHEMA,
+            ),
+        )
+        boxes = _parse_gemini_response(response.text, width, height)
+        if not boxes:
+            return []
+
+        max_mask_area = MAX_MASK_AREA_FRAC * width * height
+        predictor = _build_image_predictor(checkpoint_path, config_name, device)
+        predictor.set_image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+        proposals = []
+        for box in boxes:
+            masks, _scores, _logits = predictor.predict(
+                box=np.array(box, dtype=np.float32), multimask_output=False,
+            )
+            mask = np.asarray(masks)[0].astype(bool)
+            result = _validate_box_mask(mask, max_mask_area)
+            if result is None:
+                continue
+            elongation, _geometry = result
+            points = _points_on_axis(mask)
+            proposals.append(BladeProposal(
+                frame_index=frame_index,
+                points=points,
+                labels=[1] * len(points),
+                mask=mask,
+                elongation=elongation,
+                seed=None,  # no MotionSeed -- this proposal came from a VLM box, not motion
+            ))
+    finally:
+        cap.release()
+
+    proposals.sort(key=lambda p: p.elongation, reverse=True)
+    return proposals
