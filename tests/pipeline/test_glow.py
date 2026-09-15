@@ -92,6 +92,19 @@ def _load_png(output_frames_dir, idx):
     return img
 
 
+# Golden checksums pinning render_glow's output on the characterization clip
+# (6 frames, extending/motion/core/colour/glow/trail all exercised). Computed
+# from the current, unrefactored render_glow before Task 1's extraction.
+EXPECTED_CHARACTERIZATION_CHECKSUMS = [
+    12551030,  # frame 0
+    12578321,  # frame 1
+    12600557,  # frame 2
+    12614188,  # frame 3
+    12622850,  # frame 4
+    12630675,  # frame 5
+]
+
+
 # ---------------------------------------------------------------------------
 # Basic contract: PNG sequence, dimensions, progress, finite/in-range pixels
 # ---------------------------------------------------------------------------
@@ -348,3 +361,28 @@ def test_render_glow_is_reproducible_with_same_seed(tmp_path):
         a = _load_png(out_a, i)
         b = _load_png(out_b, i)
         assert np.array_equal(a, b)
+
+
+# ---------------------------------------------------------------------------
+# Characterization test: golden baseline before Task 1's extraction refactor
+# ---------------------------------------------------------------------------
+
+def test_render_glow_output_is_unchanged_by_the_extraction_refactor(tmp_path):
+    # Characterization test for the Task 1 refactor in the multi-saber
+    # backend plan: pins render_glow's exact pixel output on a
+    # representative clip (extension, core/colour/glow, motion blur, and
+    # the trail all exercised) before _composite_blade_contribution is
+    # extracted, so the refactor can be verified byte-for-byte.
+    clip = _build_blade_clip(tmp_path, "characterize", n_frames=6, dx=12, blade_len=60)
+    out_dir = str(tmp_path / "out")
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        out_dir, clip["motion_path"], color=(255, 90, 60),
+    )
+    frames = [_load_png(out_dir, i) for i in range(clip["n_frames"])]
+    checksums = [int(f.astype(np.uint64).sum()) for f in frames]
+    # A committed golden value, not a live re-comparison against another
+    # render -- if this assertion ever needs to change, that means
+    # render_glow's real output changed, which must be a deliberate,
+    # reviewed decision, not an accidental refactor side effect.
+    assert checksums == EXPECTED_CHARACTERIZATION_CHECKSUMS

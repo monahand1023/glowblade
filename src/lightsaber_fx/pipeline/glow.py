@@ -307,6 +307,64 @@ def _robust_median(arr, default):
     return float(np.median(finite))
 
 
+def _composite_blade_contribution(
+    frame_shape, mask, tip, hilt, velocity,
+    canonical_width, blade_extend,
+    tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
+    core_erode_kernel, core_sigma, colour_sigma,
+    color_lin, glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
+    spill_strength, motion_blur_gain, motion_blur_max_len, bbox_margin,
+):
+    """One object's core/colour/wide-glow/motion-blur contribution for one
+    frame, confined to a local bounding box. Returns full-frame-sized arrays
+    so callers can sum/OR them directly without tracking per-object offsets.
+
+    Returns (full_fx, blade_u8) where:
+    - full_fx: np.ndarray[h,w,3] float32, zero everywhere outside this
+      object's local bounding box, in additive linear light
+    - blade_u8: np.ndarray[h,w] uint8, zero everywhere the blade shape
+      doesn't cover
+    """
+    h, w = frame_shape[:2]
+    full_fx = np.zeros((h, w, 3), dtype=np.float32)
+    blade_u8 = np.zeros((h, w), dtype=np.uint8)
+
+    if mask is None or not mask.any():
+        return full_fx, blade_u8
+
+    blade_u8 = _build_blade_shape(
+        mask, frame_shape, tip, hilt, canonical_width, blade_extend,
+        tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
+    )
+    ys, xs = np.nonzero(blade_u8)
+    if not len(xs):
+        return full_fx, blade_u8
+
+    x0 = max(0, int(xs.min()) - bbox_margin)
+    y0 = max(0, int(ys.min()) - bbox_margin)
+    x1 = min(w, int(xs.max()) + bbox_margin + 1)
+    y1 = min(h, int(ys.max()) + bbox_margin + 1)
+
+    blade01_local = blade_u8[y0:y1, x0:x1].astype(np.float32) / 255.0
+    core_local = _make_core(blade01_local, core_erode_kernel, core_sigma)
+    colour_local = _make_colour_band(blade01_local, colour_sigma)
+    glow_local = _make_wide_glow(
+        blade01_local, canonical_width, color_lin,
+        glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
+    ) * spill_strength
+
+    fx_local = np.repeat(core_local[..., None], 3, axis=2)
+    fx_local += colour_local[..., None] * color_lin[None, None, :]
+    fx_local += glow_local
+
+    kernel = _directional_kernel(velocity, motion_blur_gain, motion_blur_max_len)
+    if kernel is not None:
+        fx_local = cv2.filter2D(fx_local, -1, kernel)
+
+    full_fx[y0:y1, x0:x1] = fx_local
+    return full_fx, blade_u8
+
+
 def render_glow(
     frames_dir,
     masks_dir,
@@ -430,51 +488,22 @@ def render_glow(
         idx = int(os.path.splitext(fname)[0])
         frame = cv2.imread(os.path.join(frames_dir, fname))
         mask = load_mask_optional(masks_dir, idx)
-        has_mask = mask is not None and mask.any()
 
         plate_lin = _srgb_to_linear(frame)
-        full_fx = np.zeros((h, w, 3), dtype=np.float32)
-        blade_u8 = np.zeros((h, w), dtype=np.uint8)
 
-        if has_mask:
-            row = n if n < n_motion else None
-            tip_i = tip_arr[row] if row is not None else None
-            hilt_i = hilt_arr[row] if row is not None else None
+        row = n if n < n_motion else None
+        tip_i = tip_arr[row] if row is not None else None
+        hilt_i = hilt_arr[row] if row is not None else None
+        vel_i = velocity[row] if row is not None else np.zeros(2)
 
-            blade_u8 = _build_blade_shape(
-                mask, frame.shape, tip_i, hilt_i, canonical_width, blade_extend,
-                tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
-            )
-            ys, xs = np.nonzero(blade_u8)
-
-            if len(xs):
-                # B1.2/B1.3/B1.4/B1.7 -- confined to a box around the
-                # blade (plus margin) rather than the whole frame; this is
-                # the expensive part (up to 18 Gaussian blurs/frame).
-                x0 = max(0, int(xs.min()) - bbox_margin)
-                y0 = max(0, int(ys.min()) - bbox_margin)
-                x1 = min(w, int(xs.max()) + bbox_margin + 1)
-                y1 = min(h, int(ys.max()) + bbox_margin + 1)
-
-                blade01_local = blade_u8[y0:y1, x0:x1].astype(np.float32) / 255.0
-
-                core_local = _make_core(blade01_local, core_erode_kernel, core_sigma)
-                colour_local = _make_colour_band(blade01_local, colour_sigma)
-                glow_local = _make_wide_glow(
-                    blade01_local, canonical_width, color_lin,
-                    glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
-                ) * spill_strength
-
-                fx_local = np.repeat(core_local[..., None], 3, axis=2)
-                fx_local += colour_local[..., None] * color_lin[None, None, :]
-                fx_local += glow_local
-
-                vel_i = velocity[row] if row is not None else np.zeros(2)
-                kernel = _directional_kernel(vel_i, motion_blur_gain, motion_blur_max_len)
-                if kernel is not None:
-                    fx_local = cv2.filter2D(fx_local, -1, kernel)
-
-                full_fx[y0:y1, x0:x1] = fx_local
+        full_fx, blade_u8 = _composite_blade_contribution(
+            frame.shape, mask, tip_i, hilt_i, vel_i,
+            canonical_width, blade_extend,
+            tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
+            core_erode_kernel, core_sigma, colour_sigma,
+            color_lin, glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
+            spill_strength, motion_blur_gain, motion_blur_max_len, bbox_margin,
+        )
 
         # B1.6 -- decay always runs (even on a no-mask frame), so a trail
         # left behind by a lost-then-reacquired blade fades out normally
