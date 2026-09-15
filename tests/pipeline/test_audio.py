@@ -12,6 +12,7 @@ from lightsaber_fx.pipeline.audio import (
     synth_swing_hum,
     synth_tv_buzz,
     synthesize_audio,
+    mix_hums,
 )
 
 # ---------------------------------------------------------------------------
@@ -439,3 +440,46 @@ def test_synthesize_audio_reports_progress_to_completion(tmp_path):
 
     assert calls[-1] == 100
     assert all(0 <= p <= 100 for p in calls)
+
+
+# ---------------------------------------------------------------------------
+# mix_hums: combine per-saber audio into one soft-limited track
+# ---------------------------------------------------------------------------
+
+def test_mix_hums_sums_multiple_tracks_without_clipping(tmp_path):
+    sr = 44100
+    n = sr  # 1 second
+    t = np.linspace(0, 1, n, endpoint=False)
+
+    # Two loud, in-phase stereo tones -- naive summing would clip badly.
+    tone_a = 0.9 * np.sin(2 * np.pi * 220 * t)
+    tone_b = 0.9 * np.sin(2 * np.pi * 220 * t)
+    path_a = str(tmp_path / "a.wav")
+    path_b = str(tmp_path / "b.wav")
+    sf.write(path_a, np.stack([tone_a, tone_a], axis=-1).astype(np.float32), sr)
+    sf.write(path_b, np.stack([tone_b, tone_b], axis=-1).astype(np.float32), sr)
+
+    out_path = str(tmp_path / "mixed.wav")
+    mix_hums([path_a, path_b], out_path)
+
+    mixed, out_sr = sf.read(out_path)
+    assert out_sr == sr
+    assert mixed.shape == (n, 2)
+    assert np.isfinite(mixed).all()
+    assert np.abs(mixed).max() <= 1.0  # no clipping/overflow
+    assert np.abs(mixed).max() > 0.5   # but not silenced into nothing either
+
+
+def test_mix_hums_with_one_track_is_effectively_a_passthrough(tmp_path):
+    sr = 44100
+    n = 1000
+    tone = (0.3 * np.sin(2 * np.pi * 100 * np.linspace(0, 1, n, endpoint=False))).astype(np.float32)
+    path_a = str(tmp_path / "a.wav")
+    sf.write(path_a, np.stack([tone, tone], axis=-1), sr)
+
+    out_path = str(tmp_path / "mixed.wav")
+    mix_hums([path_a], out_path)
+
+    mixed, _ = sf.read(out_path)
+    original, _ = sf.read(path_a)
+    assert np.abs(mixed - original).max() < 0.01  # soft-limit is near-identity well under ceiling
