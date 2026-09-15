@@ -47,21 +47,21 @@ def test_upload_returns_job_id_and_frame0(client, tiny_video_bytes):
 
 
 def test_points_then_events_then_result(client, tiny_video_bytes, monkeypatch, tmp_path):
-    def fake_run_pipeline(*, output_path, progress_cb, **kwargs):
+    def fake_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
         for stage in ("extract", "track", "glow", "audio", "mux"):
             progress_cb(stage, 100, "done")
         with open(output_path, "wb") as f:
             f.write(b"fake final video bytes")
         return output_path
 
-    monkeypatch.setattr(server_module, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(server_module, "run_pipeline_multi", fake_run_pipeline_multi)
 
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
     points_resp = client.post(
         f"/api/jobs/{job_id}/points",
-        json={"points": [[10, 10, 1]], "color": "red", "intensity": 0.35},
+        json={"sabers": [{"points": [[10, 10, 1]], "color": "red", "intensity": 0.35}]},
     )
     assert points_resp.status_code == 200
 
@@ -91,7 +91,10 @@ def test_points_rejected_without_include_point(client, tiny_video_bytes):
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
-    resp = client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 0]]})
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[10, 10, 0]]}]},
+    )
 
     assert resp.status_code == 400
 
@@ -103,7 +106,7 @@ def test_points_rejected_with_out_of_range_intensity(client, tiny_video_bytes, i
 
     resp = client.post(
         f"/api/jobs/{job_id}/points",
-        json={"points": [[10, 10, 1]], "intensity": intensity},
+        json={"sabers": [{"points": [[10, 10, 1]], "intensity": intensity}]},
     )
 
     assert resp.status_code == 400
@@ -115,7 +118,10 @@ def test_points_rejected_when_sam2_checkpoint_missing(client, tiny_video_bytes, 
 
     (tmp_path / "checkpoints" / "sam2.1_hiera_small.pt").unlink()
 
-    resp = client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 1]]})
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[10, 10, 1]]}]},
+    )
 
     assert resp.status_code == 400
     assert "lightsaber-fx setup" in resp.json()["detail"]
@@ -124,17 +130,17 @@ def test_points_rejected_when_sam2_checkpoint_missing(client, tiny_video_bytes, 
 def test_second_upload_returns_409_while_a_job_is_running(client, tiny_video_bytes, monkeypatch):
     release = threading.Event()
 
-    def slow_run_pipeline(*, output_path, progress_cb, **kwargs):
+    def slow_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
         release.wait(timeout=2)
         with open(output_path, "wb") as f:
             f.write(b"x")
         return output_path
 
-    monkeypatch.setattr(server_module, "run_pipeline", slow_run_pipeline)
+    monkeypatch.setattr(server_module, "run_pipeline_multi", slow_run_pipeline_multi)
 
     up1 = client.post("/api/upload", files={"file": ("a.mp4", tiny_video_bytes, "video/mp4")})
     job1 = up1.json()["job_id"]
-    client.post(f"/api/jobs/{job1}/points", json={"points": [[1, 1, 1]]})
+    client.post(f"/api/jobs/{job1}/points", json={"sabers": [{"points": [[1, 1, 1]]}]})
 
     up2 = client.post("/api/upload", files={"file": ("b.mp4", tiny_video_bytes, "video/mp4")})
 
@@ -198,18 +204,18 @@ def test_traversal_style_job_id_cannot_escape_jobs_dir(client, tmp_path):
 def test_second_points_submission_returns_409_while_job_is_running(client, tiny_video_bytes, monkeypatch):
     release = threading.Event()
 
-    def slow_run_pipeline(*, output_path, progress_cb, **kwargs):
+    def slow_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
         release.wait(timeout=2)
         with open(output_path, "wb") as f:
             f.write(b"x")
         return output_path
 
-    monkeypatch.setattr(server_module, "run_pipeline", slow_run_pipeline)
+    monkeypatch.setattr(server_module, "run_pipeline_multi", slow_run_pipeline_multi)
 
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
-    first = client.post(f"/api/jobs/{job_id}/points", json={"points": [[1, 1, 1]]})
+    first = client.post(f"/api/jobs/{job_id}/points", json={"sabers": [{"points": [[1, 1, 1]]}]})
     assert first.status_code == 200
 
     # The job is now running (blocked on `release`). A second points submission
@@ -217,7 +223,7 @@ def test_second_points_submission_returns_409_while_job_is_running(client, tiny_
     # (it never touches /api/upload) and must instead be rejected by
     # `manager.start()` raising RuntimeError, which `submit_points` translates
     # into a 409.
-    second = client.post(f"/api/jobs/{job_id}/points", json={"points": [[2, 2, 1]]})
+    second = client.post(f"/api/jobs/{job_id}/points", json={"sabers": [{"points": [[2, 2, 1]]}]})
     assert second.status_code == 409
 
     release.set()
@@ -241,12 +247,15 @@ def _fake_run_pipeline_writing(content: bytes):
 
 
 def test_rerender_endpoint_starts_job_and_produces_new_result(client, tiny_video_bytes, monkeypatch):
-    monkeypatch.setattr(server_module, "run_pipeline", _fake_run_pipeline_writing(b"first render bytes"))
+    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_writing(b"first render bytes"))
 
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
-    points_resp = client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 1]]})
+    points_resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[10, 10, 1]]}]},
+    )
     assert points_resp.status_code == 200
     server_module.manager.wait(timeout=2)
 
@@ -320,11 +329,11 @@ def test_rerender_endpoint_rejects_invalid_voice(client, tiny_video_bytes):
 
 
 def test_rerender_endpoint_409_when_a_job_is_already_running(client, tiny_video_bytes, monkeypatch):
-    monkeypatch.setattr(server_module, "run_pipeline", _fake_run_pipeline_writing(b"first"))
+    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_writing(b"first"))
 
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
-    client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 10, 1]]})
+    client.post(f"/api/jobs/{job_id}/points", json={"sabers": [{"points": [[10, 10, 1]]}]})
     server_module.manager.wait(timeout=2)
 
     monkeypatch.setattr(server_module, "require_rerenderable", lambda job_dir: None)
@@ -467,58 +476,92 @@ def test_detect_routes_reject_traversal_style_job_ids(client):
         assert resp.status_code == 404, f"{path} accepted a traversal-style id"
 
 
-def test_points_passes_prompt_frame_through_to_the_pipeline(
-    client, tiny_video_bytes, monkeypatch
-):
-    # The whole detection flow hinges on this: points placed on frame 17 must
-    # be tracked from frame 17. Dropping prompt_frame here would put them on
-    # frame 0, land them on whatever is there, and produce a wrong render with
-    # no error anywhere.
+def test_points_ignores_any_client_supplied_prompt_frame(client, tiny_video_bytes, monkeypatch):
+    # Multi-saber tracking always prompts at frame 0 (see Global Constraints);
+    # a client-supplied prompt_frame in a saber spec is accepted (forward
+    # compatibility) but never reaches run_pipeline_multi, which has no such
+    # parameter.
     captured = {}
 
-    def fake_run_pipeline(*, output_path, progress_cb, **kwargs):
+    def fake_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
         captured.update(kwargs)
         with open(output_path, "wb") as f:
             f.write(b"x")
         return output_path
 
-    monkeypatch.setattr(server_module, "run_pipeline", fake_run_pipeline)
-    job_id = _upload(client, tiny_video_bytes)
+    monkeypatch.setattr(server_module, "run_pipeline_multi", fake_run_pipeline_multi)
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
 
     resp = client.post(
         f"/api/jobs/{job_id}/points",
-        json={"points": [[10, 20, 1]], "prompt_frame": 17},
+        json={"sabers": [{"points": [[10, 20, 1]], "prompt_frame": 17}]},
     )
     assert resp.status_code == 200
     server_module.manager.wait(timeout=10)
 
-    assert captured["prompt_frame"] == 17
+    assert "prompt_frame" not in captured
 
 
-def test_points_defaults_prompt_frame_to_zero(client, tiny_video_bytes, monkeypatch):
+def test_points_accepts_multiple_sabers_and_starts_a_multi_object_job(client, tiny_video_bytes, monkeypatch):
     captured = {}
 
-    def fake_run_pipeline(*, output_path, progress_cb, **kwargs):
+    def fake_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
         captured.update(kwargs)
         with open(output_path, "wb") as f:
-            f.write(b"x")
+            f.write(b"multi render bytes")
         return output_path
 
-    monkeypatch.setattr(server_module, "run_pipeline", fake_run_pipeline)
-    job_id = _upload(client, tiny_video_bytes)
+    monkeypatch.setattr(server_module, "run_pipeline_multi", fake_run_pipeline_multi)
 
-    client.post(f"/api/jobs/{job_id}/points", json={"points": [[10, 20, 1]]})
-    server_module.manager.wait(timeout=10)
-
-    assert captured["prompt_frame"] == 0
-
-
-def test_points_rejects_a_negative_prompt_frame(client, tiny_video_bytes):
-    job_id = _upload(client, tiny_video_bytes)
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
 
     resp = client.post(
         f"/api/jobs/{job_id}/points",
-        json={"points": [[10, 20, 1]], "prompt_frame": -3},
+        json={
+            "sabers": [
+                {"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"},
+                {"points": [[20, 20, 1]], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    server_module.manager.wait(timeout=2)
+    assert len(captured["sabers"]) == 2
+    assert captured["sabers"][0]["color"] == "red"
+    assert captured["sabers"][1]["voice"] == "sith"
+
+
+def test_points_rejects_zero_sabers(client, tiny_video_bytes):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(f"/api/jobs/{job_id}/points", json={"sabers": []})
+
+    assert resp.status_code == 400
+
+
+def test_points_rejects_more_than_four_sabers(client, tiny_video_bytes):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[1, 1, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"}] * 5},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_points_rejects_a_saber_with_no_include_point(client, tiny_video_bytes):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[1, 1, 0]], "color": "red", "intensity": 0.35, "voice": "neutral"}]},
     )
 
     assert resp.status_code == 400

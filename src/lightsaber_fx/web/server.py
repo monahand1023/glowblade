@@ -16,7 +16,7 @@ from ..device import select_device
 from ..pipeline.detect import detect_blade
 from ..pipeline.frames import extract_first_frame, extract_frame_at
 from ..pipeline.job_meta import JobNotRerenderableError, require_rerenderable
-from ..pipeline.runner import rerender_pipeline, run_pipeline
+from ..pipeline.runner import rerender_pipeline, rerender_pipeline_multi, run_pipeline, run_pipeline_multi
 from .jobs import JobManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -173,6 +173,31 @@ def _parse_render_params(body: dict):
     return color, intensity, blade_extend, voice
 
 
+def _parse_saber_specs(body: dict):
+    """Validate and extract the list of per-saber specs from a `/points`
+    request body: 1-4 entries, each needing at least one include point and
+    a valid color/intensity/voice, using the exact same per-field rules
+    `_parse_render_params` already enforces for the single-object endpoints."""
+    sabers = body.get("sabers", [])
+    if not 1 <= len(sabers) <= 4:
+        raise HTTPException(status_code=400, detail="sabers must have between 1 and 4 entries")
+
+    parsed = []
+    for i, saber in enumerate(sabers):
+        points_and_labels = saber.get("points", [])
+        if not any(p[2] == 1 for p in points_and_labels):
+            raise HTTPException(status_code=400, detail=f"saber {i}: at least one include point is required")
+        color, intensity, _, voice = _parse_render_params(saber)
+        parsed.append({
+            "points": [[p[0], p[1]] for p in points_and_labels],
+            "labels": [p[2] for p in points_and_labels],
+            "color": color,
+            "intensity": intensity,
+            "voice": voice,
+        })
+    return parsed
+
+
 @app.post("/api/jobs/{job_id}/points")
 async def submit_points(job_id: str, body: dict):
     _validate_job_id(job_id)
@@ -186,38 +211,21 @@ async def submit_points(job_id: str, body: dict):
     if not input_path.exists():
         raise HTTPException(status_code=404, detail="Job not found")
 
-    points_and_labels = body.get("points", [])
-    if not any(p[2] == 1 for p in points_and_labels):
-        raise HTTPException(status_code=400, detail="At least one include point is required")
-
-    points = [[p[0], p[1]] for p in points_and_labels]
-    labels = [p[2] for p in points_and_labels]
-    color, intensity, blade_extend, voice = _parse_render_params(body)
-    # Which frame the points were placed on. Accepted from the client
-    # because the page may be showing a detected frame from mid-swing
-    # rather than frame 0, and points against the wrong frame land on
-    # whatever happens to be there.
-    prompt_frame = int(body.get("prompt_frame", 0))
-    if prompt_frame < 0:
-        raise HTTPException(status_code=400, detail="prompt_frame must not be negative")
+    sabers = _parse_saber_specs(body)
+    blade_extend = bool(body.get("blade_extend", True))
 
     output_path = job_dir / "final.mp4"
     device = select_device()
 
     def pipeline_fn(progress_cb):
-        return run_pipeline(
+        return run_pipeline_multi(
             input_video=str(input_path),
-            points=points,
-            labels=labels,
-            prompt_frame=prompt_frame,
+            sabers=sabers,
             output_path=str(output_path),
             job_dir=str(job_dir),
             checkpoint_path=str(paths.get_checkpoint_path()),
             device=device,
-            color=color,
-            intensity=intensity,
             blade_extend=blade_extend,
-            voice=voice,
             progress_cb=progress_cb,
         )
 
