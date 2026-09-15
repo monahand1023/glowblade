@@ -11,6 +11,7 @@ from lightsaber_fx.pipeline.track import (
     overlay_proposal,
     pick_points_interactive,
     track_object,
+    track_objects,
 )
 
 requires_sam2_checkpoint = pytest.mark.skipif(
@@ -210,3 +211,41 @@ def test_track_object_covers_the_whole_clip_when_prompted_mid_way(tmp_path):
     assert sorted(os.listdir(masks_dir)) == [f"{i:05d}.npz" for i in range(n_frames)]
     assert load_mask(str(masks_dir), 0).any(), "no mask before the prompt frame"
     assert load_mask(str(masks_dir), n_frames - 1).any(), "no mask after the prompt frame"
+
+
+@requires_sam2_checkpoint
+def test_track_objects_tracks_two_objects_independently(tmp_path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    n_frames = 3
+    for i in range(n_frames):
+        frame = np.zeros((64, 128, 3), dtype=np.uint8)
+        frame[20:30, 10 + i * 3:20 + i * 3] = (255, 255, 255)   # object A, left side
+        frame[20:30, 90 + i * 3:100 + i * 3] = (255, 255, 255)  # object B, right side
+        cv2.imwrite(str(frames_dir / f"{i:05d}.jpg"), frame)
+
+    masks_dir_a = tmp_path / "masks" / "0"
+    masks_dir_b = tmp_path / "masks" / "1"
+
+    track_objects(
+        str(frames_dir),
+        [
+            {"obj_id": 0, "masks_dir": str(masks_dir_a), "points": [[15, 25]], "labels": [1]},
+            {"obj_id": 1, "masks_dir": str(masks_dir_b), "points": [[95, 25]], "labels": [1]},
+        ],
+        checkpoint_path=str(paths.get_checkpoint_path()),
+        config_name="configs/sam2.1/sam2.1_hiera_s.yaml",
+        device="cpu",
+        n_frames=n_frames,
+    )
+
+    for masks_dir in (masks_dir_a, masks_dir_b):
+        assert sorted(os.listdir(masks_dir)) == [f"{i:05d}.npz" for i in range(n_frames)]
+        for i in range(n_frames):
+            assert load_mask(str(masks_dir), i).any()
+
+    # The two objects' masks must stay on their own sides of the frame,
+    # not bleed into or duplicate each other.
+    mask_a0 = load_mask(str(masks_dir_a), 0)
+    mask_b0 = load_mask(str(masks_dir_b), 0)
+    assert not np.any(mask_a0 & mask_b0)

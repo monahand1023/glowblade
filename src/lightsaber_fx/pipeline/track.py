@@ -139,3 +139,53 @@ def track_object(
             save_mask(masks_dir, frame_idx, mask)
             written += 1
             report(min(written / n_frames * 100, 100.0), f"frame {written}/{n_frames}")
+
+
+def track_objects(
+    frames_dir,
+    prompts,
+    checkpoint_path,
+    config_name,
+    device,
+    n_frames,
+    progress_cb=None,
+):
+    """Like `track_object`, but for `len(prompts)` (1-4) objects tracked
+    together in one shared SAM2 session -- cheaper than N separate sessions,
+    since each frame's image features are encoded once regardless of object
+    count. Every object is prompted at frame 0 (see the multi-saber backend
+    plan's Global Constraints: auto-detect and mid-clip prompting are not
+    supported for multi-object tracking), so propagation runs forward-only,
+    once, covering the whole clip in a single pass.
+    """
+    def report(pct, message):
+        if progress_cb:
+            progress_cb(pct, message)
+
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+    from sam2.build_sam import build_sam2_video_predictor
+    predictor = build_sam2_video_predictor(config_name, checkpoint_path, device=device)
+
+    state = predictor.init_state(video_path=frames_dir)
+    for prompt in prompts:
+        predictor.add_new_points_or_box(
+            state,
+            frame_idx=0,
+            obj_id=prompt["obj_id"],
+            points=np.array(prompt["points"], dtype=np.float32),
+            labels=np.array(prompt["labels"], dtype=np.int32),
+        )
+
+    masks_dir_by_obj_id = {p["obj_id"]: p["masks_dir"] for p in prompts}
+    for masks_dir in masks_dir_by_obj_id.values():
+        os.makedirs(masks_dir, exist_ok=True)
+
+    written = 0
+    total_writes = n_frames * len(prompts)
+    for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
+        for i, obj_id in enumerate(obj_ids):
+            mask = (mask_logits[i] > 0.0).cpu().numpy().squeeze()
+            save_mask(masks_dir_by_obj_id[obj_id], frame_idx, mask)
+            written += 1
+        report(min(written / total_writes * 100, 100.0), f"frame {frame_idx + 1}/{n_frames}")
