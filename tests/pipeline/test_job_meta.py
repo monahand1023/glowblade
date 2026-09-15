@@ -216,3 +216,58 @@ def test_require_rerenderable_returns_info_when_ok(tmp_path, tiny_video_path):
 
     assert info.rerenderable is True
     assert info.source_video == os.path.abspath(str(tiny_video_path))
+
+
+# ---------------------------------------------------------------------------
+# Multi-object job support
+# ---------------------------------------------------------------------------
+
+
+def test_write_job_meta_records_object_ids_when_given(tmp_path):
+    meta = write_job_meta(str(tmp_path), source_video="/tmp/x.mp4", object_ids=[0, 1, 2])
+    assert meta["object_ids"] == [0, 1, 2]
+    assert read_job_meta(str(tmp_path))["object_ids"] == [0, 1, 2]
+
+
+def test_write_job_meta_omits_object_ids_when_not_given(tmp_path):
+    # Legacy/CLI single-object jobs never pass object_ids -- the key must
+    # not appear at all, not be written as null, so describe_job's
+    # "is this a multi-object job" check can be a plain `in` test.
+    meta = write_job_meta(str(tmp_path), source_video="/tmp/x.mp4")
+    assert "object_ids" not in meta
+
+
+def test_describe_job_checks_per_object_masks_for_a_multi_object_job(tmp_path):
+    job_dir = tmp_path
+    (job_dir / "masks" / "0").mkdir(parents=True)
+    (job_dir / "masks" / "1").mkdir(parents=True)
+    save_mask(str(job_dir / "masks" / "0"), 0, np.ones((4, 4), dtype=bool))
+    save_mask(str(job_dir / "masks" / "1"), 0, np.ones((4, 4), dtype=bool))
+    (job_dir / "motion" ).mkdir()
+    compute_motion(str(job_dir / "masks" / "0"), str(job_dir / "motion" / "0.npz"))
+    compute_motion(str(job_dir / "masks" / "1"), str(job_dir / "motion" / "1.npz"))
+    (job_dir / "video_meta.txt").write_text("24.0\n1\n")
+    write_job_meta(str(job_dir), source_video=str(tmp_path / "src.mp4"), object_ids=[0, 1])
+    (tmp_path / "src.mp4").write_bytes(b"x")
+
+    info = describe_job(str(job_dir))
+
+    assert info.rerenderable, info.reason
+    assert info.object_ids == [0, 1]
+
+
+def test_describe_job_reports_missing_object_masks_for_a_multi_object_job(tmp_path):
+    job_dir = tmp_path
+    (job_dir / "masks" / "0").mkdir(parents=True)
+    save_mask(str(job_dir / "masks" / "0"), 0, np.ones((4, 4), dtype=bool))
+    # object 1's masks/ dir is entirely missing
+    (job_dir / "motion").mkdir()
+    compute_motion(str(job_dir / "masks" / "0"), str(job_dir / "motion" / "0.npz"))
+    (job_dir / "video_meta.txt").write_text("24.0\n1\n")
+    write_job_meta(str(job_dir), source_video=str(tmp_path / "src.mp4"), object_ids=[0, 1])
+    (tmp_path / "src.mp4").write_bytes(b"x")
+
+    info = describe_job(str(job_dir))
+
+    assert not info.rerenderable
+    assert "object 1" in info.reason
