@@ -237,35 +237,54 @@ async def submit_points(job_id: str, body: dict):
     return {"status": "started"}
 
 
+def _parse_saber_style_specs(body: dict):
+    """Like `_parse_saber_specs`, for `/rerender` -- no points/labels here,
+    tracking is never re-run, just color/intensity/voice per saber."""
+    sabers = body.get("sabers", [])
+    if not 1 <= len(sabers) <= 4:
+        raise HTTPException(status_code=400, detail="sabers must have between 1 and 4 entries")
+    parsed = []
+    for saber in sabers:
+        color, intensity, _, voice = _parse_render_params(saber)
+        parsed.append({"color": color, "intensity": intensity, "voice": voice})
+    return parsed
+
+
 @app.post("/api/jobs/{job_id}/rerender")
 async def rerender_job(job_id: str, body: dict):
-    """Re-render an existing job with a new color/intensity/voice/
-    blade_extend, reusing its cached masks instead of re-tracking. Goes
-    through the same `JobManager` (one job at a time) as `/points` --
-    rerender_pipeline() itself never calls track_object, so this can't
-    contend with anything except another render of some job."""
+    """Re-render an existing job with new per-saber color/intensity/voice
+    (plus blade_extend), reusing its cached masks instead of re-tracking.
+    Goes through the same `JobManager` (one job at a time) as `/points` --
+    rerender_pipeline_multi() itself never calls track_objects, so this
+    can't contend with anything except another render of some job."""
     _validate_job_id(job_id)
     job_dir = paths.get_jobs_dir() / job_id
     if not job_dir.is_dir():
         raise HTTPException(status_code=404, detail="Job not found")
 
-    color, intensity, blade_extend, voice = _parse_render_params(body)
+    sabers = _parse_saber_style_specs(body)
+    blade_extend = bool(body.get("blade_extend", True))
 
     try:
-        require_rerenderable(str(job_dir))
+        info = require_rerenderable(str(job_dir))
     except JobNotRerenderableError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if info.object_ids is None or len(sabers) != len(info.object_ids):
+        expected = len(info.object_ids) if info.object_ids is not None else 1
+        raise HTTPException(
+            status_code=400,
+            detail=f"This job has {expected} tracked object(s), but {len(sabers)} saber(s) were given",
+        )
 
     output_path = job_dir / "final.mp4"
 
     def pipeline_fn(progress_cb):
-        return rerender_pipeline(
+        return rerender_pipeline_multi(
             job_dir=str(job_dir),
             output_path=str(output_path),
-            color=color,
-            intensity=intensity,
+            sabers=sabers,
             blade_extend=blade_extend,
-            voice=voice,
             progress_cb=progress_cb,
         )
 

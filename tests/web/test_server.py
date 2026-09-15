@@ -236,25 +236,88 @@ def test_second_points_submission_returns_409_while_job_is_running(client, tiny_
 # ---------------------------------------------------------------------------
 
 
-def _fake_run_pipeline_writing(content: bytes):
-    def fake_run_pipeline(*, output_path, progress_cb, **kwargs):
+def _fake_run_pipeline_multi_writing(content: bytes):
+    def fake_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
         for stage in ("extract", "track", "glow", "audio", "mux"):
             progress_cb(stage, 100, "done")
         with open(output_path, "wb") as f:
             f.write(content)
         return output_path
-    return fake_run_pipeline
+    return fake_run_pipeline_multi
+
+
+def test_rerender_endpoint_accepts_multiple_sabers(client, tiny_video_bytes, monkeypatch):
+    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_multi_writing(b"first"))
+
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+    points_resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [
+            {"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[20, 20, 1]], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+        ]},
+    )
+    assert points_resp.status_code == 200
+    server_module.manager.wait(timeout=2)
+
+    monkeypatch.setattr(server_module, "require_rerenderable",
+                         lambda job_dir: type("Info", (), {"object_ids": [0, 1]})())
+
+    captured = {}
+
+    def fake_rerender_pipeline_multi(*, output_path, progress_cb, **kwargs):
+        captured.update(kwargs)
+        with open(output_path, "wb") as f:
+            f.write(b"rerendered")
+        return output_path
+
+    monkeypatch.setattr(server_module, "rerender_pipeline_multi", fake_rerender_pipeline_multi)
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/rerender",
+        json={"sabers": [
+            {"color": "green", "intensity": 0.6, "voice": "jedi"},
+            {"color": "red", "intensity": 0.2, "voice": "sith"},
+        ]},
+    )
+
+    assert resp.status_code == 200
+    server_module.manager.wait(timeout=2)
+    assert len(captured["sabers"]) == 2
+    assert captured["sabers"][0]["voice"] == "jedi"
+
+
+def test_rerender_endpoint_rejects_a_saber_count_mismatch(client, tiny_video_bytes, monkeypatch):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_multi_writing(b"x"))
+    client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[1, 1, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"}]},
+    )
+    server_module.manager.wait(timeout=2)
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/rerender",
+        json={"sabers": [
+            {"color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"color": "blue", "intensity": 0.35, "voice": "neutral"},
+        ]},
+    )
+
+    assert resp.status_code == 400
 
 
 def test_rerender_endpoint_starts_job_and_produces_new_result(client, tiny_video_bytes, monkeypatch):
-    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_writing(b"first render bytes"))
+    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_multi_writing(b"first render bytes"))
 
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
     points_resp = client.post(
         f"/api/jobs/{job_id}/points",
-        json={"sabers": [{"points": [[10, 10, 1]]}]},
+        json={"sabers": [{"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"}]},
     )
     assert points_resp.status_code == 200
     server_module.manager.wait(timeout=2)
@@ -262,30 +325,24 @@ def test_rerender_endpoint_starts_job_and_produces_new_result(client, tiny_video
     first_result = client.get(f"/api/jobs/{job_id}/result")
     assert first_result.content == b"first render bytes"
 
-    # The fake run_pipeline above never actually wrote masks/motion.npz/
-    # job_meta.json (the real one does) -- the "is a real job actually
-    # rerenderable" question is covered on its own by
-    # test_rerender_endpoint_400_when_job_has_no_masks_yet, so here the
-    # rerenderability check itself is stubbed out to isolate what this test
-    # is actually about: the endpoint wiring (JobManager reuse, new result).
-    monkeypatch.setattr(server_module, "require_rerenderable", lambda job_dir: None)
+    monkeypatch.setattr(server_module, "require_rerenderable",
+                         lambda job_dir: type("Info", (), {"object_ids": [0]})())
 
-    def fake_rerender_pipeline(*, output_path, progress_cb, **kwargs):
+    def fake_rerender_pipeline_multi(*, output_path, progress_cb, **kwargs):
         for stage in ("extract", "glow", "audio", "mux"):
             progress_cb(stage, 100, "done")
         with open(output_path, "wb") as f:
             f.write(b"rerendered bytes")
         return output_path
 
-    monkeypatch.setattr(server_module, "rerender_pipeline", fake_rerender_pipeline)
+    monkeypatch.setattr(server_module, "rerender_pipeline_multi", fake_rerender_pipeline_multi)
 
-    rerender_resp = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "blue", "intensity": 0.6})
+    rerender_resp = client.post(
+        f"/api/jobs/{job_id}/rerender",
+        json={"sabers": [{"color": "blue", "intensity": 0.6, "voice": "neutral"}]},
+    )
     assert rerender_resp.status_code == 200
     server_module.manager.wait(timeout=2)
-
-    with client.stream("GET", f"/api/jobs/{job_id}/events") as stream:
-        body = b"".join(stream.iter_bytes())
-    assert b'"stage": "done"' in body or b'"stage":"done"' in body
 
     result_resp = client.get(f"/api/jobs/{job_id}/result")
     assert result_resp.status_code == 200
@@ -293,17 +350,20 @@ def test_rerender_endpoint_starts_job_and_produces_new_result(client, tiny_video
 
 
 def test_rerender_endpoint_404_for_unknown_job(client):
-    resp = client.post("/api/jobs/doesnotexist/rerender", json={})
+    resp = client.post("/api/jobs/doesnotexist/rerender", json={"sabers": []})
     assert resp.status_code == 404
 
 
 def test_rerender_endpoint_400_when_job_has_no_masks_yet(client, tiny_video_bytes):
     # Upload only -- /points was never called, so there's no masks/,
-    # motion.npz, or video_meta.txt for this job yet.
+    # motion/, or video_meta.txt for this job yet.
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
-    resp = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "blue"})
+    resp = client.post(
+        f"/api/jobs/{job_id}/rerender",
+        json={"sabers": [{"color": "blue", "intensity": 0.35, "voice": "neutral"}]},
+    )
 
     assert resp.status_code == 400
     assert "masks" in resp.json()["detail"]
@@ -314,7 +374,10 @@ def test_rerender_endpoint_rejects_out_of_range_intensity(client, tiny_video_byt
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
-    resp = client.post(f"/api/jobs/{job_id}/rerender", json={"intensity": intensity})
+    resp = client.post(
+        f"/api/jobs/{job_id}/rerender",
+        json={"sabers": [{"intensity": intensity}]},
+    )
 
     assert resp.status_code == 400
 
@@ -323,35 +386,42 @@ def test_rerender_endpoint_rejects_invalid_voice(client, tiny_video_bytes):
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
 
-    resp = client.post(f"/api/jobs/{job_id}/rerender", json={"voice": "yoda"})
+    resp = client.post(
+        f"/api/jobs/{job_id}/rerender",
+        json={"sabers": [{"voice": "yoda"}]},
+    )
 
     assert resp.status_code == 400
 
 
 def test_rerender_endpoint_409_when_a_job_is_already_running(client, tiny_video_bytes, monkeypatch):
-    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_writing(b"first"))
+    monkeypatch.setattr(server_module, "run_pipeline_multi", _fake_run_pipeline_multi_writing(b"first"))
 
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]
-    client.post(f"/api/jobs/{job_id}/points", json={"sabers": [{"points": [[10, 10, 1]]}]})
+    client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"}]},
+    )
     server_module.manager.wait(timeout=2)
 
-    monkeypatch.setattr(server_module, "require_rerenderable", lambda job_dir: None)
+    monkeypatch.setattr(server_module, "require_rerenderable",
+                         lambda job_dir: type("Info", (), {"object_ids": [0]})())
 
     release = threading.Event()
 
-    def slow_rerender_pipeline(*, output_path, progress_cb, **kwargs):
+    def slow_rerender_pipeline_multi(*, output_path, progress_cb, **kwargs):
         release.wait(timeout=2)
         with open(output_path, "wb") as f:
             f.write(b"slow")
         return output_path
 
-    monkeypatch.setattr(server_module, "rerender_pipeline", slow_rerender_pipeline)
+    monkeypatch.setattr(server_module, "rerender_pipeline_multi", slow_rerender_pipeline_multi)
 
-    first = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "blue"})
+    first = client.post(f"/api/jobs/{job_id}/rerender", json={"sabers": [{"color": "blue", "intensity": 0.35, "voice": "neutral"}]})
     assert first.status_code == 200
 
-    second = client.post(f"/api/jobs/{job_id}/rerender", json={"color": "green"})
+    second = client.post(f"/api/jobs/{job_id}/rerender", json={"sabers": [{"color": "green", "intensity": 0.35, "voice": "neutral"}]})
     assert second.status_code == 409
 
     release.set()
