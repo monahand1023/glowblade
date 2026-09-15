@@ -116,10 +116,14 @@ def describe_job(job_dir):
     reasons = []
     if object_ids is not None:
         for obj_id in object_ids:
-            obj_masks_dir = os.path.join(job_dir, "masks", str(obj_id))
+            # int() rather than str(): the ids come straight out of the job's
+            # JSON, and a malformed one ("0 ", "../x") would otherwise build a
+            # path that quietly does not exist and be reported as a missing
+            # mask dir instead of as the bad metadata it is.
+            obj_masks_dir = os.path.join(job_dir, "masks", str(int(obj_id)))
             if not os.path.isdir(obj_masks_dir) or not mask_frame_indices(obj_masks_dir):
                 reasons.append(f"no masks/ for object {obj_id} (tracking was never run, or the job was cleaned)")
-            if not os.path.exists(os.path.join(job_dir, "motion", f"{obj_id}.npz")):
+            if not os.path.exists(os.path.join(job_dir, "motion", f"{int(obj_id)}.npz")):
                 reasons.append(f"no motion/{obj_id}.npz")
     else:
         masks_dir = os.path.join(job_dir, "masks")

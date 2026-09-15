@@ -54,11 +54,13 @@ function clearError() {
 
 function renderRequestBody() {
   return {
-    points,
-    prompt_frame: promptFrame,
-    color: colorSelect.value,
-    intensity: parseFloat(intensityInput.value),
-    voice: voiceSelect.value,
+    sabers: [{
+      points,
+      prompt_frame: promptFrame,
+      color: colorSelect.value,
+      intensity: parseFloat(intensityInput.value),
+      voice: voiceSelect.value,
+    }],
     blade_extend: bladeExtendInput.checked,
   };
 }

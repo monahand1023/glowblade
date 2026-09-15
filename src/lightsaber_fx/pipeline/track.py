@@ -153,10 +153,31 @@ def track_objects(
     """Like `track_object`, but for `len(prompts)` (1-4) objects tracked
     together in one shared SAM2 session -- cheaper than N separate sessions,
     since each frame's image features are encoded once regardless of object
-    count. Every object is prompted at frame 0 (see the multi-saber backend
-    plan's Global Constraints: auto-detect and mid-clip prompting are not
-    supported for multi-object tracking), so propagation runs forward-only,
-    once, covering the whole clip in a single pass.
+    count.
+
+    Each prompt carries its own `prompt_frame` (default 0), so an object
+    found by automatic detection is prompted on the frame it was actually
+    found in -- usually mid-swing, rarely frame 0. Propagation then runs
+    forward from those prompts and then backward, for the same reason
+    `track_object` does both: a prompt in the middle of the clip would
+    otherwise leave every earlier frame unmasked. When every prompt_frame
+    is 0 the reverse pass has only that one frame to do, so the behaviour
+    is unchanged from propagating forward alone.
+
+    Both passes emit the prompt frames themselves, so those masks are
+    written twice. That is a redundant write, not a conflict -- the same
+    logits produce the same mask -- and it keeps the loop free of special
+    cases.
+
+    Known limitation, measured against the pinned SAM2 build: every object
+    has to be prompted on the *same* frame. Conditioning objects on
+    different frames within one shared session breaks SAM2's memory
+    attention -- a BFloat16/Float dtype RuntimeError on CPU, and a hard
+    (uncatchable) Metal assertion on MPS. Nothing here enforces it because
+    nothing upstream can currently produce a mixed set: the web app sends
+    one saber, and automatic detection reports one frame. A multi-slot
+    picker that lets each saber be detected separately would need either
+    one SAM2 session per prompt frame, or a check that rejects the mix.
     """
     def report(pct, message):
         if progress_cb:
@@ -171,7 +192,7 @@ def track_objects(
     for prompt in prompts:
         predictor.add_new_points_or_box(
             state,
-            frame_idx=0,
+            frame_idx=prompt.get("prompt_frame", 0),
             obj_id=prompt["obj_id"],
             points=np.array(prompt["points"], dtype=np.float32),
             labels=np.array(prompt["labels"], dtype=np.int32),
@@ -183,9 +204,10 @@ def track_objects(
 
     written = 0
     total_writes = n_frames * len(prompts)
-    for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
-        for i, obj_id in enumerate(obj_ids):
-            mask = (mask_logits[i] > 0.0).cpu().numpy().squeeze()
-            save_mask(masks_dir_by_obj_id[obj_id], frame_idx, mask)
-            written += 1
-        report(min(written / total_writes * 100, 100.0), f"frame {frame_idx + 1}/{n_frames}")
+    for reverse in (False, True):
+        for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state, reverse=reverse):
+            for i, obj_id in enumerate(obj_ids):
+                mask = (mask_logits[i] > 0.0).cpu().numpy().squeeze()
+                save_mask(masks_dir_by_obj_id[obj_id], frame_idx, mask)
+                written += 1
+            report(min(written / total_writes * 100, 100.0), f"frame {frame_idx + 1}/{n_frames}")

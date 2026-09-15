@@ -514,10 +514,11 @@ def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path)
 
 
 def test_render_glow_multi_with_one_object_matches_render_glow(tmp_path):
-    # The N=1 case must agree with today's render_glow -- not byte-for-byte
-    # (light-wrap's 1/len(prepared) scaling is a no-op at N=1, but summing
-    # order/floating point can still differ trivially), but materially the
-    # same rendered result.
+    # The N=1 case must agree with today's render_glow. Now that light wrap
+    # is per-object (each object wrapping its own blade at full strength)
+    # there is no 1/N scaling left to differ at all, and this measures a max
+    # absolute difference of exactly 0; the small tolerance below stays only
+    # to absorb trivial summing-order/floating-point noise across platforms.
     clip = _build_blade_clip(tmp_path, "equiv", n_frames=4)
     out_single = str(tmp_path / "out_single")
     out_multi = str(tmp_path / "out_multi")
@@ -539,3 +540,72 @@ def test_render_glow_multi_with_one_object_matches_render_glow(tmp_path):
         a = _load_png(out_single, i).astype(np.int16)
         b = _load_png(out_multi, i).astype(np.int16)
         assert np.abs(a - b).max() <= 2  # allow trivial floating-point rounding differences
+
+
+def test_render_glow_multi_light_wrap_uses_each_objects_own_color(tmp_path):
+    # Light wrap spills a blade's color onto the plate around it. Wrapping
+    # the union of every blade shape in every object's color -- which is what
+    # this used to do, at 1/N strength each -- tints every blade's halo with
+    # every other saber's color: a red-vs-blue duel comes out with two
+    # magenta-ish halos. Each object's wrap must use only its own blade.
+    #
+    # Object A is pure blue in BGR, so nothing else in the pipeline can tell
+    # its green channel from its red one: the plate is neutral gray, knoll
+    # darkening is a grayscale multiplier, and the tonemap is the same curve
+    # per channel. Green lifting above red next to A's blade therefore means
+    # exactly one thing -- B's green leaked into A's wrap.
+    clip_a = _build_blade_clip(tmp_path, "wrapA", n_frames=2, blade_x0=10, dx=2, blade_len=30, blade_height=8)
+    clip_b = _build_blade_clip(tmp_path, "wrapB", n_frames=2, blade_x0=150, dx=2, blade_len=30, blade_height=8, width=220)
+
+    output_frames_dir = tmp_path / "glow_frames"
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+
+    render_glow_multi(
+        clip_a["frames_dir"],
+        [
+            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (255, 0, 0), "intensity": 0.4},
+            {"masks_dir": clip_b["masks_dir"], "motion_path": clip_b["motion_path"], "color": (0, 255, 0), "intensity": 0.4},
+        ],
+        clip_a["video_meta_path"], str(output_frames_dir),
+        ignition_ramp_seconds=0,
+        # Above the 0.15 default purely to make the leak unmissable: the bug
+        # scales with wrap strength (it measured G-R of 17 here at 0.8 versus
+        # 4 at the default), so a decisive margin beats a marginal one.
+        light_wrap_strength=0.8,
+    )
+
+    # Just past the tip of A's blade: outside both objects' masks, inside A's
+    # wrap dilation radius (the 12px kernel reaches ~6px past the blade,
+    # which ends at x=39), and ~100px clear of B, whose mask starts at x=150.
+    sample_x, sample_y = 44, 45
+    mask_a = blade.load_mask(clip_a["masks_dir"], 0)
+    mask_b = blade.load_mask(clip_b["masks_dir"], 0)
+    assert not mask_a[sample_y, sample_x], "sample point is inside object A's own mask"
+    assert not mask_b[sample_y, sample_x], "sample point is inside object B's mask"
+
+    img = _load_png(str(output_frames_dir), 0).astype(np.float64)
+    b, g, r = img[sample_y, sample_x]
+
+    # A is lit in its own color here...
+    assert b - g > 30, f"object A's blue wrap is not visible at the sample point (BGR={b},{g},{r})"
+    # ...and B's green has not come along with it. Pre-fix this read ~17.
+    assert abs(g - r) <= 2, f"object B's green leaked into object A's wrap (BGR={b},{g},{r})"
+
+
+def test_render_glow_multi_rejects_an_unsupported_object_count(tmp_path):
+    # Zero objects used to render an untouched plate -- a silently wrong
+    # result rather than an error.
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+
+    clip = _build_blade_clip(tmp_path, "guard", n_frames=1)
+    one = {
+        "masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"],
+        "color": (40, 40, 255), "intensity": 0.35,
+    }
+
+    for objects in ([], [one] * 5):
+        with pytest.raises(ValueError, match="1-4 objects"):
+            render_glow_multi(
+                clip["frames_dir"], objects, clip["video_meta_path"],
+                str(tmp_path / "glow_frames"),
+            )

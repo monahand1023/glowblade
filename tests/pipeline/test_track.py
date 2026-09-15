@@ -249,3 +249,47 @@ def test_track_objects_tracks_two_objects_independently(tmp_path):
     mask_a0 = load_mask(str(masks_dir_a), 0)
     mask_b0 = load_mask(str(masks_dir_b), 0)
     assert not np.any(mask_a0 & mask_b0)
+
+
+@requires_sam2_checkpoint
+def test_track_objects_covers_the_whole_clip_when_prompted_mid_way(tmp_path):
+    # The multi-object path is now the only path the web app uses, so it has
+    # to honour what automatic detection reports: the frame an object was
+    # easiest to find, which is usually mid-swing rather than frame 0.
+    # Prompting at frame 0 regardless silently applies the points to a frame
+    # the object has already left, and propagating forward-only would leave
+    # every frame before the prompt unmasked.
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    n_frames = 5
+    for i in range(n_frames):
+        frame = np.zeros((64, 128, 3), dtype=np.uint8)
+        frame[20:30, 10 + i * 6:20 + i * 6] = (255, 255, 255)   # object A, left side
+        frame[20:30, 90 + i * 6:100 + i * 6] = (255, 255, 255)  # object B, right side
+        cv2.imwrite(str(frames_dir / f"{i:05d}.jpg"), frame)
+
+    masks_dir_a = tmp_path / "masks" / "0"
+    masks_dir_b = tmp_path / "masks" / "1"
+    prompt_frame = 2
+
+    track_objects(
+        str(frames_dir),
+        [
+            {"obj_id": 0, "masks_dir": str(masks_dir_a),
+             "points": [[15 + prompt_frame * 6, 25]], "labels": [1], "prompt_frame": prompt_frame},
+            {"obj_id": 1, "masks_dir": str(masks_dir_b),
+             "points": [[95 + prompt_frame * 6, 25]], "labels": [1], "prompt_frame": prompt_frame},
+        ],
+        checkpoint_path=str(paths.get_checkpoint_path()),
+        config_name="configs/sam2.1/sam2.1_hiera_s.yaml",
+        device="cpu",
+        n_frames=n_frames,
+    )
+
+    for masks_dir in (masks_dir_a, masks_dir_b):
+        assert sorted(os.listdir(masks_dir)) == [f"{i:05d}.npz" for i in range(n_frames)]
+        assert load_mask(str(masks_dir), 0).any(), "no mask before the prompt frame"
+        assert load_mask(str(masks_dir), n_frames - 1).any(), "no mask after the prompt frame"
+
+    # Still two distinct objects, not one mask duplicated across both ids.
+    assert not np.any(load_mask(str(masks_dir_a), 0) & load_mask(str(masks_dir_b), 0))

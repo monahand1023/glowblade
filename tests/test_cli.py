@@ -331,6 +331,41 @@ def test_jobs_command_lists_rerenderable_and_annotates_broken_job(tmp_path, monk
     assert "NOT re-renderable" in result.output
 
 
+def test_jobs_command_shows_the_object_count_for_a_multi_object_job(tmp_path, monkeypatch):
+    # `rerender` can't touch a multi-object job, so a listing that shows it
+    # identically to a single-object one is lying about what it is offering.
+    jobs_dir = tmp_path / "jobs"
+    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake")
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:5, 2:5] = True
+
+    single = jobs_dir / "single1"
+    single.mkdir(parents=True)
+    save_mask(str(single / "masks"), 0, mask)
+    compute_motion(str(single / "masks"), str(single / "motion.npz"))
+    (single / "video_meta.txt").write_text("24.0\n1\n")
+    write_job_meta(str(single), source_video=str(video))
+
+    multi = jobs_dir / "multi2"
+    multi.mkdir(parents=True)
+    for oid in (0, 1):
+        save_mask(str(multi / "masks" / str(oid)), 0, mask)
+        (multi / "motion").mkdir(exist_ok=True)
+        compute_motion(str(multi / "masks" / str(oid)), str(multi / "motion" / f"{oid}.npz"))
+    (multi / "video_meta.txt").write_text("24.0\n1\n")
+    write_job_meta(str(multi), source_video=str(video), object_ids=[0, 1])
+
+    result = CliRunner().invoke(main, ["jobs"])
+
+    assert result.exit_code == 0
+    lines = {line.split()[0]: line for line in result.output.splitlines() if line.strip()}
+    assert "objects=2" in lines["multi2"], lines["multi2"]
+    assert "objects=" not in lines["single1"], lines["single1"]
+
+
 def test_jobs_command_reports_no_jobs_found(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir()

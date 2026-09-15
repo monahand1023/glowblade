@@ -358,6 +358,31 @@ def test_rerender_endpoint_starts_job_and_produces_new_result(client, tiny_video
     assert result_resp.content == b"rerendered bytes"
 
 
+def test_rerender_endpoint_explains_that_a_legacy_job_predates_multi_saber(
+    client, tiny_video_bytes, monkeypatch
+):
+    # A job with no recorded object_ids isn't a saber-count mismatch at all --
+    # it predates multi-saber support (or came from the CLI). Reporting it as
+    # "This job has 1 tracked object(s)" sent the user off to change the saber
+    # count, which can never fix it.
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    monkeypatch.setattr(server_module, "require_rerenderable",
+                         lambda job_dir: type("Info", (), {"object_ids": None})())
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/rerender",
+        json={"sabers": [{"color": "blue", "intensity": 0.35, "voice": "neutral"}]},
+    )
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "no recorded object_ids" in detail
+    assert "Re-upload it through the web app" in detail
+    assert "tracked object(s)" not in detail  # not the count-mismatch message
+
+
 def test_rerender_endpoint_404_for_unknown_job(client):
     resp = client.post("/api/jobs/doesnotexist/rerender", json={"sabers": []})
     assert resp.status_code == 404
@@ -555,11 +580,11 @@ def test_detect_routes_reject_traversal_style_job_ids(client):
         assert resp.status_code == 404, f"{path} accepted a traversal-style id"
 
 
-def test_points_ignores_any_client_supplied_prompt_frame(client, tiny_video_bytes, monkeypatch):
-    # Multi-saber tracking always prompts at frame 0 (see Global Constraints);
-    # a client-supplied prompt_frame in a saber spec is accepted (forward
-    # compatibility) but never reaches run_pipeline_multi, which has no such
-    # parameter.
+def test_points_threads_each_sabers_prompt_frame_through(client, tiny_video_bytes, monkeypatch):
+    # /detect reports the frame an object was easiest to find -- usually
+    # mid-swing, not frame 0 -- and the page sends it back with the points.
+    # Dropping it here silently applies those points to frame 0, against a
+    # frame the object has already left.
     captured = {}
 
     def fake_run_pipeline_multi(*, output_path, progress_cb, **kwargs):
@@ -574,12 +599,29 @@ def test_points_ignores_any_client_supplied_prompt_frame(client, tiny_video_byte
 
     resp = client.post(
         f"/api/jobs/{job_id}/points",
-        json={"sabers": [{"points": [[10, 20, 1]], "prompt_frame": 17}]},
+        json={"sabers": [
+            {"points": [[10, 20, 1]], "prompt_frame": 17},
+            {"points": [[30, 40, 1]]},
+        ]},
     )
     assert resp.status_code == 200
     server_module.manager.wait(timeout=10)
 
-    assert "prompt_frame" not in captured
+    assert captured["sabers"][0]["prompt_frame"] == 17
+    assert captured["sabers"][1]["prompt_frame"] == 0  # defaults when the client omits it
+
+
+def test_points_rejects_a_negative_prompt_frame(client, tiny_video_bytes):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[10, 20, 1]], "prompt_frame": -1}]},
+    )
+
+    assert resp.status_code == 400
+    assert "prompt_frame" in resp.json()["detail"]
 
 
 def test_points_accepts_multiple_sabers_and_starts_a_multi_object_job(client, tiny_video_bytes, monkeypatch):

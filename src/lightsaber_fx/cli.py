@@ -215,8 +215,9 @@ def list_jobs():
                 .strftime("%Y-%m-%d %H:%M:%S")
                 if info.created_at is not None else "unknown"
             )
+            objects_note = f"objects={len(info.object_ids)}  " if info.object_ids is not None else ""
             click.echo(
-                f"{info.job_id}  [re-renderable]  source={info.source_video}  "
+                f"{info.job_id}  [re-renderable]  {objects_note}source={info.source_video}  "
                 f"frames={info.frame_count}  created={created}"
             )
         else:

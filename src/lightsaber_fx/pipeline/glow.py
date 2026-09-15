@@ -633,9 +633,19 @@ def render_glow_multi(
     docstring for how a single object's contribution is computed; this
     function's job is purely to do that once per object per frame, sum the
     results, and run the shared (object-count-agnostic) trail/knoll-darken/
-    light-wrap/tonemap steps exactly once per frame -- the same steps
-    `render_glow` already runs on its own single contribution.
+    tonemap steps exactly once per frame -- the same steps `render_glow`
+    already runs on its own single contribution.
+
+    Light wrap is the one exception: it is computed per object, from that
+    object's own blade shape in that object's own color. Wrapping the
+    union of every blade in every color would tint each blade's halo with
+    every other saber's color -- a red-vs-blue duel would give both blades
+    a magenta-ish halo -- and it is what makes the N=1 case identical to
+    `render_glow` rather than merely close to it.
     """
+    if not 1 <= len(objects) <= 4:
+        raise ValueError("render_glow_multi supports 1-4 objects")
+
     def report(pct, message):
         if progress_cb:
             progress_cb(pct, message)
@@ -716,6 +726,7 @@ def render_glow_multi(
 
         combined_fx = np.zeros((h, w, 3), dtype=np.float32)
         combined_blade_u8 = np.zeros((h, w), dtype=np.uint8)
+        per_object_blade_u8 = []
 
         for obj_state in prepared:
             mask = load_mask_optional(obj_state["masks_dir"], idx)
@@ -737,6 +748,7 @@ def render_glow_multi(
             )
             combined_fx += full_fx
             combined_blade_u8 = np.maximum(combined_blade_u8, blade_u8)
+            per_object_blade_u8.append(blade_u8)
 
         trail = np.maximum(trail * trail_decay, combined_fx)
         darkened_plate, _ = knoll_darken(
@@ -744,10 +756,10 @@ def render_glow_multi(
             dilate_kernel=knoll_dilate_kernel,
         )
         wrap_total = np.zeros((h, w, 3), dtype=np.float32)
-        for obj_state in prepared:
+        for obj_state, blade_u8 in zip(prepared, per_object_blade_u8):
             wrap_total += _light_wrap(
-                combined_blade_u8, obj_state["color_lin"], wrap_dilate_kernel,
-                wrap_blur_sigma, light_wrap_strength / len(prepared),
+                blade_u8, obj_state["color_lin"], wrap_dilate_kernel,
+                wrap_blur_sigma, light_wrap_strength,
             )
         jitter = 1.0 + float(rng.uniform(-flicker_strength, flicker_strength))
         combined = darkened_plate + (trail + wrap_total) * jitter
