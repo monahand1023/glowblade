@@ -15,6 +15,7 @@ dependencies = [
     "uvicorn[standard]",
     "python-multipart",
     "platformdirs",
+    "google-genai",
 ]
 
 [project.optional-dependencies]
