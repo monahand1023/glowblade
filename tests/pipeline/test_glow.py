@@ -231,7 +231,6 @@ def test_blade_extend_lights_beyond_mask_extent(tmp_path):
             clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
             out_dir, clip["motion_path"], ignition_ramp_seconds=0,
             blade_extend=do_extend, tip_extend_frac=tip_extend_frac,
-            ignition_ramp_seconds=0,
         )
 
     img_true = _load_png(out_true, 0)
