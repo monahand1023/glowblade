@@ -298,6 +298,14 @@ def test_rerender_endpoint_rejects_a_saber_count_mismatch(client, tiny_video_byt
     )
     server_module.manager.wait(timeout=2)
 
+    # This job only has one tracked object -- posting 2 sabers to /rerender
+    # must trip the object_ids-count-mismatch check itself, not the
+    # pre-existing rerenderability guard (require_rerenderable is stubbed
+    # out here so it can't coincidentally 400 for the wrong reason, same
+    # pattern as test_rerender_endpoint_accepts_multiple_sabers above).
+    monkeypatch.setattr(server_module, "require_rerenderable",
+                         lambda job_dir: type("Info", (), {"object_ids": [0]})())
+
     resp = client.post(
         f"/api/jobs/{job_id}/rerender",
         json={"sabers": [
@@ -307,6 +315,7 @@ def test_rerender_endpoint_rejects_a_saber_count_mismatch(client, tiny_video_byt
     )
 
     assert resp.status_code == 400
+    assert "tracked object" in resp.json()["detail"]
 
 
 def test_rerender_endpoint_starts_job_and_produces_new_result(client, tiny_video_bytes, monkeypatch):
