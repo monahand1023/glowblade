@@ -460,9 +460,8 @@ def test_ignition_ramp_shortens_the_blade_at_the_start_of_the_clip(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path):
-    # Two synthetic objects, each with its own color, rendering together.
-    # This test verifies that render_glow_multi successfully composites
-    # multiple objects into a single output with valid pixels.
+    # Two synthetic objects, far apart, moving independently, each its own
+    # color -- the core claim of multi-saber rendering.
     clip_a = _build_blade_clip(tmp_path, "objA", n_frames=5, blade_x0=10, dx=2, blade_len=30, blade_height=8)
     clip_b = _build_blade_clip(tmp_path, "objB", n_frames=5, blade_x0=150, dx=2, blade_len=30, blade_height=8, width=220)
 
@@ -472,21 +471,46 @@ def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path)
     render_glow_multi(
         clip_a["frames_dir"],
         [
-            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (0, 0, 255), "intensity": 0.4},
+            {"masks_dir": clip_a["masks_dir"], "motion_path": clip_a["motion_path"], "color": (255, 0, 0), "intensity": 0.4},
             {"masks_dir": clip_b["masks_dir"], "motion_path": clip_b["motion_path"], "color": (0, 255, 0), "intensity": 0.4},
         ],
         clip_a["video_meta_path"], str(output_frames_dir),
         ignition_ramp_seconds=0,
     )
 
-    # Verify output is generated with valid pixels (finite, in range, correct shape/dtype)
-    for i in range(clip_a["n_frames"]):
-        img = _load_png(str(output_frames_dir), i)
-        assert img.dtype == np.uint8
-        assert img.shape == (clip_a["height"], clip_a["width"], 3)
-        arr = img.astype(np.float64)
-        assert np.isfinite(arr).all()
-        assert (arr >= 0).all() and (arr <= 255).all()
+    img = _load_png(str(output_frames_dir), 0).astype(np.float64)
+    baseline = float(clip_a["plate_value"])
+    signal = img - baseline  # (h, w, 3), BGR order
+
+    mask_a = blade.load_mask(clip_a["masks_dir"], 0)
+    geo_a = blade.fit_blade(mask_a)
+    mask_b = blade.load_mask(clip_b["masks_dir"], 0)
+    geo_b = blade.fit_blade(mask_b)
+
+    # The exact centroid pixel saturates to solid white for either color
+    # alike (core brightness clips there), so this searches a window
+    # around each object's own centroid for the point of clearest
+    # separation between its own color channel and the other object's,
+    # instead of assuming one exact unsaturated offset.
+    def best_own_color_pixel(cx, cy, own_channel, other_channel, radius=25):
+        y0, y1 = max(0, cy - radius), min(img.shape[0], cy + radius + 1)
+        x0, x1 = max(0, cx - radius), min(img.shape[1], cx + radius + 1)
+        region = signal[y0:y1, x0:x1]
+        separation = region[..., own_channel] - region[..., other_channel]
+        iy, ix = np.unravel_index(np.argmax(separation), separation.shape)
+        return region[iy, ix]
+
+    px_a, py_a = round(geo_a.centroid[0]), round(geo_a.centroid[1])
+    px_b, py_b = round(geo_b.centroid[0]), round(geo_b.centroid[1])
+
+    # BGR order: object A is pure blue (channel 0), object B is pure green (channel 1).
+    best_a = best_own_color_pixel(px_a, py_a, own_channel=0, other_channel=1)
+    best_b = best_own_color_pixel(px_b, py_b, own_channel=1, other_channel=0)
+
+    assert best_a[0] > 15  # object A's own blue channel is clearly lit somewhere near its blade
+    assert best_a[0] > best_a[1] + 10  # ...and clearly separated from B's color there
+    assert best_b[1] > 15  # object B's own green channel is clearly lit somewhere near its blade
+    assert best_b[1] > best_b[0] + 10  # ...and clearly separated from A's color there
 
 
 def test_render_glow_multi_with_one_object_matches_render_glow(tmp_path):
