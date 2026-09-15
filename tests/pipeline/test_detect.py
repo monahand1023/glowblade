@@ -12,58 +12,20 @@ from lightsaber_fx.pipeline.detect import (
     propose_motion_seeds,
 )
 
-WIDTH, HEIGHT = 320, 240
-FPS = 30.0
-PIVOT = (160, 140)
-BAR_LENGTH = 70
-
-
-def _write_video(path, draw_frame, n_frames=40):
-    writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, (WIDTH, HEIGHT)
-    )
-    for i in range(n_frames):
-        frame = np.full((HEIGHT, WIDTH, 3), 60, dtype=np.uint8)
-        draw_frame(frame, i)
-        writer.write(frame)
-    writer.release()
-
-
-def _static_distractors(frame, shift=0):
-    """The things a shape-only search gets wrong: long, straight,
-    high-contrast and perfectly still. A fence rail and a horizon are far
-    more elongated than any bat, so a detector scoring on shape alone picks
-    one of them. Scoring on motion is what makes them score zero."""
-    cv2.line(frame, (-shift, 60), (WIDTH - shift, 60), (200, 200, 200), 3)
-    cv2.line(frame, (-shift, 200), (WIDTH - shift, 190), (180, 180, 180), 4)
-    cv2.line(frame, (30 - shift, 0), (30 - shift, HEIGHT), (170, 170, 170), 3)
-
-
-def _rotating_bar(frame, i, n_frames=40):
-    """An elongated object pivoting about one end -- rotation only, no
-    travel. This is the case that broke the first version of the detector:
-    optical-flow magnitude scales with radius, so only the bar's tip lights
-    up, and the resulting flow blob has an elongation around 2. Any shape
-    gate applied to the *flow* region rejects it."""
-    angle = -np.pi / 2 + (i / n_frames) * np.pi
-    tip = (
-        int(PIVOT[0] + BAR_LENGTH * np.cos(angle)),
-        int(PIVOT[1] + BAR_LENGTH * np.sin(angle)),
-    )
-    cv2.line(frame, PIVOT, tip, (240, 240, 240), 7)
-    return tip
+from .conftest import (
+    BAR_LENGTH,
+    HEIGHT,
+    PIVOT,
+    WIDTH,
+    _rotating_bar,
+    _static_distractors,
+    _write_video,
+)
 
 
 def _on_the_bar(x, y, slack=18):
     """Is (x, y) within the disc the bar sweeps?"""
     return np.hypot(x - PIVOT[0], y - PIVOT[1]) <= BAR_LENGTH + slack
-
-
-@pytest.fixture
-def rotating_bar_video(tmp_path):
-    path = tmp_path / "swing.mp4"
-    _write_video(path, lambda frame, i: (_static_distractors(frame), _rotating_bar(frame, i)))
-    return path
 
 
 # --------------------------------------------------------------------------
