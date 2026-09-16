@@ -17,14 +17,29 @@ only loosely against the one real clip this was diagnosed on -- tune as
 more real footage is tested against this.
 """
 
+import os
+
+import cv2
 import numpy as np
 
 from .blade import fit_blade, load_mask, load_mask_optional, save_mask
-from .vision_detect import _mask_iou
+from .detect import MAX_MASK_AREA_FRAC, _build_image_predictor, _points_on_axis
+from .vision_detect import (
+    DETECTION_PROMPT,
+    DETECTION_SCHEMA,
+    GEMINI_MODEL,
+    GEMINI_TIMEOUT_MS,
+    _mask_iou,
+    _parse_gemini_response,
+    _validate_box_mask,
+)
 
 MERGE_IOU_THRESHOLD = 0.8
 MERGE_SUSTAIN_FRAMES = 15
 REFERENCE_LOOKBACK_FRAMES = 90
+REACQUIRE_SEARCH_STEP_FRAMES = 10
+REACQUIRE_SEARCH_CAP_FRAMES = 150
+REACQUIRE_MAX_OVERLAP_IOU = 0.1
 
 
 def detect_merge(masks_dir_a, masks_dir_b, frame_indices,
@@ -139,3 +154,106 @@ def patch_masks(lost_masks_dir, fresh_masks_dir, frozen_frame_idx, merge_start_f
         save_mask(lost_masks_dir, idx, frozen_mask)
     for idx in range(reacquire_frame, n_frames):
         save_mask(lost_masks_dir, idx, load_mask(fresh_masks_dir, idx))
+
+
+def _frame_path(frames_dir, frame_idx):
+    return os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
+
+
+def _detections_at_frame(frame, predictor, client, max_mask_area):
+    """Every Gemini-proposed box at this frame that passes the same
+    shape/size validation `detect_blades_vlm` uses, as a list of
+    `{"centroid": (x, y), "points": [[x, y], ...], "mask": <bool array>}`.
+    """
+    from google.genai import types
+
+    height, width = frame.shape[:2]
+    ok, encoded = cv2.imencode(".jpg", frame)
+    if not ok:
+        return []
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[
+            types.Part.from_bytes(data=encoded.tobytes(), mime_type="image/jpeg"),
+            DETECTION_PROMPT,
+        ],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_json_schema=DETECTION_SCHEMA,
+            http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+        ),
+    )
+    boxes = _parse_gemini_response(response.text, width, height)
+    if not boxes:
+        return []
+
+    predictor.set_image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    detections = []
+    for box in boxes:
+        masks, _scores, _logits = predictor.predict(
+            box=np.array(box, dtype=np.float32), multimask_output=False,
+        )
+        mask = np.asarray(masks)[0].astype(bool)
+        result = _validate_box_mask(mask, max_mask_area)
+        if result is None:
+            continue
+        _elongation, geometry = result
+        detections.append({
+            "centroid": geometry.centroid,
+            "points": _points_on_axis(mask),
+            "mask": mask,
+        })
+    return detections
+
+
+def _two_separate_detections(detections, max_overlap_iou=REACQUIRE_MAX_OVERLAP_IOU):
+    """The 2 detections if exactly 2 passed validation and their masks
+    don't overlap past `max_overlap_iou`, else None. More or fewer than 2
+    validated detections is treated as "not a clean re-acquisition frame
+    yet" -- matches this project's existing decline-rather-than-guess-
+    wrong philosophy (see `detect.py`'s elongation gate, `server.py`'s
+    VLM-then-motion fallback)."""
+    if len(detections) != 2:
+        return None
+    if _mask_iou(detections[0]["mask"], detections[1]["mask"]) > max_overlap_iou:
+        return None
+    return detections
+
+
+def reacquire_pair(
+    frames_dir, search_start_frame, checkpoint_path, config_name, device,
+    client=None, search_step=REACQUIRE_SEARCH_STEP_FRAMES, search_cap=REACQUIRE_SEARCH_CAP_FRAMES,
+):
+    """Walk forward from `search_start_frame` in `search_step`
+    increments, asking Gemini to find blade-like boxes at each frame
+    checked. Returns `(reacquire_frame, [det_0, det_1])` at the first
+    frame with exactly 2 validated, mutually non-overlapping detections,
+    or `None` if the search window (`search_cap` frames from
+    `search_start_frame`, or the end of the clip, whichever comes first)
+    is exhausted without finding one. Each detection is
+    `{"centroid": (x, y), "points": [[x, y], ...]}`.
+
+    `client` is injectable (a `genai.Client`, or a test double) so tests
+    never make a real network call -- same pattern as
+    `vision_detect.detect_blades_vlm`.
+    """
+    if client is None:
+        from google import genai
+        client = genai.Client()
+
+    predictor = _build_image_predictor(checkpoint_path, config_name, device)
+
+    frame_idx = search_start_frame
+    while frame_idx < search_start_frame + search_cap:
+        frame = cv2.imread(_frame_path(frames_dir, frame_idx))
+        if frame is None:
+            return None  # ran past the end of the clip
+        height, width = frame.shape[:2]
+        detections = _detections_at_frame(frame, predictor, client, MAX_MASK_AREA_FRAC * width * height)
+        separated = _two_separate_detections(detections)
+        if separated is not None:
+            return frame_idx, [
+                {"centroid": d["centroid"], "points": d["points"]} for d in separated
+            ]
+        frame_idx += search_step
+    return None

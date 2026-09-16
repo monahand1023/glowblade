@@ -210,3 +210,158 @@ def test_patch_masks_handles_a_zero_length_gap(tmp_path):
         assert np.array_equal(load_mask(str(lost), i), _mask_at(20))
     for i in range(3, 5):
         assert np.array_equal(load_mask(str(lost), i), _mask_at(80))
+
+
+import json
+
+import cv2
+
+from lightsaber_fx.pipeline.reacquire import reacquire_pair
+
+FRAME_W, FRAME_H = 1280, 720
+
+
+class _FakeGenaiResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeGenaiClient:
+    """`text_for_call(n)` returns the response text for the n-th call
+    (0-indexed), so a test can simulate different frames returning
+    different detections as reacquire_pair walks forward."""
+
+    def __init__(self, text_for_call):
+        self.text_for_call = text_for_call
+        self.calls = 0
+        self.models = self
+
+    def generate_content(self, **kwargs):
+        text = self.text_for_call(self.calls)
+        self.calls += 1
+        return _FakeGenaiResponse(text)
+
+
+class _FakePredictor:
+    def __init__(self, mask_for_box):
+        self.mask_for_box = mask_for_box
+
+    def set_image(self, image):
+        pass
+
+    def predict(self, box, multimask_output=False):
+        mask = self.mask_for_box(box)
+        return np.asarray([mask]), np.ones(1), None
+
+
+def _write_frame(path, value=100):
+    frame = np.full((FRAME_H, FRAME_W, 3), value, dtype=np.uint8)
+    cv2.imwrite(str(path), frame)
+
+
+def _line_mask_at(box, width=6):
+    x0, y0, x1, y1 = (int(round(v)) for v in box)
+    mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    cv2.line(mask, (x0, y0), (x1, y1), 1, width)
+    return mask.astype(bool)
+
+
+def _no_boxes_response():
+    return json.dumps({"objects": []})
+
+
+def _two_separated_boxes_response():
+    # Two thin horizontal boxes, one on the left third of the frame, one
+    # on the right third -- far enough apart their line masks won't overlap.
+    return json.dumps({"objects": [
+        {"box_2d": [340, 50, 360, 300], "label": "blade"},
+        {"box_2d": [340, 700, 360, 950], "label": "blade"},
+    ]})
+
+
+def _two_overlapping_boxes_response():
+    return json.dumps({"objects": [
+        {"box_2d": [340, 50, 360, 300], "label": "blade"},
+        {"box_2d": [340, 60, 360, 310], "label": "blade"},  # nearly identical -> overlapping masks
+    ]})
+
+
+def test_reacquire_pair_finds_two_separated_detections_on_the_first_checked_frame(tmp_path, monkeypatch):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    _write_frame(frames_dir / "00050.jpg")
+
+    client = _FakeGenaiClient(lambda call: _two_separated_boxes_response())
+    predictor = _FakePredictor(_line_mask_at)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+
+    result = reacquire_pair(
+        str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+        client=client,
+    )
+
+    assert result is not None
+    reacquire_frame, detections = result
+    assert reacquire_frame == 50
+    assert len(detections) == 2
+    centroids_x = sorted(d["centroid"][0] for d in detections)
+    assert centroids_x[0] < FRAME_W / 2 < centroids_x[1]  # one left-ish, one right-ish
+
+
+def test_reacquire_pair_keeps_searching_past_frames_that_are_not_yet_separated(tmp_path, monkeypatch):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for idx in (50, 60, 70):
+        _write_frame(frames_dir / f"{idx:05d}.jpg")
+
+    # Frame 50 (1st check): nothing found. Frame 60 (2nd check): two boxes,
+    # but still overlapping. Frame 70 (3rd check): finally separated.
+    responses = [_no_boxes_response(), _two_overlapping_boxes_response(), _two_separated_boxes_response()]
+    client = _FakeGenaiClient(lambda call: responses[call])
+    predictor = _FakePredictor(_line_mask_at)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+
+    result = reacquire_pair(
+        str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+        client=client, search_step=10,
+    )
+
+    assert result is not None
+    reacquire_frame, _detections = result
+    assert reacquire_frame == 70
+
+
+def test_reacquire_pair_returns_none_when_the_search_window_is_exhausted(tmp_path, monkeypatch):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for idx in (50, 60, 70):
+        _write_frame(frames_dir / f"{idx:05d}.jpg")
+
+    client = _FakeGenaiClient(lambda call: _no_boxes_response())
+    predictor = _FakePredictor(_line_mask_at)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+
+    result = reacquire_pair(
+        str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+        client=client, search_step=10, search_cap=30,
+    )
+
+    assert result is None
+
+
+def test_reacquire_pair_returns_none_when_it_runs_past_the_end_of_the_clip(tmp_path, monkeypatch):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    _write_frame(frames_dir / "00050.jpg")
+    # No frame 60 written -- the clip ends before the search budget does.
+
+    client = _FakeGenaiClient(lambda call: _no_boxes_response())
+    predictor = _FakePredictor(_line_mask_at)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+
+    result = reacquire_pair(
+        str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+        client=client, search_step=10, search_cap=150,
+    )
+
+    assert result is None
