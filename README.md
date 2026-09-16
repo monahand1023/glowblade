@@ -138,6 +138,35 @@ The honest summary: the effect is good on anything that is genuinely one
 straight object, automatic detection handles four of the five, and it declines
 rather than guessing wrong on the hard one.
 
+### Multiple objects
+
+If a `GEMINI_API_KEY` is set, detection can find and track up to four objects
+at once, each with its own colour, intensity and voice. Once found, each
+object is tracked independently by the same SAM2 tracker described above, so
+everything in "Pick a clip that will work well" applies per object.
+
+Two things worth knowing, both confirmed by actually testing on real footage
+rather than assumed:
+
+- **Busy, heavily-occluded multi-person scenes can make the tracker drift
+  onto the wrong nearby object mid-clip.** On a chaotic four-person sword
+  fight, detection correctly found both blades, but by partway through the
+  clip the tracker on one had drifted off the sword entirely and the other
+  had jumped onto a third person's weapon. The same points fed through the
+  single-object pipeline on a cleaner two-person fencing clip tracked
+  perfectly for the full clip with no drift — so this is a scene-difficulty
+  problem (similar objects crossing and occluding each other), not a defect
+  in multi-object detection or tracking itself. Prefer clips with clearer
+  separation between people for multi-object renders, same as the
+  single-object contrast/size guidance above.
+- **The two detection paths don't have equal coverage.** On a fencing clip,
+  Gemini found both blades instantly; the local motion-only fallback (no API
+  key) found nothing at all on the same clip — a fast rapier thrust
+  apparently doesn't produce the motion signature the fallback's heuristic
+  looks for. Tracking quality is identical either way once a starting point
+  exists (verified by feeding the same points through both paths); it's
+  *finding* that starting point where the two differ.
+
 ### Your first render: the browser app
 
 ```bash
