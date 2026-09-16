@@ -151,12 +151,17 @@ def patch_masks(lost_masks_dir, fresh_masks_dir, frozen_frame_idx, merge_start_f
       output of a fresh `track_object` run), frame-index-aligned.
 
     Frames before `merge_start_frame` are untouched.
+
+    All-or-nothing: every fresh mask is loaded (and would raise on a
+    missing one) before any file in `lost_masks_dir` is written, so a
+    gap in `fresh_masks_dir` never leaves `lost_masks_dir` half-patched.
     """
     frozen_mask = load_mask(lost_masks_dir, frozen_frame_idx)
+    fresh_masks = [load_mask(fresh_masks_dir, idx) for idx in range(reacquire_frame, n_frames)]
     for idx in range(merge_start_frame, reacquire_frame):
         save_mask(lost_masks_dir, idx, frozen_mask)
-    for idx in range(reacquire_frame, n_frames):
-        save_mask(lost_masks_dir, idx, load_mask(fresh_masks_dir, idx))
+    for idx, mask in zip(range(reacquire_frame, n_frames), fresh_masks, strict=True):
+        save_mask(lost_masks_dir, idx, mask)
 
 
 def _frame_path(frames_dir, frame_idx):
@@ -215,7 +220,18 @@ def _two_separate_detections(detections, max_overlap_iou=REACQUIRE_MAX_OVERLAP_I
     validated detections is treated as "not a clean re-acquisition frame
     yet" -- matches this project's existing decline-rather-than-guess-
     wrong philosophy (see `detect.py`'s elongation gate, `server.py`'s
-    VLM-then-motion fallback)."""
+    VLM-then-motion fallback).
+
+    Deliberate, recorded narrowing from the design doc's "returns >=2
+    boxes" wording: this requires *exactly* 2, not >=2 with a
+    disambiguation step. On a clip where Gemini's own duplicate-box
+    behavior (see `vision_detect._dedupe_by_mask_iou`'s docstring) or a
+    genuinely busier scene produces a 3rd validated detection at every
+    checked frame within the search window, recovery will never fire --
+    a silent no-op, not a crash, consistent with this module's fallback
+    philosophy, but a real limitation on multi-person footage worth
+    knowing about rather than discovering.
+    """
     if len(detections) != 2:
         return None
     if _mask_iou(detections[0]["mask"], detections[1]["mask"]) > max_overlap_iou:
@@ -269,12 +285,24 @@ def reconcile_pair(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_pa
     recovery failed at any step -- in the `False` case, both objects'
     masks are left completely untouched.
 
-    Never raises: any failure in the Gemini/SAM2-dependent steps
-    (`reacquire_pair`, the fresh `track_object` call) is caught and
-    treated the same as "recovery failed," matching this project's
-    existing decline-rather-than-guess-wrong fallback philosophy (see
-    `server.py`'s `_detect_proposals`).
+    Never raises, structurally: the entire body runs inside one outer
+    try/except, so this contract holds even for a failure this function
+    doesn't specifically anticipate (not just the two Gemini/SAM2-
+    dependent steps it already reasons about individually below).
     """
+    try:
+        return _reconcile_pair_impl(
+            frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_path, config_name, device, client,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "cross-object identity recovery failed unexpectedly, leaving today's tracking as-is",
+            exc_info=True,
+        )
+        return False
+
+
+def _reconcile_pair_impl(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_path, config_name, device, client):
     frame_indices = mask_frame_indices(masks_dir_0)
 
     merge_start = detect_merge(masks_dir_0, masks_dir_1, frame_indices)
@@ -302,9 +330,30 @@ def reconcile_pair(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_pa
         return False
     reacquire_frame, detections = result
 
+    # Confirm the two ORIGINAL (uncorrected) tracks are still merged at
+    # reacquire_frame before touching anything. If they've already
+    # separated on their own by then, this was a brief bind that the
+    # tracker resolved correctly (routine sword contact, not the
+    # permanent identity swap this module exists to fix) -- "fixing" it
+    # would overwrite a track that was never actually broken. Declining
+    # here also means a real merge later in the clip, if there is one,
+    # isn't masked by a reconciliation attempt already spent on a false
+    # positive.
+    original_mask_0 = load_mask_optional(masks_dir_0, reacquire_frame)
+    original_mask_1 = load_mask_optional(masks_dir_1, reacquire_frame)
+    if original_mask_0 is None or original_mask_1 is None:
+        return False
+    if _mask_iou(original_mask_0, original_mask_1) < MERGE_IOU_THRESHOLD:
+        return False
+
     det_for_0, det_for_1 = match_detections_to_objects(detections, geo_0.centroid, geo_1.centroid)
 
-    merged_geo = fit_blade(load_mask(masks_dir_0, merge_start))
+    # Sampled at reacquire_frame (the same instant as the detections),
+    # not merge_start -- up to REACQUIRE_SEARCH_CAP_FRAMES apart, during
+    # which the surviving blade can move. Comparing same-instant makes
+    # the kept object's distance ~0 and the lost object's distance at
+    # least the inter-blade separation, unambiguous by construction.
+    merged_geo = fit_blade(original_mask_0)
     if merged_geo is None:
         return False
     dist_0 = _centroid_dist(det_for_0["centroid"], merged_geo.centroid)

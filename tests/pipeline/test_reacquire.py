@@ -492,3 +492,98 @@ def test_reconcile_pair_returns_false_instead_of_raising_when_reacquisition_erro
     )
 
     assert patched is False
+
+
+def test_reconcile_pair_declines_when_the_original_tracks_have_already_separated(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    # Frames 0-19: separate. Frames 20-34: a brief bind (15 frames, meets
+    # the sustain threshold) that resolves on its own -- by frame 35 the
+    # ORIGINAL tracker has already separated the two objects again. This
+    # is a normal, correctly-tracked sword bind, not a permanent merge.
+    for i in range(20):
+        save_mask(str(masks_0), i, _mask_at(20))
+        save_mask(str(masks_1), i, _mask_at(80))
+    for i in range(20, 35):
+        save_mask(str(masks_0), i, _mask_at(80))
+        save_mask(str(masks_1), i, _mask_at(80))
+    for i in range(35, 50):
+        save_mask(str(masks_0), i, _mask_at(20))
+        save_mask(str(masks_1), i, _mask_at(80))
+
+    def fake_reacquire_pair(frames_dir, search_start_frame, checkpoint_path, config_name, device,
+                             client=None, **kwargs):
+        # Re-acquisition finds the two objects cleanly separated well
+        # after the bind already resolved on its own.
+        return 40, [
+            {"centroid": (20.0, 45.0), "points": [[20, 40], [20, 45], [20, 50]]},
+            {"centroid": (80.0, 45.0), "points": [[80, 40], [80, 45], [80, 50]]},
+        ]
+
+    called = []
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.reacquire.track_object",
+        lambda *a, **k: called.append(True),
+    )
+
+    patched = reconcile_pair(
+        "unused-frames-dir", str(masks_0), str(masks_1), n_frames=50,
+        checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched is False
+    assert called == []  # never re-tracked -- declined before it got that far
+    for i in range(50):
+        expected_0 = _mask_at(20) if i < 20 or i >= 35 else _mask_at(80)
+        assert np.array_equal(load_mask(str(masks_0), i), expected_0)
+        assert np.array_equal(load_mask(str(masks_1), i), _mask_at(80))
+
+
+def test_reconcile_pair_detects_and_patches_the_lost_object_when_it_is_object_1(tmp_path, monkeypatch):
+    # Mirror of test_reconcile_pair_detects_and_patches_the_lost_object,
+    # with object 1 collapsing onto object 0's stable target instead --
+    # exercises the `dist_0 <= dist_1` branch (object 1 identified as
+    # lost), never covered by the original test.
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    for i in range(20):
+        save_mask(str(masks_0), i, _mask_at(80))
+        save_mask(str(masks_1), i, _mask_at(20))
+    for i in range(20, 50):
+        save_mask(str(masks_0), i, _mask_at(80))
+        save_mask(str(masks_1), i, _mask_at(80))
+
+    def fake_reacquire_pair(frames_dir, search_start_frame, checkpoint_path, config_name, device,
+                             client=None, **kwargs):
+        assert search_start_frame == 20
+        return 40, [
+            {"centroid": (20.0, 45.0), "points": [[20, 40], [20, 45], [20, 50]]},
+            {"centroid": (80.0, 45.0), "points": [[80, 40], [80, 45], [80, 50]]},
+        ]
+
+    def fake_track_object(frames_dir, out_masks_dir, points, labels, checkpoint_path, config_name, device,
+                           n_frames, prompt_frame=0, progress_cb=None):
+        for i in range(prompt_frame, n_frames):
+            save_mask(out_masks_dir, i, _mask_at(25))
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object)
+
+    patched = reconcile_pair(
+        "unused-frames-dir", str(masks_0), str(masks_1), n_frames=50,
+        checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched is True
+    # Object 0 (kept) is untouched throughout.
+    for i in range(50):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(80))
+    # Object 1: original track for 0-19, frozen at its reference position
+    # (x=20) for [20, 40), freshly re-tracked (x=25) for [40, 50).
+    for i in range(20):
+        assert np.array_equal(load_mask(str(masks_1), i), _mask_at(20))
+    for i in range(20, 40):
+        assert np.array_equal(load_mask(str(masks_1), i), _mask_at(20))
+    for i in range(40, 50):
+        assert np.array_equal(load_mask(str(masks_1), i), _mask_at(25))
