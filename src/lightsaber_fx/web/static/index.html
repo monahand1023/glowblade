@@ -18,12 +18,12 @@
     </ol>
 
     <div id="dropzone">
-      <span id="dropzone-label">Drag and drop a video here, or click to choose a file</span>
+      <span id="dropzone-label">Drag and drop a video here, or click to choose a file</span><span id="dropzone-dots" class="busy-dots" hidden><span></span><span></span><span></span></span>
     </div>
     <input type="file" id="file-input" accept="video/mp4" hidden>
 
     <div id="picker-section" hidden>
-      <p id="picker-hint">Click the object to track. Shift-click to exclude a spot (e.g. a hand).</p>
+      <p id="picker-hint">Click the object to track. Shift-click to exclude a spot (e.g. a hand).</p><span id="picker-hint-dots" class="busy-dots" hidden><span></span><span></span><span></span></span>
       <canvas id="picker-canvas"></canvas>
     </div>
 

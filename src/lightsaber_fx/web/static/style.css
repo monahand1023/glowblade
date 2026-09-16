@@ -147,6 +147,58 @@ h1 {
 }
 
 /* ------------------------------------------------------------------ */
+/* Busy indicator -- reused wherever we're waiting on a blocking call   */
+/* (upload, AI detection, preview) with no incremental progress to      */
+/* report, so a pulse is the honest signal instead of a fake percentage.*/
+/* ------------------------------------------------------------------ */
+
+.busy-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+/* [hidden] and .busy-dots both have one-class specificity, so without this
+   the later `display` here would otherwise win over the UA [hidden] rule
+   and the dots would stay visible. */
+.busy-dots[hidden] {
+  display: none;
+}
+
+.busy-dots span {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.8);
+  opacity: 0.3;
+  animation: busy-dot-pulse 1.1s ease-in-out infinite;
+}
+
+.busy-dots span:nth-child(2) { animation-delay: 0.15s; }
+.busy-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+/* picker-hint-dots sits after the <p>, next to the inline-block canvas --
+   without its own block+center layout it lines up beside the canvas
+   instead of forming its own row underneath the hint text. */
+#picker-hint-dots {
+  display: flex;
+  justify-content: center;
+  margin: 0.5rem 0 0;
+}
+
+#picker-hint-dots[hidden] {
+  display: none;
+}
+
+@keyframes busy-dot-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.2); }
+}
+
+/* ------------------------------------------------------------------ */
 /* Picker                                                               */
 /* ------------------------------------------------------------------ */
 

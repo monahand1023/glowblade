@@ -1,4 +1,6 @@
 const dropzone = document.getElementById("dropzone");
+const dropzoneLabel = document.getElementById("dropzone-label");
+const dropzoneDots = document.getElementById("dropzone-dots");
 const fileInput = document.getElementById("file-input");
 const pickerSection = document.getElementById("picker-section");
 const canvas = document.getElementById("picker-canvas");
@@ -20,6 +22,7 @@ const resultPlayer = document.getElementById("result-player");
 const downloadLink = document.getElementById("download-link");
 const errorMessage = document.getElementById("error-message");
 const pickerHint = document.getElementById("picker-hint");
+const pickerHintDots = document.getElementById("picker-hint-dots");
 const stepItems = document.querySelectorAll("#steps li");
 
 const STEP_ORDER = ["upload", "confirm", "render", "result"];
@@ -51,6 +54,7 @@ const MANUAL_HINT =
   "Click the object to track. Shift-click to exclude a spot (e.g. a hand).";
 const PREVIEW_READY_HINT =
   "Highlighted area is what will be tracked -- looks right? " + MANUAL_HINT;
+const DROPZONE_IDLE_LABEL = dropzoneLabel.textContent;
 
 // A "saber slot": one tracked object's points plus its own color/intensity/
 // voice, matching the backend's per-saber styling (1-4 objects tracked
@@ -129,9 +133,13 @@ function renderRequestBody() {
 
 async function uploadFile(file) {
   clearError();
+  dropzoneLabel.textContent = "Uploading video...";
+  dropzoneDots.hidden = false;
   const formData = new FormData();
   formData.append("file", file);
   const resp = await fetch("/api/upload", { method: "POST", body: formData });
+  dropzoneLabel.textContent = DROPZONE_IDLE_LABEL;
+  dropzoneDots.hidden = true;
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
     showError(body.detail || "Upload failed");
@@ -208,19 +216,22 @@ function loadImage(url) {
 // behaviour they had before this existed.
 async function detect() {
   const startedFor = jobId;
-  pickerHint.textContent = "Looking for the swung object...";
+  pickerHint.textContent = "Asking AI to find the swung object...";
+  pickerHintDots.hidden = false;
   let data;
   try {
     const resp = await fetch(`/api/jobs/${jobId}/detect`, { method: "POST" });
     if (!resp.ok) throw new Error("detect failed");
     data = await resp.json();
   } catch {
+    pickerHintDots.hidden = true;
     pickerHint.textContent = MANUAL_HINT;
     return;
   }
   // The user may have dropped another file while this was running.
   if (startedFor !== jobId) return;
   if (!data.found) {
+    pickerHintDots.hidden = true;
     pickerHint.textContent = `Couldn't find it automatically. ${MANUAL_HINT}`;
     return;
   }
@@ -241,6 +252,7 @@ async function detect() {
   syncControlsToActiveSaber();
   renderSaberSlots();
 
+  pickerHintDots.hidden = true;
   if (data.source === "vlm") {
     pickerHint.textContent = data.proposals.length > 1
       ? `Found ${data.proposals.length} objects via AI. Render them, or click any object yourself to override.`
@@ -341,6 +353,7 @@ function setActiveSaber(i) {
   if (sabers[i].points.some(([, , label]) => label === 1)) {
     updateSelectionPreview();
   } else if (!sabers[i].detectedMask) {
+    pickerHintDots.hidden = true;
     pickerHint.textContent = MANUAL_HINT;
   }
 }
@@ -375,12 +388,14 @@ async function updateSelectionPreview() {
   const startedFor = jobId;
   const generation = ++previewGeneration;
   const points = sabers[activeSaberIndex].points;
+  pickerHintDots.hidden = true;
   if (!points.some(([, , label]) => label === 1)) {
     selectionPreview = null;
     redrawPoints();
     return;
   }
   pickerHint.textContent = "Previewing selection...";
+  pickerHintDots.hidden = false;
   let data;
   try {
     const resp = await fetch(`/api/jobs/${jobId}/preview_mask`, {
@@ -391,7 +406,10 @@ async function updateSelectionPreview() {
     if (!resp.ok) throw new Error("preview failed");
     data = await resp.json();
   } catch {
-    if (startedFor === jobId && generation === previewGeneration) pickerHint.textContent = MANUAL_HINT;
+    if (startedFor === jobId && generation === previewGeneration) {
+      pickerHintDots.hidden = true;
+      pickerHint.textContent = MANUAL_HINT;
+    }
     return;
   }
   if (startedFor !== jobId || generation !== previewGeneration) return;
@@ -399,6 +417,7 @@ async function updateSelectionPreview() {
   if (startedFor !== jobId || generation !== previewGeneration) return;
   selectionPreview = image;
   redrawPoints();
+  pickerHintDots.hidden = true;
   pickerHint.textContent = image ? PREVIEW_READY_HINT : MANUAL_HINT;
 }
 
