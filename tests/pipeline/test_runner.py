@@ -2,11 +2,12 @@ import inspect
 import os
 import shutil
 
+import cv2
 import numpy as np
 import pytest
 
 from lightsaber_fx.pipeline import job_meta
-from lightsaber_fx.pipeline.blade import compute_motion, save_mask
+from lightsaber_fx.pipeline.blade import compute_motion, load_motion, save_mask
 from lightsaber_fx.pipeline.job_meta import JobNotRerenderableError
 from lightsaber_fx.pipeline.runner import (
     rerender_pipeline,
@@ -916,6 +917,80 @@ def test_run_pipeline_multi_skips_reconcile_pair_for_a_four_saber_job(tmp_path, 
         checkpoint_path="unused",
         device="cpu",
     )
+
+
+def _write_longer_video(path, n_frames, width=64, height=48, fps=10.0):
+    """Like the top-level `tiny_video_path` fixture's clip, but with a
+    frame count this file controls -- merge detection needs 15+ sustained
+    frames, more than that fixture's default 5."""
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    for i in range(n_frames):
+        frame = np.full((height, width, 3), (i * 5) % 255, dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+
+
+def test_run_pipeline_multi_recovers_from_a_simulated_crossing_end_to_end(tmp_path, monkeypatch):
+    """Full pipeline, reproducing the shape of the real bug this feature
+    fixes: two objects track separately, then (simulating track_objects
+    losing the distinction between them) both collapse onto the same
+    target for a sustained stretch, and reconciliation recovers the lost
+    one. Mirrors the design doc's real-footage spike; this is the
+    synthetic, fast, CI-safe equivalent driven through the full pipeline
+    entry point rather than reconcile_pair directly."""
+    video_path = tmp_path / "longer.mp4"
+    _write_longer_video(video_path, n_frames=40)
+
+    def fake_track_objects(frames_dir, prompts, checkpoint_path, config_name, device, n_frames, progress_cb=None):
+        for prompt in prompts:
+            os.makedirs(prompt["masks_dir"], exist_ok=True)
+            for i in range(n_frames):
+                # Object 0 tracks separately (x=10) for frames 0-4, then
+                # collapses onto object 1's target (x=40) from frame 5 on.
+                x = 10 if (prompt["obj_id"] == 0 and i < 5) else 40
+                mask = np.zeros((48, 64), dtype=bool)
+                mask[10:34, x:x + 6] = True
+                save_mask(prompt["masks_dir"], i, mask)
+
+    def fake_reacquire_pair(frames_dir, search_start_frame, checkpoint_path, config_name, device,
+                             client=None, **kwargs):
+        return search_start_frame, [
+            {"centroid": (10.0, 22.0), "points": [[10, 20], [10, 22], [10, 24]]},
+            {"centroid": (40.0, 22.0), "points": [[40, 20], [40, 22], [40, 24]]},
+        ]
+
+    def fake_track_object_for_reacquire(frames_dir, out_masks_dir, points, labels, checkpoint_path, config_name,
+                                         device, n_frames, prompt_frame=0, progress_cb=None):
+        for i in range(prompt_frame, n_frames):
+            mask = np.zeros((48, 64), dtype=bool)
+            mask[10:34, 10:16] = True
+            save_mask(out_masks_dir, i, mask)
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object_for_reacquire)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    output_path = tmp_path / "final.mp4"
+
+    run_pipeline_multi(
+        input_video=str(video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(output_path),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert output_path.exists() and output_path.stat().st_size > 0
+    motion_0 = load_motion(str(job_dir / "motion" / "0.npz"))
+    # Object 0 was recovered: its centroid on the last tracked frame
+    # should be back near its own target (x=10-16), not object 1's (x=40).
+    assert motion_0["centroid"][-1][0] < 20
 
 
 # ---------------------------------------------------------------------------
