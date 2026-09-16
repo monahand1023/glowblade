@@ -17,13 +17,16 @@ only loosely against the one real clip this was diagnosed on -- tune as
 more real footage is tested against this.
 """
 
+import logging
 import os
+import tempfile
 
 import cv2
 import numpy as np
 
-from .blade import fit_blade, load_mask, load_mask_optional, save_mask
+from .blade import fit_blade, load_mask, load_mask_optional, mask_frame_indices, save_mask
 from .detect import MAX_MASK_AREA_FRAC, _build_image_predictor, _points_on_axis
+from .track import track_object
 from .vision_detect import (
     DETECTION_PROMPT,
     DETECTION_SCHEMA,
@@ -257,3 +260,75 @@ def reacquire_pair(
             ]
         frame_idx += search_step
     return None
+
+
+def reconcile_pair(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_path, config_name, device, client=None):
+    """Best-effort recovery from a detected crossing between exactly two
+    tracked objects (object 0 and object 1). Returns `True` if either
+    object's masks were patched, `False` if no merge was found or
+    recovery failed at any step -- in the `False` case, both objects'
+    masks are left completely untouched.
+
+    Never raises: any failure in the Gemini/SAM2-dependent steps
+    (`reacquire_pair`, the fresh `track_object` call) is caught and
+    treated the same as "recovery failed," matching this project's
+    existing decline-rather-than-guess-wrong fallback philosophy (see
+    `server.py`'s `_detect_proposals`).
+    """
+    frame_indices = mask_frame_indices(masks_dir_0)
+
+    merge_start = detect_merge(masks_dir_0, masks_dir_1, frame_indices)
+    if merge_start is None:
+        return False
+
+    reference_frame = find_clean_reference(masks_dir_0, masks_dir_1, merge_start, frame_indices)
+    if reference_frame is None:
+        return False
+
+    geo_0 = fit_blade(load_mask(masks_dir_0, reference_frame))
+    geo_1 = fit_blade(load_mask(masks_dir_1, reference_frame))
+    if geo_0 is None or geo_1 is None:
+        return False
+
+    try:
+        result = reacquire_pair(frames_dir, merge_start, checkpoint_path, config_name, device, client=client)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "cross-object identity recovery failed during re-acquisition, leaving today's tracking as-is",
+            exc_info=True,
+        )
+        return False
+    if result is None:
+        return False
+    reacquire_frame, detections = result
+
+    det_for_0, det_for_1 = match_detections_to_objects(detections, geo_0.centroid, geo_1.centroid)
+
+    merged_geo = fit_blade(load_mask(masks_dir_0, merge_start))
+    if merged_geo is None:
+        return False
+    dist_0 = _centroid_dist(det_for_0["centroid"], merged_geo.centroid)
+    dist_1 = _centroid_dist(det_for_1["centroid"], merged_geo.centroid)
+    # The "kept" object's fresh detection is close to where its
+    # (corrupted, but still-tracking-*something*) mask currently sits;
+    # the "lost" object's fresh detection is far from it.
+    if dist_0 <= dist_1:
+        lost_masks_dir, lost_points = masks_dir_1, det_for_1["points"]
+    else:
+        lost_masks_dir, lost_points = masks_dir_0, det_for_0["points"]
+
+    with tempfile.TemporaryDirectory() as fresh_masks_dir:
+        try:
+            track_object(
+                frames_dir, fresh_masks_dir, lost_points, [1] * len(lost_points),
+                checkpoint_path, config_name, device, n_frames, prompt_frame=reacquire_frame,
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "cross-object identity recovery failed during re-tracking, leaving today's tracking as-is",
+                exc_info=True,
+            )
+            return False
+        patch_masks(lost_masks_dir, fresh_masks_dir, reference_frame, merge_start, reacquire_frame, n_frames)
+
+    return True

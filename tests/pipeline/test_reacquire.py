@@ -365,3 +365,130 @@ def test_reacquire_pair_returns_none_when_it_runs_past_the_end_of_the_clip(tmp_p
     )
 
     assert result is None
+
+
+from lightsaber_fx.pipeline.reacquire import reconcile_pair
+
+
+def test_reconcile_pair_detects_and_patches_the_lost_object(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    # Frames 0-19: separate (object 0 at x=20, object 1 at x=80).
+    for i in range(20):
+        save_mask(str(masks_0), i, _mask_at(20))
+        save_mask(str(masks_1), i, _mask_at(80))
+    # Frames 20-49: both objects' tracking collapsed onto object 1's
+    # target (x=80) -- object 0 is "lost".
+    for i in range(20, 50):
+        save_mask(str(masks_0), i, _mask_at(80))
+        save_mask(str(masks_1), i, _mask_at(80))
+
+    def fake_reacquire_pair(frames_dir, search_start_frame, checkpoint_path, config_name, device,
+                             client=None, **kwargs):
+        assert search_start_frame == 20  # merge_start_frame
+        return 40, [
+            {"centroid": (20.0, 45.0), "points": [[20, 40], [20, 45], [20, 50]]},
+            {"centroid": (80.0, 45.0), "points": [[80, 40], [80, 45], [80, 50]]},
+        ]
+
+    def fake_track_object(frames_dir, out_masks_dir, points, labels, checkpoint_path, config_name, device,
+                           n_frames, prompt_frame=0, progress_cb=None):
+        # Recovered object 0 tracks at x=25 (distinct from both x=20 and
+        # x=80, so the test can tell "frozen reference" and "freshly
+        # tracked" apart) from prompt_frame onward.
+        for i in range(prompt_frame, n_frames):
+            save_mask(out_masks_dir, i, _mask_at(25))
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object)
+
+    patched = reconcile_pair(
+        "unused-frames-dir", str(masks_0), str(masks_1), n_frames=50,
+        checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched is True
+    # Object 1 (kept) is untouched throughout.
+    for i in range(50):
+        assert np.array_equal(load_mask(str(masks_1), i), _mask_at(80))
+    # Object 0: original track for frames 0-19, frozen at its last-good
+    # position (x=20) for the gap [20, 40), then freshly re-tracked (x=25)
+    # for [40, 50).
+    for i in range(20):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(20))
+    for i in range(20, 40):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(20))
+    for i in range(40, 50):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(25))
+
+
+def test_reconcile_pair_returns_false_when_no_merge_is_detected(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    for i in range(20):
+        save_mask(str(masks_0), i, _mask_at(20))
+        save_mask(str(masks_1), i, _mask_at(80))
+
+    called = []
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.reacquire.reacquire_pair",
+        lambda *a, **k: called.append(True) or None,
+    )
+
+    patched = reconcile_pair(
+        "unused-frames-dir", str(masks_0), str(masks_1), n_frames=20,
+        checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched is False
+    assert called == []  # never even tried to re-acquire -- no merge was found
+    for i in range(20):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(20))
+        assert np.array_equal(load_mask(str(masks_1), i), _mask_at(80))
+
+
+def test_reconcile_pair_returns_false_when_reacquisition_finds_nothing(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    for i in range(20):
+        save_mask(str(masks_0), i, _mask_at(20))
+        save_mask(str(masks_1), i, _mask_at(80))
+    for i in range(20, 40):
+        save_mask(str(masks_0), i, _mask_at(80))
+        save_mask(str(masks_1), i, _mask_at(80))
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", lambda *a, **k: None)
+
+    patched = reconcile_pair(
+        "unused-frames-dir", str(masks_0), str(masks_1), n_frames=40,
+        checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched is False
+    for i in range(20):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(20))  # untouched
+    for i in range(20, 40):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(80))  # untouched
+
+
+def test_reconcile_pair_returns_false_instead_of_raising_when_reacquisition_errors(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    for i in range(20):
+        save_mask(str(masks_0), i, _mask_at(20))
+        save_mask(str(masks_1), i, _mask_at(80))
+    for i in range(20, 40):
+        save_mask(str(masks_0), i, _mask_at(80))
+        save_mask(str(masks_1), i, _mask_at(80))
+
+    def raising_reacquire_pair(*a, **k):
+        raise RuntimeError("Gemini network error")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", raising_reacquire_pair)
+
+    patched = reconcile_pair(
+        "unused-frames-dir", str(masks_0), str(masks_1), n_frames=40,
+        checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched is False
