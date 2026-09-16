@@ -50,3 +50,28 @@ def test_detect_merge_returns_none_when_never_overlapping(tmp_path):
         save_mask(str(masks_b), i, _mask_at(90))
 
     assert detect_merge(str(masks_a), str(masks_b), list(range(20))) is None
+
+
+def test_detect_merge_handles_missing_mask_gracefully(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    for i in range(36):
+        if i < 10:
+            # Frames 0-9: separate masks, low overlap
+            save_mask(str(masks_a), i, _mask_at(20))
+            save_mask(str(masks_b), i, _mask_at(60))
+        elif i == 20:
+            # Frame 20: masks_b has no mask file (object lost)
+            save_mask(str(masks_a), i, _mask_at(60))
+            # Don't save masks_b[20] -- missing file
+        else:
+            # Frames 10-19 and 21-35: both have high-IoU masks
+            save_mask(str(masks_a), i, _mask_at(60))
+            save_mask(str(masks_b), i, _mask_at(60))
+
+    # Frames 10-19 have 10 frames of overlap (not sustained, < 15).
+    # Frame 20 has missing mask_b, resets the run.
+    # Frames 21-35 have 15 frames of overlap (sustained), so merge_start = 21.
+    merge_start = detect_merge(str(masks_a), str(masks_b), list(range(36)))
+
+    assert merge_start == 21

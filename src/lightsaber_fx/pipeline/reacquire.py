@@ -17,9 +17,7 @@ only loosely against the one real clip this was diagnosed on -- tune as
 more real footage is tested against this.
 """
 
-import numpy as np
-
-from .blade import fit_blade, load_mask
+from .blade import load_mask_optional
 from .vision_detect import _mask_iou
 
 MERGE_IOU_THRESHOLD = 0.8
@@ -40,19 +38,26 @@ def detect_merge(masks_dir_a, masks_dir_b, frame_indices,
     `frame_indices` must be sorted; "consecutive" is measured as
     consecutive *entries* in this list, not consecutive frame numbers -- a
     real gap (an object briefly lost) is rare enough not to special-case
-    here.
+    here. If either object is missing a mask file for a frame (object lost),
+    that frame resets the current run, same as a sub-threshold-IoU frame.
     """
     run_start = None
     run_len = 0
     for idx in frame_indices:
-        iou = _mask_iou(load_mask(masks_dir_a, idx), load_mask(masks_dir_b, idx))
-        if iou >= iou_threshold:
-            if run_start is None:
-                run_start = idx
-            run_len += 1
-            if run_len >= sustain_frames:
-                return run_start
-        else:
+        mask_a = load_mask_optional(masks_dir_a, idx)
+        mask_b = load_mask_optional(masks_dir_b, idx)
+        if mask_a is None or mask_b is None:
             run_start = None
             run_len = 0
+        else:
+            iou = _mask_iou(mask_a, mask_b)
+            if iou >= iou_threshold:
+                if run_start is None:
+                    run_start = idx
+                run_len += 1
+                if run_len >= sustain_frames:
+                    return run_start
+            else:
+                run_start = None
+                run_len = 0
     return None
