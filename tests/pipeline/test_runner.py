@@ -954,7 +954,8 @@ def test_run_pipeline_multi_recovers_from_a_simulated_crossing_end_to_end(tmp_pa
 
     def fake_reacquire_pair(frames_dir, search_start_frame, checkpoint_path, config_name, device,
                              client=None, **kwargs):
-        return search_start_frame, [
+        reacquire_frame = search_start_frame + 3
+        return reacquire_frame, [
             {"centroid": (10.0, 22.0), "points": [[10, 20], [10, 22], [10, 24]]},
             {"centroid": (40.0, 22.0), "points": [[40, 20], [40, 22], [40, 24]]},
         ]
@@ -963,7 +964,7 @@ def test_run_pipeline_multi_recovers_from_a_simulated_crossing_end_to_end(tmp_pa
                                          device, n_frames, prompt_frame=0, progress_cb=None):
         for i in range(prompt_frame, n_frames):
             mask = np.zeros((48, 64), dtype=bool)
-            mask[10:34, 10:16] = True
+            mask[10:34, 16:22] = True  # x=16: distinguishable from the frozen reference (x=10) and object 1's target (x=40)
             save_mask(out_masks_dir, i, mask)
 
     monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
@@ -988,9 +989,17 @@ def test_run_pipeline_multi_recovers_from_a_simulated_crossing_end_to_end(tmp_pa
 
     assert output_path.exists() and output_path.stat().st_size > 0
     motion_0 = load_motion(str(job_dir / "motion" / "0.npz"))
-    # Object 0 was recovered: its centroid on the last tracked frame
-    # should be back near its own target (x=10-16), not object 1's (x=40).
-    assert motion_0["centroid"][-1][0] < 20
+    # Frame 0 (before the merge): original track, x=10.
+    assert motion_0["centroid"][0][0] < 20
+    # Frame 6 (within the frozen gap [merge_start=5, reacquire_frame=8)): held at the
+    # clean reference frame's position (x=10), not yet recovered and not the merged x=40.
+    assert motion_0["centroid"][6][0] < 20
+    # Frame 39 (after re-acquisition): freshly re-tracked at x=16 (mask columns 16:22,
+    # centroid 18.5) -- distinguishable from both the frozen value (x=10, centroid 12.5)
+    # and object 1's target (x=40, centroid 42.5), proving patch_masks's fresh-track copy
+    # loop, find_clean_reference's frame choice, and reacquire_pair's stub all ran for
+    # real rather than degenerating to a no-op.
+    assert 15 < motion_0["centroid"][-1][0] < 25
 
 
 # ---------------------------------------------------------------------------
