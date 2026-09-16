@@ -7,6 +7,7 @@ from .blade import LOW_ELONGATION_FRAC_THRESHOLD, MIN_ELONGATION, compute_motion
 from .frames import extract_frames
 from .glow import parse_color, render_glow, render_glow_multi
 from .mux import encode
+from .reacquire import reconcile_pair
 from .track import track_object, track_objects
 
 
@@ -308,6 +309,12 @@ def run_pipeline_multi(
         paths["frames_dir"], prompts, checkpoint_path, config_name, device, n_frames,
         progress_cb=stage_cb("track"),
     )
+
+    if len(object_ids) == 2:
+        reconcile_pair(
+            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
+            n_frames, checkpoint_path, config_name, device,
+        )
 
     for oid in object_ids:
         n_tracked, n_with_blade = compute_motion(

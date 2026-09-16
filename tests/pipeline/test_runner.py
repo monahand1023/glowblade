@@ -830,6 +830,94 @@ def test_run_pipeline_multi_records_each_sabers_source_in_job_meta(
     assert [p["source"] for p in meta["prompts"]] == ["vlm", "manual"]
 
 
+def test_run_pipeline_multi_calls_reconcile_pair_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+    calls = []
+
+    def fake_reconcile_pair(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_path, config_name, device,
+                             client=None):
+        calls.append((masks_dir_0, masks_dir_1, n_frames))
+        return False
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fake_reconcile_pair)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert len(calls) == 1
+    masks_dir_0, masks_dir_1, _n_frames = calls[0]
+    assert masks_dir_0 == str(job_dir / "masks" / "0")
+    assert masks_dir_1 == str(job_dir / "masks" / "1")
+
+
+def test_run_pipeline_multi_skips_reconcile_pair_for_a_single_saber_job(tmp_path, monkeypatch, tiny_video_path):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade}),
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("reconcile_pair should not run for a single-saber job")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[{"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"}],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+
+def test_run_pipeline_multi_skips_reconcile_pair_for_a_four_saber_job(tmp_path, monkeypatch, tiny_video_path):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("reconcile_pair should not run for a four-saber job")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "green", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+
 # ---------------------------------------------------------------------------
 # rerender_pipeline_multi
 # ---------------------------------------------------------------------------
