@@ -284,6 +284,37 @@ def test_detect_blades_vlm_propagates_a_real_client_error(rotating_bar_video):
         detect_blades_vlm(str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client)
 
 
+def test_detect_blades_vlm_raises_when_the_selected_frame_cannot_be_read(
+    monkeypatch, rotating_bar_video,
+):
+    # A frame-read failure on the motion-selected frame happens before
+    # Gemini is ever called -- it is a real technical failure, not "Gemini
+    # searched and found nothing", so it must raise rather than return [].
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.vision_detect._read_frame", lambda cap, index: None,
+    )
+    client = _FakeGenaiClient(json.dumps({"objects": []}))
+
+    with pytest.raises(ValueError, match="Could not read frame"):
+        detect_blades_vlm(str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client)
+
+    assert client.calls == []  # never got far enough to ask Gemini anything
+
+
+def test_detect_blades_vlm_raises_when_the_frame_cannot_be_encoded(
+    monkeypatch, rotating_bar_video,
+):
+    # Same reasoning as the unreadable-frame case: an imencode failure is a
+    # real failure that happens before Gemini is called, not an empty result.
+    monkeypatch.setattr(cv2, "imencode", lambda *a, **k: (False, None))
+    client = _FakeGenaiClient(json.dumps({"objects": []}))
+
+    with pytest.raises(RuntimeError, match="failed to encode frame"):
+        detect_blades_vlm(str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client)
+
+    assert client.calls == []  # never got far enough to ask Gemini anything
+
+
 def test_detect_blades_vlm_all_proposals_share_one_frame_index(
     monkeypatch, rotating_bar_video,
 ):

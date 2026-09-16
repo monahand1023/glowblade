@@ -180,11 +180,11 @@ def detect_blades_vlm(video_path, checkpoint_path, config_name, device, client=N
         frame_index = seeds[0].frame_index if seeds else 0
         frame = _read_frame(cap, frame_index)
         if frame is None:
-            return []
+            raise ValueError(f"Could not read frame {frame_index} from {video_path}")
 
         ok, encoded = cv2.imencode(".jpg", frame)
         if not ok:
-            return []
+            raise RuntimeError("failed to encode frame for Gemini")
 
         response = client.models.generate_content(
             model=GEMINI_MODEL,
