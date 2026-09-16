@@ -1,7 +1,7 @@
 import numpy as np
 
 from lightsaber_fx.pipeline.blade import save_mask
-from lightsaber_fx.pipeline.reacquire import detect_merge, find_clean_reference
+from lightsaber_fx.pipeline.reacquire import detect_merge, find_clean_reference, match_detections_to_objects
 
 
 def _mask_at(x, width=120, height=80, bar_width=6):
@@ -148,3 +148,28 @@ def test_find_clean_reference_skips_a_candidate_missing_a_mask_file(tmp_path):
     )
 
     assert ref == 16
+
+
+def test_match_detections_to_objects_matches_by_nearest_centroid():
+    det_left = {"centroid": (100, 100), "points": [[100, 100]]}
+    det_right = {"centroid": (500, 500), "points": [[500, 500]]}
+
+    for_a, for_b = match_detections_to_objects(
+        [det_right, det_left],  # input order shouldn't matter
+        ref_centroid_a=(90, 90), ref_centroid_b=(510, 510),
+    )
+
+    assert for_a is det_left
+    assert for_b is det_right
+
+
+def test_match_detections_to_objects_handles_already_matching_order():
+    det_a_like = {"centroid": (10, 10), "points": []}
+    det_b_like = {"centroid": (200, 200), "points": []}
+
+    for_a, for_b = match_detections_to_objects(
+        [det_a_like, det_b_like], ref_centroid_a=(0, 0), ref_centroid_b=(210, 210),
+    )
+
+    assert for_a is det_a_like
+    assert for_b is det_b_like
