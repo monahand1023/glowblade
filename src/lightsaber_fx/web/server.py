@@ -56,7 +56,14 @@ def index():
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)):
+def upload(file: UploadFile = File(...)):
+    """Deliberately a *sync* route, matching `/detect` below: saving the
+    upload and extracting its first frame (OpenCV, blocking) never awaits
+    anything, so as `async def` this ran directly on the event loop and
+    stalled every other request -- including the progress stream -- for
+    as long as the copy and frame read took. A plain `def` route runs in
+    FastAPI's threadpool instead.
+    """
     if manager.is_busy():
         raise HTTPException(status_code=409, detail="A render is already in progress")
 
@@ -467,9 +474,18 @@ async def rerender_job(job_id: str, body: dict):
 
 @app.get("/api/jobs/{job_id}/preview")
 def get_preview(job_id: str):
-    """The most recently written frame of the glow stage's in-progress PNG
-    sequence, so the page can show what the render currently looks like
-    instead of a bare percentage.
+    """The most recently written *complete* frame of the glow stage's
+    in-progress PNG sequence, so the page can show what the render
+    currently looks like instead of a bare percentage.
+
+    Deliberately `frames[-2]`, not `frames[-1]`: the render loop writes
+    each frame with a plain `cv2.imwrite` straight to its final filename
+    (no temp-file-plus-rename), so the newest file on disk can still be
+    mid-write when this lists the directory -- `FileResponse` would stat
+    a partial size and then stream a growing file past it, aborting the
+    response. The loop is single-threaded and sequential though: a frame
+    N+1 file never appears until frame N's `imwrite` call has returned,
+    so the second-newest file is always fully written.
 
     `glow_frames/` only exists while the glow stage is running -- it is
     absent before that stage starts and removed once it finishes -- so both
@@ -482,9 +498,9 @@ def get_preview(job_id: str):
         frames = sorted(glow_dir.glob("*.png"))
     except OSError:
         frames = []
-    if not frames:
+    if len(frames) < 2:
         raise HTTPException(status_code=404, detail="No preview available yet")
-    return FileResponse(frames[-1], media_type="image/png")
+    return FileResponse(frames[-2], media_type="image/png")
 
 
 @app.get("/api/jobs/{job_id}/events")

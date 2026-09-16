@@ -855,9 +855,14 @@ def test_preview_404s_before_the_glow_stage_has_written_any_frame(
     assert resp.status_code == 404
 
 
-def test_preview_returns_the_most_recently_written_glow_frame(
+def test_preview_returns_the_second_most_recently_written_glow_frame(
     client, tiny_video_bytes
 ):
+    # Not the newest file: the render loop writes each frame with a plain,
+    # non-atomic cv2.imwrite, so the newest file on disk can still be
+    # mid-write when this lists the directory. The second-newest is always
+    # a completed frame, since the loop is sequential -- a newer file never
+    # appears until the previous imwrite call has returned.
     job_id = _upload(client, tiny_video_bytes)
     glow_dir = paths_module.get_jobs_dir() / job_id / "glow_frames"
     glow_dir.mkdir(parents=True)
@@ -868,7 +873,22 @@ def test_preview_returns_the_most_recently_written_glow_frame(
 
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/png"
-    assert resp.content == b"newest frame"
+    assert resp.content == b"oldest frame"
+
+
+def test_preview_404s_when_only_one_glow_frame_has_been_written(
+    client, tiny_video_bytes
+):
+    # A lone frame might still be mid-write -- with nothing older to fall
+    # back to, this is "not available yet", the same as no frames at all.
+    job_id = _upload(client, tiny_video_bytes)
+    glow_dir = paths_module.get_jobs_dir() / job_id / "glow_frames"
+    glow_dir.mkdir(parents=True)
+    (glow_dir / "00000.png").write_bytes(b"only frame")
+
+    resp = client.get(f"/api/jobs/{job_id}/preview")
+
+    assert resp.status_code == 404
 
 
 def test_preview_rejects_traversal_style_job_ids(client):
