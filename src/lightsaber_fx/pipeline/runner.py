@@ -276,7 +276,11 @@ def run_pipeline_multi(
     job_meta.write_job_meta(
         job_dir, source_video=input_video, object_ids=object_ids,
         prompts=[
-            {"points": s["points"], "labels": s["labels"], "prompt_frame": s.get("prompt_frame", 0)}
+            {
+                "points": s["points"], "labels": s["labels"],
+                "prompt_frame": s.get("prompt_frame", 0),
+                "source": s.get("source", "manual"),
+            }
             for s in sabers
         ],
     )

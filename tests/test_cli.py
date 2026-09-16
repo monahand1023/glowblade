@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import cv2
 import numpy as np
 from click.testing import CliRunner
 
@@ -496,3 +497,35 @@ def test_run_command_falls_back_to_clicking_when_detection_finds_nothing(tmp_pat
     assert seen["extracted_index"] == 0
     assert seen["prompt_frame"] == 0
     assert seen["points"] == [[1, 2]]
+
+
+def test_inspect_command_prints_each_sabers_source(tmp_path, monkeypatch, capsys):
+    jobs_dir = tmp_path / "jobs"
+    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake")
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:5, 2:5] = True
+
+    job_dir = jobs_dir / "job1"
+    job_dir.mkdir(parents=True)
+    cv2.imwrite(str(job_dir / "frame0.jpg"), np.zeros((10, 10, 3), dtype=np.uint8))
+    for oid in (0, 1):
+        save_mask(str(job_dir / "masks" / str(oid)), 0, mask)
+        (job_dir / "motion").mkdir(exist_ok=True)
+        compute_motion(str(job_dir / "masks" / str(oid)), str(job_dir / "motion" / f"{oid}.npz"))
+    (job_dir / "video_meta.txt").write_text("24.0\n1\n")
+    write_job_meta(
+        str(job_dir), source_video=str(video), object_ids=[0, 1],
+        prompts=[
+            {"points": [[1, 1]], "labels": [1], "prompt_frame": 0, "source": "vlm"},
+            {"points": [[2, 2]], "labels": [1], "prompt_frame": 0, "source": "manual"},
+        ],
+    )
+
+    result = CliRunner().invoke(main, ["inspect", "job1"])
+
+    assert result.exit_code == 0, result.output
+    assert "saber 0: source=vlm" in result.output
+    assert "saber 1: source=manual" in result.output

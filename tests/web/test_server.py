@@ -863,3 +863,23 @@ def test_preview_rejects_traversal_style_job_ids(client):
     resp = client.get("/api/jobs/%2E%2E/preview")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Job not found"
+
+
+def test_parse_saber_specs_defaults_source_to_manual():
+    from lightsaber_fx.web.server import _parse_saber_specs
+
+    parsed = _parse_saber_specs({"sabers": [
+        {"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"},
+    ]})
+
+    assert parsed[0]["source"] == "manual"
+
+
+def test_parse_saber_specs_passes_through_a_given_source():
+    from lightsaber_fx.web.server import _parse_saber_specs
+
+    parsed = _parse_saber_specs({"sabers": [
+        {"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral", "source": "vlm"},
+    ]})
+
+    assert parsed[0]["source"] == "vlm"

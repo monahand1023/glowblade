@@ -796,6 +796,34 @@ def test_run_pipeline_multi_threads_each_sabers_prompt_frame_to_the_tracker(
     assert captured["prompts"][1]["prompt_frame"] == 0  # defaults when the client omits it
 
 
+def test_run_pipeline_multi_records_each_sabers_source_in_job_meta(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35,
+             "voice": "neutral", "source": "vlm"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35,
+             "voice": "neutral", "source": "manual"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    meta = job_meta.read_job_meta(str(job_dir))
+    assert [p["source"] for p in meta["prompts"]] == ["vlm", "manual"]
+
+
 # ---------------------------------------------------------------------------
 # rerender_pipeline_multi
 # ---------------------------------------------------------------------------

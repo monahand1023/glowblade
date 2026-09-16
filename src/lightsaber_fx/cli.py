@@ -253,7 +253,8 @@ def inspect(job_id, frames):
         click.echo("  prompts submitted:")
         for i, p in enumerate(prompts):
             click.echo(
-                f"    saber {i}: prompt_frame={p.get('prompt_frame', 0)} "
+                f"    saber {i}: source={p.get('source', 'manual')} "
+                f"prompt_frame={p.get('prompt_frame', 0)} "
                 f"points={p.get('points')} labels={p.get('labels')}"
             )
     else:

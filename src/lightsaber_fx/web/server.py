@@ -336,6 +336,7 @@ def _parse_saber_specs(body: dict):
             "intensity": intensity,
             "voice": voice,
             "prompt_frame": prompt_frame,
+            "source": saber.get("source", "manual"),
         })
 
     # Caught here as well as in track_objects so a bad request fails as a
