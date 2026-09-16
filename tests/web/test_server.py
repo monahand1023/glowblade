@@ -490,7 +490,7 @@ def _upload(client, tiny_video_bytes):
 def test_detect_returns_a_proposal_with_its_frame_and_points(
     client, tiny_video_bytes, monkeypatch
 ):
-    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal(3))
+    monkeypatch.setattr(server_module, "_detect_proposals", lambda *a, **k: ([_fake_proposal(3)], "motion"))
     job_id = _upload(client, tiny_video_bytes)
 
     resp = client.post(f"/api/jobs/{job_id}/detect")
@@ -499,10 +499,29 @@ def test_detect_returns_a_proposal_with_its_frame_and_points(
     data = resp.json()
     assert data["found"] is True
     assert data["frame_index"] == 3
-    assert data["elongation"] == 8.4
+    assert data["source"] == "motion"
+    assert len(data["proposals"]) == 1
+    proposal = data["proposals"][0]
+    assert proposal["elongation"] == 8.4
     # Points come back in the same [x, y, label] shape /points takes, all
     # includes -- detection never proposes carving anything out.
-    assert data["points"] == [[12, 24, 1], [32, 24, 1], [52, 24, 1]]
+    assert proposal["points"] == [[12, 24, 1], [32, 24, 1], [52, 24, 1]]
+
+
+def test_detect_returns_multiple_proposals_from_the_vision_path(
+    client, tiny_video_bytes, monkeypatch
+):
+    monkeypatch.setattr(
+        server_module, "_detect_proposals",
+        lambda *a, **k: ([_fake_proposal(3), _fake_proposal(3)], "vlm"),
+    )
+    job_id = _upload(client, tiny_video_bytes)
+
+    data = client.post(f"/api/jobs/{job_id}/detect").json()
+
+    assert data["found"] is True
+    assert data["source"] == "vlm"
+    assert len(data["proposals"]) == 2
 
 
 def test_detect_serves_the_frame_the_points_refer_to_and_a_mask_overlay(
@@ -510,7 +529,7 @@ def test_detect_serves_the_frame_the_points_refer_to_and_a_mask_overlay(
 ):
     # The frame matters as much as the points: a proposal from mid-swing is
     # meaningless drawn over frame 0, because the object has moved.
-    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal(3))
+    monkeypatch.setattr(server_module, "_detect_proposals", lambda *a, **k: ([_fake_proposal(3)], "motion"))
     job_id = _upload(client, tiny_video_bytes)
 
     data = client.post(f"/api/jobs/{job_id}/detect").json()
@@ -519,7 +538,7 @@ def test_detect_serves_the_frame_the_points_refer_to_and_a_mask_overlay(
     assert frame_resp.status_code == 200
     assert frame_resp.headers["content-type"] == "image/jpeg"
 
-    mask_resp = client.get(data["mask_url"])
+    mask_resp = client.get(data["proposals"][0]["mask_url"])
     assert mask_resp.status_code == 200
     assert mask_resp.headers["content-type"] == "image/png"
 
@@ -532,12 +551,12 @@ def test_detect_mask_overlay_is_transparent_outside_the_mask(
     import cv2
     import numpy as np
 
-    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal())
+    monkeypatch.setattr(server_module, "_detect_proposals", lambda *a, **k: ([_fake_proposal()], "motion"))
     job_id = _upload(client, tiny_video_bytes)
     client.post(f"/api/jobs/{job_id}/detect")
 
     overlay = cv2.imread(
-        str(paths_module.get_jobs_dir() / job_id / "detect_mask.png"), cv2.IMREAD_UNCHANGED
+        str(paths_module.get_jobs_dir() / job_id / "detect_mask_0.png"), cv2.IMREAD_UNCHANGED
     )
     assert overlay.shape[2] == 4, "overlay has no alpha channel"
     assert overlay[24, 32, 3] > 0, "masked pixels are transparent"
@@ -550,13 +569,43 @@ def test_detect_reports_not_found_without_erroring(client, tiny_video_bytes, mon
     # back to asking the user to click, which is what it did before detection
     # existed. Returning an error status would surface a scary message for
     # something entirely expected.
-    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: None)
+    monkeypatch.setattr(server_module, "_detect_proposals", lambda *a, **k: ([], "motion"))
     job_id = _upload(client, tiny_video_bytes)
 
     resp = client.post(f"/api/jobs/{job_id}/detect")
 
     assert resp.status_code == 200
     assert resp.json() == {"found": False}
+
+
+def test_detect_falls_back_to_motion_when_vlm_raises(
+    client, tiny_video_bytes, monkeypatch
+):
+    monkeypatch.setattr(
+        server_module, "detect_blades_vlm",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no api key")),
+    )
+    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal(3))
+    job_id = _upload(client, tiny_video_bytes)
+
+    data = client.post(f"/api/jobs/{job_id}/detect").json()
+
+    assert data["found"] is True
+    assert data["source"] == "motion"
+    assert len(data["proposals"]) == 1
+
+
+def test_detect_falls_back_to_motion_when_vlm_finds_nothing(
+    client, tiny_video_bytes, monkeypatch
+):
+    monkeypatch.setattr(server_module, "detect_blades_vlm", lambda *a, **k: [])
+    monkeypatch.setattr(server_module, "detect_blade", lambda *a, **k: _fake_proposal(3))
+    job_id = _upload(client, tiny_video_bytes)
+
+    data = client.post(f"/api/jobs/{job_id}/detect").json()
+
+    assert data["found"] is True
+    assert data["source"] == "motion"
 
 
 def test_detect_404_for_unknown_job(client):

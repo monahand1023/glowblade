@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import shutil
 import time
@@ -17,6 +18,7 @@ from ..pipeline.detect import _build_image_predictor, detect_blade
 from ..pipeline.frames import extract_first_frame, extract_frame_at
 from ..pipeline.job_meta import JobNotRerenderableError, require_rerenderable
 from ..pipeline.runner import rerender_pipeline_multi, run_pipeline_multi
+from ..pipeline.vision_detect import detect_blades_vlm
 from .jobs import JobManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -103,20 +105,51 @@ def _mask_overlay_png(mask, tint=DETECT_TINT, alpha=110):
     return buf.tobytes()
 
 
+def _detect_proposals(input_path, device):
+    """Try vision-assisted multi-object detection first, falling back to
+    today's single-object motion-based detect_blade on any failure --
+    missing API key, network error, bad response, or zero validated
+    candidates. Returns `(list[BladeProposal], source)` where `source` is
+    `"vlm"` or `"motion"`.
+
+    Partial success is still success: if the VLM finds 2 of 3 actual
+    objects, those 2 are returned as-is -- this never tops up a VLM result
+    with a motion-detected one, since they could disagree about which
+    frame to use and every saber in one render must share a prompt_frame.
+    """
+    try:
+        proposals = detect_blades_vlm(
+            input_path, str(paths.get_checkpoint_path()),
+            "configs/sam2.1/sam2.1_hiera_s.yaml", device,
+        )
+        if proposals:
+            return proposals, "vlm"
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "vision-assisted detection failed, falling back to motion detection", exc_info=True,
+        )
+
+    proposal = detect_blade(
+        input_path, str(paths.get_checkpoint_path()),
+        "configs/sam2.1/sam2.1_hiera_s.yaml", device,
+    )
+    return ([proposal] if proposal else []), "motion"
+
+
 @app.post("/api/jobs/{job_id}/detect")
 def detect(job_id: str):
-    """Look for the swung object and return a proposal to confirm.
+    """Look for the swung object(s) and return proposals to confirm.
 
-    Deliberately a *sync* route: detection runs optical flow and one SAM2
-    image pass, several seconds of blocking CPU work, and FastAPI runs sync
-    routes in a threadpool rather than on the event loop. Declaring this
-    `async def` would stall every other request, including the progress
-    stream, for the duration.
+    Deliberately a *sync* route: detection runs (vision or motion) plus one
+    or more SAM2 passes, several seconds of blocking CPU/network work, and
+    FastAPI runs sync routes in a threadpool rather than on the event loop.
+    Declaring this `async def` would stall every other request, including
+    the progress stream, for the duration.
 
-    Writes two files into the job dir rather than returning pixels inline:
-    the clean frame the points refer to, and an RGBA tint of the mask for
-    the page to composite over it. The frame matters -- a proposal's points
-    are meaningless against frame 0, since the object has moved by then.
+    Writes one clean frame plus one RGBA mask overlay per proposal into the
+    job dir rather than returning pixels inline. The frame matters -- a
+    proposal's points are meaningless against frame 0, since the object has
+    moved by then.
     """
     _validate_job_id(job_id)
     job_dir = paths.get_jobs_dir() / job_id
@@ -129,16 +162,14 @@ def detect(job_id: str):
             detail="SAM2 is not installed yet — run `lightsaber-fx setup` first.",
         )
 
-    proposal = detect_blade(
-        str(input_path), str(paths.get_checkpoint_path()),
-        "configs/sam2.1/sam2.1_hiera_s.yaml", select_device(),
-    )
-    if proposal is None:
+    proposals, source = _detect_proposals(str(input_path), select_device())
+    if not proposals:
         return {"found": False}
 
+    frame_index = proposals[0].frame_index  # all proposals share one frame -- see Global Constraints
     try:
         extract_frame_at(
-            str(input_path), proposal.frame_index, str(job_dir / "detect_frame.jpg")
+            str(input_path), frame_index, str(job_dir / "detect_frame.jpg")
         )
     except ValueError:
         # Detection read this same file, so a frame it named should always be
@@ -148,16 +179,22 @@ def detect(job_id: str):
         # a page that has a perfectly good fallback.
         return {"found": False}
 
-    height, width = proposal.mask.shape[:2]
-    (job_dir / "detect_mask.png").write_bytes(_mask_overlay_png(proposal.mask))
+    height, width = proposals[0].mask.shape[:2]
+    result_proposals = []
+    for i, proposal in enumerate(proposals):
+        (job_dir / f"detect_mask_{i}.png").write_bytes(_mask_overlay_png(proposal.mask))
+        result_proposals.append({
+            "elongation": round(proposal.elongation, 1),
+            "points": [[x, y, 1] for x, y in proposal.points],
+            "mask_url": f"/api/jobs/{job_id}/detect-mask/{i}",
+        })
 
     return {
         "found": True,
-        "frame_index": proposal.frame_index,
-        "elongation": round(proposal.elongation, 1),
-        "points": [[x, y, 1] for x, y in proposal.points],
+        "frame_index": frame_index,
         "frame_url": f"/api/jobs/{job_id}/detect-frame",
-        "mask_url": f"/api/jobs/{job_id}/detect-mask",
+        "proposals": result_proposals,
+        "source": source,
         "width": width,
         "height": height,
     }
@@ -172,10 +209,12 @@ def get_detect_frame(job_id: str):
     return FileResponse(path, media_type="image/jpeg")
 
 
-@app.get("/api/jobs/{job_id}/detect-mask")
-def get_detect_mask(job_id: str):
+@app.get("/api/jobs/{job_id}/detect-mask/{index}")
+def get_detect_mask(job_id: str, index: int):
     _validate_job_id(job_id)
-    path = paths.get_jobs_dir() / job_id / "detect_mask.png"
+    if not 0 <= index < 4:
+        raise HTTPException(status_code=404, detail="Job not found")
+    path = paths.get_jobs_dir() / job_id / f"detect_mask_{index}.png"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Job not found")
     return FileResponse(path, media_type="image/png")
