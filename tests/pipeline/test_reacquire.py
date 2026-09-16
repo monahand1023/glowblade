@@ -1,0 +1,52 @@
+import numpy as np
+
+from lightsaber_fx.pipeline.blade import save_mask
+from lightsaber_fx.pipeline.reacquire import detect_merge
+
+
+def _mask_at(x, width=120, height=80, bar_width=6):
+    """A vertical bar mask, `bar_width` wide, centered at column `x`."""
+    mask = np.zeros((height, width), dtype=bool)
+    x0 = max(0, x - bar_width // 2)
+    x1 = min(width, x + bar_width // 2)
+    mask[10:70, x0:x1] = True
+    return mask
+
+
+def test_detect_merge_finds_the_first_frame_of_a_sustained_overlap(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    # Frames 0-9: two separate bars. Frames 10-29: identical (merged) bars.
+    for i in range(30):
+        x = 20 if i < 10 else 60
+        save_mask(str(masks_a), i, _mask_at(x))
+        save_mask(str(masks_b), i, _mask_at(60))
+
+    merge_start = detect_merge(str(masks_a), str(masks_b), list(range(30)))
+
+    assert merge_start == 10
+
+
+def test_detect_merge_ignores_a_brief_touch_that_separates_again(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    for i in range(30):
+        # Bars touch (identical) for frames 10-14 only -- 5 frames, short of
+        # the 15-frame sustain default -- then separate again.
+        x = 60 if 10 <= i < 15 else 20
+        save_mask(str(masks_a), i, _mask_at(x))
+        save_mask(str(masks_b), i, _mask_at(60))
+
+    merge_start = detect_merge(str(masks_a), str(masks_b), list(range(30)))
+
+    assert merge_start is None
+
+
+def test_detect_merge_returns_none_when_never_overlapping(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    for i in range(20):
+        save_mask(str(masks_a), i, _mask_at(20))
+        save_mask(str(masks_b), i, _mask_at(90))
+
+    assert detect_merge(str(masks_a), str(masks_b), list(range(20))) is None
