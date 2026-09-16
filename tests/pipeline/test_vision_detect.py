@@ -336,6 +336,69 @@ def test_detect_blades_vlm_all_proposals_share_one_frame_index(
     assert len({p.frame_index for p in proposals}) == 1
 
 
+from lightsaber_fx.pipeline.detect import BladeProposal
+from lightsaber_fx.pipeline.vision_detect import _dedupe_by_mask_iou
+
+
+def _proposal(mask, elongation):
+    return BladeProposal(
+        frame_index=0, points=[[0, 0]], labels=[1], mask=mask,
+        elongation=elongation, seed=None,
+    )
+
+
+def test_dedupe_by_mask_iou_drops_the_lower_elongation_of_an_overlapping_pair():
+    # Two boxes that segment to nearly the same physical blade -- one of
+    # Gemini's own known failure modes (a box around the blade and a
+    # slightly different box around the same blade with a different label
+    # guess). Only the higher-elongation one should survive.
+    mask_a = _bar_mask_at(100, 100, 900, 150)
+    mask_b = _bar_mask_at(100, 105, 900, 155)  # heavily overlapping with mask_a
+
+    kept = _dedupe_by_mask_iou([_proposal(mask_a, 5.0), _proposal(mask_b, 8.0)])
+
+    assert len(kept) == 1
+    assert kept[0].elongation == 8.0
+
+
+def test_dedupe_by_mask_iou_keeps_two_genuinely_separate_proposals():
+    mask_a = _bar_mask_at(50, 50, 100, 900)
+    mask_b = _bar_mask_at(500, 50, 550, 900)
+
+    kept = _dedupe_by_mask_iou([_proposal(mask_a, 5.0), _proposal(mask_b, 8.0)])
+
+    assert len(kept) == 2
+
+
+def test_detect_blades_vlm_dedupes_two_gemini_boxes_that_segment_the_same_blade(
+    monkeypatch, rotating_bar_video,
+):
+    # Distinct boxes, but SAM2 (the fake predictor here) segments both to
+    # essentially the same mask -- exactly the case the dedup pass exists
+    # to catch, since it must operate on the resulting masks, not the boxes.
+    text = json.dumps({"objects": [
+        {"box_2d": [100, 100, 150, 900], "label": "sword"},
+        {"box_2d": [102, 100, 152, 900], "label": "blade"},
+    ]})
+    client = _FakeGenaiClient(text)
+    # box_2d [100, 100, 150, 900] on the 0-1000 scale converts to (32, 24,
+    # 288, 36) on the 320x240 rotating_bar_video frame -- see
+    # test_detect_blades_vlm_returns_one_proposal_per_validated_box, which
+    # validates this exact shape passes _validate_box_mask.
+    shared_mask = _bar_mask_at(32, 24, 288, 36)
+    predictor = _FakePredictor(lambda box: shared_mask)
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        lambda *a, **k: predictor,
+    )
+
+    proposals = detect_blades_vlm(
+        str(rotating_bar_video), "ckpt", "cfg", "cpu", client=client,
+    )
+
+    assert len(proposals) == 1
+
+
 import os
 
 requires_gemini_key = pytest.mark.skipif(

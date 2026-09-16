@@ -1,8 +1,10 @@
 """Vision-assisted multi-object detection: ask Gemini to find every swung
 prop in one frame, then validate each candidate through the same SAM2 +
 fit_blade quality gate `detect.py`'s own motion-based detection already
-uses. Falls back to `detect.py`'s `detect_blade` (unmodified, untouched by
-this module) whenever the vision path can't be used -- see `detect_blades_vlm`.
+uses. Raises on a real technical failure, returns an empty list when Gemini
+genuinely finds nothing -- callers (see `server.py`'s `_detect_proposals`)
+decide whether either case falls back to `detect.py`'s `detect_blade`
+(unmodified, untouched by this module).
 
 Different failure modes than `detect.py` -- network errors, API keys,
 per-call cost -- so this lives in its own file rather than inside it.
@@ -137,7 +139,31 @@ def _validate_box_mask(mask, max_mask_area):
     return elongation, geometry
 
 
+MASK_DEDUP_IOU_THRESHOLD = 0.5
+
+
+def _mask_iou(mask_a, mask_b):
+    intersection = np.logical_and(mask_a, mask_b).sum()
+    union = np.logical_or(mask_a, mask_b).sum()
+    return intersection / union if union else 0.0
+
+
+def _dedupe_by_mask_iou(proposals):
+    """Drops a proposal whose mask overlaps an already-kept one past
+    `MASK_DEDUP_IOU_THRESHOLD` -- two Gemini boxes can legitimately segment
+    the same swung object twice, and each would otherwise become its own
+    tracked saber slot. Keeps the higher-elongation proposal of each
+    overlapping pair."""
+    kept = []
+    for proposal in sorted(proposals, key=lambda p: p.elongation, reverse=True):
+        if any(_mask_iou(proposal.mask, k.mask) > MASK_DEDUP_IOU_THRESHOLD for k in kept):
+            continue
+        kept.append(proposal)
+    return kept
+
+
 GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_TIMEOUT_MS = 30000
 
 
 def detect_blades_vlm(video_path, checkpoint_path, config_name, device, client=None):
@@ -195,6 +221,7 @@ def detect_blades_vlm(video_path, checkpoint_path, config_name, device, client=N
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_json_schema=DETECTION_SCHEMA,
+                http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
             ),
         )
         boxes = _parse_gemini_response(response.text, width, height)
@@ -227,5 +254,4 @@ def detect_blades_vlm(video_path, checkpoint_path, config_name, device, client=N
     finally:
         cap.release()
 
-    proposals.sort(key=lambda p: p.elongation, reverse=True)
-    return proposals
+    return _dedupe_by_mask_iou(proposals)

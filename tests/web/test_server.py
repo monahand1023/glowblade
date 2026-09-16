@@ -112,6 +112,18 @@ def test_points_rejected_with_out_of_range_intensity(client, tiny_video_bytes, i
     assert resp.status_code == 400
 
 
+def test_points_rejected_with_invalid_source(client, tiny_video_bytes):
+    upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
+    job_id = upload_resp.json()["job_id"]
+
+    resp = client.post(
+        f"/api/jobs/{job_id}/points",
+        json={"sabers": [{"points": [[10, 10, 1]], "source": "\x1b[31minjected\x1b[0m"}]},
+    )
+
+    assert resp.status_code == 400
+
+
 def test_points_rejected_when_sam2_checkpoint_missing(client, tiny_video_bytes, tmp_path):
     upload_resp = client.post("/api/upload", files={"file": ("clip.mp4", tiny_video_bytes, "video/mp4")})
     job_id = upload_resp.json()["job_id"]

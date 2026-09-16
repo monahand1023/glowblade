@@ -166,7 +166,16 @@ def run_pipeline(
     # needs beyond its masks/motion.npz to be re-renderable.
     job_meta.write_job_meta(
         job_dir, source_video=input_video,
-        prompts=[{"points": points, "labels": labels, "prompt_frame": prompt_frame}],
+        prompts=[{
+            "points": points, "labels": labels, "prompt_frame": prompt_frame,
+            # The CLI's `run` command always goes through an interactive
+            # accept-or-override flow, even with --auto -- it has no way to
+            # tell whether the user pressed Enter to accept an auto-detected
+            # proposal verbatim or clicked their own point instead. Recording
+            # "motion" unconditionally would be actively wrong for the
+            # override case, so this says "unrecorded" instead of guessing.
+            "source": "unrecorded",
+        }],
     )
     if progress_cb:
         progress_cb("extract", 100, f"{n_frames} frames at {fps:.2f} fps")

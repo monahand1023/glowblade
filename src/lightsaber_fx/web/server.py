@@ -24,6 +24,7 @@ from .jobs import JobManager
 STATIC_DIR = Path(__file__).parent / "static"
 JOB_ID_RE = re.compile(r"[0-9a-zA-Z_-]{1,64}")
 VALID_VOICES = ("neutral", "jedi", "sith")
+VALID_SOURCES = ("manual", "vlm", "motion")
 
 app = FastAPI()
 manager = JobManager()
@@ -329,6 +330,9 @@ def _parse_saber_specs(body: dict):
         prompt_frame = int(saber.get("prompt_frame", 0))
         if prompt_frame < 0:
             raise HTTPException(status_code=400, detail=f"saber {i}: prompt_frame must not be negative")
+        source = saber.get("source", "manual")
+        if source not in VALID_SOURCES:
+            raise HTTPException(status_code=400, detail=f"saber {i}: source must be one of {', '.join(VALID_SOURCES)}")
         parsed.append({
             "points": [[p[0], p[1]] for p in points_and_labels],
             "labels": [p[2] for p in points_and_labels],
@@ -336,7 +340,7 @@ def _parse_saber_specs(body: dict):
             "intensity": intensity,
             "voice": voice,
             "prompt_frame": prompt_frame,
-            "source": saber.get("source", "manual"),
+            "source": source,
         })
 
     # Caught here as well as in track_objects so a bad request fails as a

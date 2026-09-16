@@ -203,6 +203,12 @@ def test_run_pipeline_writes_job_meta_so_the_job_is_later_rerenderable(tmp_path,
     assert meta is not None
     import os
     assert meta["source_video"] == os.path.abspath(str(tiny_video_path))
+    # run_pipeline (the CLI's single-object path) has no way of knowing
+    # whether the user accepted an auto-detected proposal verbatim or
+    # clicked their own override -- see cli.py's `run` command -- so it
+    # must not guess "motion" or default to the misleading "manual". See
+    # the vision-assisted-detection fix brief, item 6.
+    assert meta["prompts"][0]["source"] == "unrecorded"
 
     info = job_meta.describe_job(str(job_dir))
     assert info.rerenderable is True, info.reason

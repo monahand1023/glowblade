@@ -22,7 +22,11 @@ Two ways to use it:
 - **A command line.** `lightsaber-fx run clip.mp4`, press Enter to accept what
   it found in a popup window, and the rest runs unattended.
 
-Everything runs locally on your machine. Nothing is uploaded anywhere.
+Runs locally on your machine by default. If you set a `GEMINI_API_KEY` (or
+`GOOGLE_API_KEY`) environment variable, one video frame per upload is sent to
+Google's Gemini API to automatically find multiple swung objects at once;
+without a key, detection falls back to the fully local motion-based search
+and nothing leaves your machine.
 
 ---
 
@@ -35,6 +39,7 @@ Everything runs locally on your machine. Nothing is uploaded anywhere.
 | **git + curl** | Required, on your `PATH`. `lightsaber-fx setup` uses them to fetch SAM2 and its model. |
 | **Disk** | ~400 MB for SAM2 and its model, plus a few GB per render for intermediates (see [Disk usage](#disk-usage)). |
 | **GPU** | Optional but strongly recommended. Apple Silicon (MPS) and NVIDIA (CUDA) are both used automatically; CPU-only works but is *much* slower. |
+| **`GEMINI_API_KEY`** (or `GOOGLE_API_KEY`) | Optional. When set, detection asks [Gemini](https://ai.google.dev/) (via the `google-genai` package, installed automatically) to find every swung object in one frame, so multiple objects can be detected and tracked at once. Without it, detection falls back to the fully local, motion-based search and nothing leaves your machine — only one object is found per clip in that mode. |
 
 Installing ffmpeg:
 
