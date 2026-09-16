@@ -114,6 +114,38 @@ def test_fit_blade_width_uses_median_not_max_extent():
     assert geo.width < 10.0
 
 
+def test_fit_blade_ignores_a_disconnected_speck_far_from_the_real_blade():
+    # Reproduces a real failure seen on fencing footage: SAM2's per-frame
+    # video-tracking mask for one object was mostly a clean blade, but on
+    # several frames also contained a handful of stray pixels tens to
+    # hundreds of pixels away (misclassified background, in that footage a
+    # fencer's body cord lying on the floor). A single far-away pixel has
+    # outsized leverage on PCA -- it doubled the fitted length and grossly
+    # skewed the axis, even though it was under 0.1% of the mask's area.
+    mask = np.zeros((60, 200), dtype=bool)
+    mask[27:33, 10:90] = True  # the real blade: length 79, centered around y=30
+    mask[5, 190] = True  # one disconnected pixel, 100+ px away
+
+    geo = fit_blade(mask)
+
+    assert geo.length == pytest.approx(79.0, abs=1.0)
+    assert abs(geo.axis[1]) < 0.05  # still essentially horizontal, not pulled toward the speck
+
+
+def test_fit_blade_keeps_the_largest_of_several_disconnected_components():
+    # Same failure, worse: multiple stray blobs, one larger than a single
+    # pixel. The real blade (a 6x80 = 480px rectangle) must still win over
+    # a 20px speck.
+    mask = np.zeros((60, 200), dtype=bool)
+    mask[27:33, 10:90] = True  # real blade, 480px
+    mask[45:50, 150:154] = True  # stray blob, 20px, disconnected
+
+    geo = fit_blade(mask)
+
+    assert geo.length == pytest.approx(79.0, abs=1.0)
+    assert geo.centroid[0] < 100  # centered on the real blade, not pulled toward the blob
+
+
 # ---------------------------------------------------------------------------
 # classify_tip_by_taper -- the disambiguation heuristic, tested in isolation
 # ---------------------------------------------------------------------------

@@ -2,10 +2,11 @@
 pipeline stage that turns a job's tracked masks into a ``motion.npz``
 artifact.
 
-Pure numpy, no cv2/torch dependency, so it is cheap to unit-test in
-isolation from tracking and rendering. ``compute_motion`` runs as its own
-stage between tracking and rendering (see ``runner.py``) so both later
-phases can *read* it:
+Pure numpy (plus scipy.ndimage for connected-component labeling), no
+cv2/torch dependency, so it is cheap to unit-test in isolation from
+tracking and rendering. ``compute_motion`` runs as its own stage between
+tracking and rendering (see ``runner.py``) so both later phases can *read*
+it:
 
 - the visual phase rebuilds the blade as a capsule along ``axis`` between
   ``hilt`` and ``tip`` instead of tracing the raw mask silhouette, and uses
@@ -18,6 +19,7 @@ import os
 from typing import NamedTuple
 
 import numpy as np
+from scipy import ndimage
 
 
 class BladeGeometry(NamedTuple):
@@ -110,19 +112,49 @@ def _median_perpendicular_extent(proj, perp, n_bins=20):
     return float(np.median(extents))
 
 
+def _largest_component(mask):
+    """`mask`, reduced to its largest 8-connected blob -- dropping any
+    smaller, disconnected ones.
+
+    Measured on real footage: SAM2's per-frame video-tracking mask is
+    usually one clean blob, but on a noisy frame (fast motion, an
+    unrelated object nearby) it can include a second, disconnected chunk
+    of foreground -- as little as a single stray pixel, in one case a
+    fencer's body cord picked up 100+ px from the actual blade. That
+    single far-away pixel doubled `fit_blade`'s reported length: PCA's
+    second moment gives outsized leverage to points far from the
+    centroid, so a speck under 0.1% of the mask's area can dominate the
+    fitted axis. `detect.py` already treats a shattered, many-component
+    mask as a sign of a bad segmentation at proposal time (see
+    `_speckle_count`); this is the same principle applied per-frame,
+    right before the geometry that `render_glow`'s `blade_extend`
+    extrapolates from.
+    """
+    labeled, n = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+    if n <= 1:
+        return mask
+    sizes = ndimage.sum(mask, labeled, index=range(1, n + 1))
+    largest_label = 1 + int(np.argmax(sizes))
+    return labeled == largest_label
+
+
 def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20):
     """Fit blade geometry from a binary mask.
 
-    Method: PCA over the mask's points gives the long axis; projecting all
-    points onto that axis gives the two endpoints (min/max projection) and
-    the perpendicular spread gives the width; `classify_tip_by_taper`
-    disambiguates which endpoint is the tip.
+    Method: restrict to the mask's largest connected component (see
+    `_largest_component`), then PCA over its points gives the long axis;
+    projecting all points onto that axis gives the two endpoints (min/max
+    projection) and the perpendicular spread gives the width;
+    `classify_tip_by_taper` disambiguates which endpoint is the tip.
 
     Returns None when the mask has no foreground pixels at all.
     """
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
         return None
+
+    mask = _largest_component(mask)
+    ys, xs = np.nonzero(mask)
 
     points = np.stack([xs, ys], axis=1).astype(np.float64)
     centroid = points.mean(axis=0)
@@ -279,7 +311,7 @@ def _relabel_by_track(geometries, assignments, tip_track):
     points is called "tip" doesn't change the distance between them, the
     reported width, or the centroid."""
     relabeled = []
-    for geo, assignment in zip(geometries, assignments):
+    for geo, assignment in zip(geometries, assignments, strict=False):
         if geo is None or assignment is None:
             relabeled.append(geo)
             continue
