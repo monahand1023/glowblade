@@ -56,7 +56,10 @@ const PREVIEW_READY_HINT =
 // voice, matching the backend's per-saber styling (1-4 objects tracked
 // together, each with its own look). points is [[x, y, label], ...].
 function makeSaberSlot(color) {
-  return { points: [], color: color || "red", intensity: 0.35, voice: "neutral" };
+  return {
+    points: [], color: color || "red", intensity: 0.35, voice: "neutral",
+    detectedMask: null, source: "manual",
+  };
 }
 
 // Default colors offered to each new slot, in order -- cycles once all
@@ -77,10 +80,6 @@ let hasRendered = false; // true once this job has completed at least one render
 // and propagates both ways. Shared across every saber slot: the backend
 // requires all sabers in one job to share a prompt_frame.
 let promptFrame = 0;
-// The detected mask, drawn under saber 1's points until the user overrides
-// it. Automatic detection only ever proposes one object (out of scope:
-// finding several at once), so this only ever applies to slot 0.
-let detectOverlay = null;
 // What SAM2 would actually segment from the active slot's points right
 // now, refreshed after every click/drag and after switching slots -- the
 // safety net that would have caught a selection landing on the background
@@ -122,6 +121,7 @@ function renderRequestBody() {
       color: saber.color,
       intensity: saber.intensity,
       voice: saber.voice,
+      source: saber.source,
     })),
     blade_extend: bladeExtendInput.checked,
   };
@@ -143,7 +143,6 @@ async function uploadFile(file) {
   activeSaberIndex = 0;
   hasRendered = false;
   promptFrame = 0;
-  detectOverlay = null;
   selectionPreview = null;
   previewGeneration++;
   submitButton.hidden = false;
@@ -227,19 +226,37 @@ async function detect() {
   }
 
   promptFrame = data.frame_index;
-  sabers[0].points = data.points;
-  detectOverlay = await loadImage(data.mask_url);
+  const masks = await Promise.all(data.proposals.map((p) => loadImage(p.mask_url)));
   if (startedFor !== jobId) return;
+
+  sabers = data.proposals.map((proposal, i) => ({
+    ...makeSaberSlot(DEFAULT_SABER_COLORS[i]),
+    points: proposal.points,
+    detectedMask: masks[i],
+    source: data.source,
+  }));
+  activeSaberIndex = 0;
+
   await showFrame(data.frame_url, data.width, data.height);
-  pickerHint.textContent =
-    `Found it in frame ${data.frame_index + 1} (elongation ${data.elongation}). ` +
-    "Render it, or click the object yourself to override.";
+  syncControlsToActiveSaber();
+  renderSaberSlots();
+
+  if (data.source === "vlm") {
+    pickerHint.textContent = data.proposals.length > 1
+      ? `Found ${data.proposals.length} objects via AI. Render them, or click any object yourself to override.`
+      : "Found it via AI. Render it, or click the object yourself to override.";
+  } else {
+    pickerHint.textContent =
+      `Found 1 object via motion detection (AI detection unavailable). ` +
+      "Render it, add more sabers manually if there are others, or click to override.";
+  }
 }
 
 function redrawPoints() {
   if (frameImage) ctx.drawImage(frameImage, 0, 0);
-  if (activeSaberIndex === 0 && detectOverlay) {
-    ctx.drawImage(detectOverlay, 0, 0, canvas.width, canvas.height);
+  const activeDetectedMask = sabers[activeSaberIndex].detectedMask;
+  if (activeDetectedMask) {
+    ctx.drawImage(activeDetectedMask, 0, 0, canvas.width, canvas.height);
   } else if (selectionPreview) {
     ctx.drawImage(selectionPreview, 0, 0, canvas.width, canvas.height);
   }
@@ -323,7 +340,7 @@ function setActiveSaber(i) {
   redrawPoints();
   if (sabers[i].points.some(([, , label]) => label === 1)) {
     updateSelectionPreview();
-  } else if (!(i === 0 && detectOverlay)) {
+  } else if (!sabers[i].detectedMask) {
     pickerHint.textContent = MANUAL_HINT;
   }
 }
@@ -441,14 +458,15 @@ window.addEventListener("mouseup", (event) => {
   const end = clampedCanvasCoords(event);
   const saber = sabers[activeSaberIndex];
 
-  // The first gesture on saber 1 discards a detected proposal rather than
+  // The first gesture on a slot discards a detected proposal rather than
   // adding to it. A user correcting a detection disagrees with it, and
   // keeping it would keep whatever was wrong -- and give SAM2 two
   // contradictory prompts if the mask was on the wrong object. promptFrame
   // stays as it is: the frame on screen is still the frame these
   // coordinates refer to.
-  if (activeSaberIndex === 0 && detectOverlay) {
-    detectOverlay = null;
+  if (saber.detectedMask) {
+    saber.detectedMask = null;
+    saber.source = "manual";
     saber.points = [];
     pickerHint.textContent = MANUAL_HINT;
   }
