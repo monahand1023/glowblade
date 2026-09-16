@@ -1,7 +1,7 @@
 import numpy as np
 
-from lightsaber_fx.pipeline.blade import save_mask
-from lightsaber_fx.pipeline.reacquire import detect_merge, find_clean_reference, match_detections_to_objects
+from lightsaber_fx.pipeline.blade import load_mask, save_mask
+from lightsaber_fx.pipeline.reacquire import detect_merge, find_clean_reference, match_detections_to_objects, patch_masks
 
 
 def _mask_at(x, width=120, height=80, bar_width=6):
@@ -176,9 +176,6 @@ def test_match_detections_to_objects_handles_already_matching_order():
 
 
 def test_patch_masks_freezes_the_gap_and_copies_the_fresh_track(tmp_path):
-    from lightsaber_fx.pipeline.blade import load_mask
-    from lightsaber_fx.pipeline.reacquire import patch_masks
-
     lost = tmp_path / "lost"
     fresh = tmp_path / "fresh"
     for i in range(10):
@@ -199,9 +196,6 @@ def test_patch_masks_freezes_the_gap_and_copies_the_fresh_track(tmp_path):
 
 
 def test_patch_masks_handles_a_zero_length_gap(tmp_path):
-    from lightsaber_fx.pipeline.blade import load_mask
-    from lightsaber_fx.pipeline.reacquire import patch_masks
-
     lost = tmp_path / "lost"
     fresh = tmp_path / "fresh"
     for i in range(5):
