@@ -377,7 +377,7 @@ def test_detect_blade_rejects_a_speckled_background_mask(monkeypatch, rotating_b
         rng = np.random.default_rng(0)
         ys = rng.integers(0, HEIGHT, 60)
         xs = rng.integers(0, WIDTH, 60)
-        for y, x in zip(ys, xs):
+        for y, x in zip(ys, xs, strict=False):
             mask[y, x] = True
         return [mask]
 
@@ -527,7 +527,7 @@ def test_candidate_masks_rejects_a_speckled_mask():
     # produced (measured 2-9 for correct proposals, 41-47 for background).
     mask = _solid_bar_through((50, 50))
     rng = np.random.default_rng(1)
-    for y, x in zip(rng.integers(0, 100, 40), rng.integers(70, 100, 40)):
+    for y, x in zip(rng.integers(0, 100, 40), rng.integers(70, 100, 40), strict=False):
         mask[y, x] = True
 
     assert _candidates_for(mask, motion_area=1e9) == []

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline.blade import MIN_ELONGATION, BladeGeometry, save_motion
+from lightsaber_fx.pipeline.blade import BladeGeometry, save_motion
 from lightsaber_fx.pipeline.inspect_job import _analyze_object
 
 FRAME_WIDTH = 1000

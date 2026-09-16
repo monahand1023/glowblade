@@ -302,7 +302,7 @@ def run_pipeline_multi(
             "points": s["points"], "labels": s["labels"],
             "prompt_frame": s.get("prompt_frame", 0),
         }
-        for oid, s in zip(object_ids, sabers)
+        for oid, s in zip(object_ids, sabers, strict=False)
     ]
     track_objects(
         paths["frames_dir"], prompts, checkpoint_path, config_name, device, n_frames,

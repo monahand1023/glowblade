@@ -207,7 +207,7 @@ def _make_wide_glow(blade01, width, color_lin, scales, tau, crush, chroma_frac):
     # look of a spatially identical bloom on every channel.
     chroma = np.array([1.0 - chroma_frac, 1.0, 1.0 + chroma_frac], dtype=np.float32)
     base = max(1.0, width)
-    for scale, weight in zip(scales, weights):
+    for scale, weight in zip(scales, weights, strict=False):
         for c in range(3):
             sigma = max(0.8, base * scale * chroma[c])
             blurred = cv2.GaussianBlur(blade01, (0, 0), sigma)
@@ -238,47 +238,6 @@ def knoll_darken(plate_linear, blade_u8, dilate_px, darken_factor, feather_sigma
     feathered = np.clip(feathered, 0.0, 1.0)
     factor = 1.0 - feathered[..., None] * (1.0 - darken_factor)
     return plate_linear * factor, feathered
-
-
-# ---------------------------------------------------------------------------
-# Ignite/extinguish -- the blade grows out of the hilt at the start of its
-# tracked appearance and shrinks back into it at the end, instead of just
-# appearing/disappearing at full length. Exposed as a standalone function
-# (matching knoll_darken below) so the ramp math is directly testable
-# without rendering a whole clip.
-# ---------------------------------------------------------------------------
-
-IGNITION_RAMP_SECONDS = 0.35
-
-
-def ignition_fraction(n, first_active, last_active, ramp_frames):
-    """Blade-length fraction (0..1) for frame `n`: ramps 0->1 over
-    `ramp_frames` after `first_active`, holds at 1 through the steady
-    middle, and ramps 1->0 over `ramp_frames` before `last_active`.
-
-    On an active window shorter than 2*ramp_frames, the rise and fall
-    overlap and the peak never reaches 1.0 -- a triangular taper rather
-    than a plateau, so a short appearance never look like it snapped to
-    full length. Returns 1.0 (no-op) when there's no active window at all
-    or no ramp to apply, so callers can pass this through unconditionally.
-    """
-    if ramp_frames <= 0 or first_active is None or last_active is None:
-        return 1.0
-    rise = (n - first_active + 1) / ramp_frames
-    fall = (last_active - n + 1) / ramp_frames
-    return max(0.0, min(1.0, rise, fall))
-
-
-def _apply_ignition(tip, hilt, frac):
-    """Lerp `tip` toward `hilt` by `frac` (1.0 = full length, 0.0 =
-    collapsed onto the hilt). A no-op when tip/hilt aren't valid geometry
-    (None or NaN) -- `_build_blade_shape` falls back to the raw mask in
-    that case exactly as it did before this existed."""
-    if tip is None or hilt is None or np.any(np.isnan(tip)) or np.any(np.isnan(hilt)):
-        return tip
-    tip = np.asarray(tip, dtype=np.float64)
-    hilt = np.asarray(hilt, dtype=np.float64)
-    return hilt + (tip - hilt) * frac
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +756,7 @@ def render_glow_multi(
             dilate_kernel=knoll_dilate_kernel,
         )
         wrap_total = np.zeros((h, w, 3), dtype=np.float32)
-        for obj_state, blade_u8 in zip(prepared, per_object_blade_u8):
+        for obj_state, blade_u8 in zip(prepared, per_object_blade_u8, strict=False):
             wrap_total += _light_wrap(
                 blade_u8, obj_state["color_lin"], wrap_dilate_kernel,
                 wrap_blur_sigma, light_wrap_strength,

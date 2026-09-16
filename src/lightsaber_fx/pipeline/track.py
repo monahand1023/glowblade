@@ -63,7 +63,7 @@ def pick_points_interactive(frame_path, proposal=None):
         disp = clone.copy()
         if not state["overridden"] and proposal is not None:
             overlay_proposal(disp, proposal_mask, proposal_points)
-        for p, l in zip(points, labels):
+        for p, l in zip(points, labels, strict=False):
             color = (0, 0, 255) if l == 1 else (255, 0, 0)
             cv2.circle(disp, tuple(p), 5, color, -1)
         cv2.imshow(window, disp)
