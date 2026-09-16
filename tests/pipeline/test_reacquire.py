@@ -1,7 +1,7 @@
 import numpy as np
 
 from lightsaber_fx.pipeline.blade import save_mask
-from lightsaber_fx.pipeline.reacquire import detect_merge
+from lightsaber_fx.pipeline.reacquire import detect_merge, find_clean_reference
 
 
 def _mask_at(x, width=120, height=80, bar_width=6):
@@ -75,3 +75,76 @@ def test_detect_merge_handles_missing_mask_gracefully(tmp_path):
     merge_start = detect_merge(str(masks_a), str(masks_b), list(range(36)))
 
     assert merge_start == 21
+
+
+def test_find_clean_reference_returns_the_frame_of_maximum_separation(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    # Object a drifts from x=100 toward object b (fixed at x=60) over 20
+    # frames -- separation shrinks every frame, so frame 0 is the true
+    # clean reference (max separation), not frame 19 (one before the
+    # "merge" at frame 20).
+    for i in range(20):
+        save_mask(str(masks_a), i, _mask_at(100 - i * 2))
+        save_mask(str(masks_b), i, _mask_at(60))
+
+    ref = find_clean_reference(
+        str(masks_a), str(masks_b), merge_start_frame=20,
+        frame_indices=list(range(20)), lookback_frames=90,
+    )
+
+    assert ref == 0
+
+
+def test_find_clean_reference_only_searches_within_the_lookback_window(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    for i in range(20):
+        save_mask(str(masks_a), i, _mask_at(100 - i * 2))
+        save_mask(str(masks_b), i, _mask_at(60))
+
+    # Lookback of only 5 frames: frame 0 (the true max) is out of range, so
+    # the best candidate within [15, 20) is frame 15 (separation 10px, vs
+    # 8/6/4/2 at frames 16-19).
+    ref = find_clean_reference(
+        str(masks_a), str(masks_b), merge_start_frame=20,
+        frame_indices=list(range(20)), lookback_frames=5,
+    )
+
+    assert ref == 15
+
+
+def test_find_clean_reference_returns_none_when_no_candidate_has_valid_geometry(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    empty = np.zeros((80, 120), dtype=bool)
+    for i in range(20):
+        save_mask(str(masks_a), i, empty)
+        save_mask(str(masks_b), i, empty)
+
+    ref = find_clean_reference(
+        str(masks_a), str(masks_b), merge_start_frame=20,
+        frame_indices=list(range(20)), lookback_frames=90,
+    )
+
+    assert ref is None
+
+
+def test_find_clean_reference_skips_a_candidate_missing_a_mask_file(tmp_path):
+    masks_a = tmp_path / "a"
+    masks_b = tmp_path / "b"
+    for i in range(20):
+        save_mask(str(masks_a), i, _mask_at(100 - i * 2))
+        if i != 15:
+            save_mask(str(masks_b), i, _mask_at(60))
+        # frame 15: masks_b has no file at all -- object briefly lost
+
+    # Lookback window [15, 20): frame 15 (missing) would otherwise be the
+    # best candidate (max separation); it must be skipped, falling back to
+    # frame 16 (next-best separation).
+    ref = find_clean_reference(
+        str(masks_a), str(masks_b), merge_start_frame=20,
+        frame_indices=list(range(20)), lookback_frames=5,
+    )
+
+    assert ref == 16
