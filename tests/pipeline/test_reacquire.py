@@ -173,3 +173,46 @@ def test_match_detections_to_objects_handles_already_matching_order():
 
     assert for_a is det_a_like
     assert for_b is det_b_like
+
+
+def test_patch_masks_freezes_the_gap_and_copies_the_fresh_track(tmp_path):
+    from lightsaber_fx.pipeline.blade import load_mask
+    from lightsaber_fx.pipeline.reacquire import patch_masks
+
+    lost = tmp_path / "lost"
+    fresh = tmp_path / "fresh"
+    for i in range(10):
+        save_mask(str(lost), i, _mask_at(20))  # the object's own track before/through the merge
+    for i in range(6, 10):
+        save_mask(str(fresh), i, _mask_at(80))  # the freshly re-tracked object, frames 6-9
+
+    patch_masks(str(lost), str(fresh), frozen_frame_idx=4, merge_start_frame=5, reacquire_frame=6, n_frames=10)
+
+    # Frames 0-4: untouched (still the object's own original track).
+    for i in range(5):
+        assert np.array_equal(load_mask(str(lost), i), _mask_at(20))
+    # Frame 5 (the gap): frozen copy of frame 4's mask.
+    assert np.array_equal(load_mask(str(lost), 5), _mask_at(20))
+    # Frames 6-9: the freshly re-tracked mask.
+    for i in range(6, 10):
+        assert np.array_equal(load_mask(str(lost), i), _mask_at(80))
+
+
+def test_patch_masks_handles_a_zero_length_gap(tmp_path):
+    from lightsaber_fx.pipeline.blade import load_mask
+    from lightsaber_fx.pipeline.reacquire import patch_masks
+
+    lost = tmp_path / "lost"
+    fresh = tmp_path / "fresh"
+    for i in range(5):
+        save_mask(str(lost), i, _mask_at(20))
+    for i in range(3, 5):
+        save_mask(str(fresh), i, _mask_at(80))
+
+    # reacquire_frame == merge_start_frame: no frozen gap at all.
+    patch_masks(str(lost), str(fresh), frozen_frame_idx=2, merge_start_frame=3, reacquire_frame=3, n_frames=5)
+
+    for i in range(3):
+        assert np.array_equal(load_mask(str(lost), i), _mask_at(20))
+    for i in range(3, 5):
+        assert np.array_equal(load_mask(str(lost), i), _mask_at(80))

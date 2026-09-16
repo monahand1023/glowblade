@@ -19,7 +19,7 @@ more real footage is tested against this.
 
 import numpy as np
 
-from .blade import fit_blade, load_mask_optional
+from .blade import fit_blade, load_mask, load_mask_optional, save_mask
 from .vision_detect import _mask_iou
 
 MERGE_IOU_THRESHOLD = 0.8
@@ -118,3 +118,24 @@ def match_detections_to_objects(detections, ref_centroid_a, ref_centroid_b):
     cost_keep_order = _centroid_dist(d0["centroid"], ref_centroid_a) + _centroid_dist(d1["centroid"], ref_centroid_b)
     cost_swap = _centroid_dist(d0["centroid"], ref_centroid_b) + _centroid_dist(d1["centroid"], ref_centroid_a)
     return (d0, d1) if cost_keep_order <= cost_swap else (d1, d0)
+
+
+def patch_masks(lost_masks_dir, fresh_masks_dir, frozen_frame_idx, merge_start_frame, reacquire_frame, n_frames):
+    """Rewrites `lost_masks_dir`'s files for frames `[merge_start_frame,
+    n_frames)`:
+
+    - `[merge_start_frame, reacquire_frame)`: a frozen copy of
+      `lost_masks_dir`'s own mask at `frozen_frame_idx` (the clean
+      reference frame from `find_clean_reference`) -- the recovered
+      object holds its last known-good position through the crossing
+      itself, rather than disappearing.
+    - `[reacquire_frame, n_frames)`: copied from `fresh_masks_dir` (the
+      output of a fresh `track_object` run), frame-index-aligned.
+
+    Frames before `merge_start_frame` are untouched.
+    """
+    frozen_mask = load_mask(lost_masks_dir, frozen_frame_idx)
+    for idx in range(merge_start_frame, reacquire_frame):
+        save_mask(lost_masks_dir, idx, frozen_mask)
+    for idx in range(reacquire_frame, n_frames):
+        save_mask(lost_masks_dir, idx, load_mask(fresh_masks_dir, idx))
