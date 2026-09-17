@@ -18,6 +18,8 @@ import os
 import cv2
 import numpy as np
 
+from .blade import _find_overlap_runs, load_motion, mask_frame_indices
+
 # Half-width (px) of the square window around a known-good hilt point
 # searched for trackable corner features to seed optical flow from.
 # Confirmed sufficient on the real job (frames 290/455, both tracked
@@ -210,3 +212,48 @@ def track_hilt_through_run(
         elif bwd is not None:
             result[f] = bwd
     return result
+
+
+def compute_hilt_overrides(
+    frames_dir, masks_dir_a, masks_dir_b, motion_path_a, motion_path_b,
+    exclude_frame_ranges=(),
+):
+    """For every cross-object overlap run (see blade._find_overlap_runs)
+    not covered by `exclude_frame_ranges` (retrack_overlap_runs'
+    already-validated resolved_ranges) and with both anchors present,
+    attempt to recover each object's hilt position via
+    `track_hilt_through_run`.
+
+    Returns (hilt_overrides_a, hilt_overrides_b): two
+    {frame_number: (x, y)} dicts (one per object), merged across every
+    run processed. A run/object `track_hilt_through_run` couldn't
+    validate simply contributes nothing to that dict -- no exception, no
+    partial/unvalidated data.
+    """
+    motion_a = load_motion(motion_path_a)
+    motion_b = load_motion(motion_path_b)
+    frame_indices = mask_frame_indices(masks_dir_a)
+    runs = _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b)
+
+    overrides_a = {}
+    overrides_b = {}
+    for run_start, run_end, before, after, _max_iou in runs:
+        if before is None or after is None:
+            continue
+        start_frame, end_frame = frame_indices[run_start], frame_indices[run_end]
+        if any(start_frame <= ex_end and end_frame >= ex_start for ex_start, ex_end in exclude_frame_ranges):
+            continue
+        before_frame, after_frame = frame_indices[before], frame_indices[after]
+
+        overrides_a.update(track_hilt_through_run(
+            frames_dir, frame_indices, start_frame, end_frame,
+            before_frame, tuple(motion_a["hilt"][before]), float(motion_a["length"][before]),
+            after_frame, tuple(motion_a["hilt"][after]), float(motion_a["length"][after]),
+        ))
+        overrides_b.update(track_hilt_through_run(
+            frames_dir, frame_indices, start_frame, end_frame,
+            before_frame, tuple(motion_b["hilt"][before]), float(motion_b["length"][before]),
+            after_frame, tuple(motion_b["hilt"][after]), float(motion_b["length"][after]),
+        ))
+
+    return overrides_a, overrides_b

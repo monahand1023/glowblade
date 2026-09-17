@@ -3,11 +3,13 @@ import os
 import cv2
 import numpy as np
 
+from lightsaber_fx.pipeline.blade import BladeGeometry, save_mask, save_motion
 from lightsaber_fx.pipeline.hilt_track import (
     MIN_SEED_FEATURES,
     _seed_features,
     _track_direction,
     _track_points_sequential,
+    compute_hilt_overrides,
     track_hilt_through_run,
 )
 
@@ -185,3 +187,64 @@ def test_track_hilt_through_run_returns_empty_when_neither_direction_validates(t
     )
 
     assert overrides == {}
+
+
+def _write_overlap_run_fixture(tmp_path, true_positions, overlap_start=5, overlap_end=15, n=21):
+    """Two objects whose masks are identical (IoU 1.0, a detected run)
+    for [overlap_start, overlap_end] and disjoint everywhere else, with
+    motion.npz built from `true_positions` (a {frame_idx: (x, y)} dict,
+    e.g. from _write_translating_checker_sequence) for both objects."""
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    for i in range(n):
+        mask_a = np.zeros((20, 20), dtype=bool)
+        mask_a[0:4, 0:4] = True
+        save_mask(str(masks_a), i, mask_a)
+        mask_b = np.zeros((20, 20), dtype=bool)
+        if overlap_start <= i <= overlap_end:
+            mask_b[0:4, 0:4] = True
+        else:
+            mask_b[15:17, 15:17] = True
+        save_mask(str(masks_b), i, mask_b)
+
+    def geo(i):
+        x, y = true_positions[i]
+        return BladeGeometry(centroid=(x, y), axis=(1.0, 0.0), tip=(x + 50.0, y), hilt=(x, y),
+                              length=50.0, width=5.0, angle=0.0)
+
+    save_motion(str(motion_a), [geo(i) for i in range(n)])
+    save_motion(str(motion_b), [geo(i) for i in range(n)])
+    return masks_a, masks_b, motion_a, motion_b
+
+
+def test_compute_hilt_overrides_returns_tracked_positions_for_an_unresolved_run(tmp_path):
+    frames_dir = tmp_path / "frames"
+    true_positions = _write_translating_checker_sequence(
+        frames_dir, start_frame=0, end_frame=20, start_center=(80, 80), dx=1, dy=0.5,
+    )
+    masks_a, masks_b, motion_a, motion_b = _write_overlap_run_fixture(tmp_path, true_positions)
+
+    overrides_a, overrides_b = compute_hilt_overrides(
+        str(frames_dir), str(masks_a), str(masks_b), str(motion_a), str(motion_b),
+    )
+
+    # the run is frames 5-15 (mask overlap); frames 0-4/16-20 are anchors
+    # or clean, untouched.
+    assert set(overrides_a.keys()) == set(range(5, 16))
+    assert set(overrides_b.keys()) == set(range(5, 16))
+
+
+def test_compute_hilt_overrides_skips_excluded_ranges(tmp_path):
+    frames_dir = tmp_path / "frames"
+    true_positions = _write_translating_checker_sequence(
+        frames_dir, start_frame=0, end_frame=20, start_center=(80, 80), dx=1, dy=0.5,
+    )
+    masks_a, masks_b, motion_a, motion_b = _write_overlap_run_fixture(tmp_path, true_positions)
+
+    overrides_a, overrides_b = compute_hilt_overrides(
+        str(frames_dir), str(masks_a), str(masks_b), str(motion_a), str(motion_b),
+        exclude_frame_ranges=[(5, 15)],
+    )
+
+    assert overrides_a == {}
+    assert overrides_b == {}
