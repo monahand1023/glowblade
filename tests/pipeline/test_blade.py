@@ -1515,10 +1515,19 @@ def test_suppress_overlap_bleed_skips_marginal_frames_when_picking_anchors(tmp_p
     assert result_a["length"][0] == pytest.approx(100.0)
     assert result_a["length"][4] == pytest.approx(200.0)
     assert 100.0 < result_a["length"][2] < 200.0
-    # marginal frames are below the overlap cap, so left at their own raw
-    # values -- just not trusted as anchors for frame 2's interpolation
-    assert result_a["length"][1] == pytest.approx(150.0)
-    assert result_a["length"][3] == pytest.approx(150.0)
+    # Marginal frames are below the overlap cap, so not trusted as
+    # *anchors* -- but they get corrected right along with the run
+    # itself now, not left at their own raw values. Confirmed necessary
+    # on real footage: a marginal frame's raw fit is exactly as
+    # untrustworthy as the run's own, just not quite contaminated enough
+    # to cross the (deliberately stricter) run-detection bar -- leaving
+    # it alone visibly diverged from the real blade right as contact
+    # began. This fixture's `_motion_geo` gives A and B identical
+    # centroids at every frame, so confidence (which compares the two
+    # objects' centroids) is 0 throughout, and frames 1-3 reduce to an
+    # exact straight line between the two real anchors (100 -> 200).
+    assert result_a["length"][1] == pytest.approx(125.0)
+    assert result_a["length"][3] == pytest.approx(175.0)
 
 
 def test_suppress_overlap_bleed_skips_a_run_covered_by_exclude_frame_ranges(tmp_path):

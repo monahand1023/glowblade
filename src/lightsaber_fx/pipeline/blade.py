@@ -756,8 +756,16 @@ def _smooth_run_field(raw, weights, all_times, before_value, after_value,
     `weights` is nonzero, the solution bends toward `raw` there,
     proportional to how much that frame's mask overlap allows it to be
     trusted.
+
+    A NaN entry in `raw` (a frame the tracker lost the object on
+    entirely) is treated as if it were 0 there -- safe *only* because
+    its own `weights` entry must independently be 0 too (a lost frame
+    has no real position to be confident about); relying on that alone
+    would fail on `0 * nan = nan`, silently propagating through the
+    solve and returning an all-NaN result for every frame in the run,
+    not just the missing one.
     """
-    raw = np.asarray(raw, dtype=np.float64)
+    raw = np.nan_to_num(np.asarray(raw, dtype=np.float64), nan=0.0)
     weights = np.asarray(weights, dtype=np.float64)
     n_interior = len(raw)
     curvature = _curvature_matrix(all_times)
@@ -796,6 +804,13 @@ def _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_le
     Two coincident raw fits (distance ~0, both objects visibly on the
     same blade) get 0 confidence regardless of what the mask pixels say;
     two fits a full blade-length or more apart get full confidence.
+
+    A frame either object's tracker lost entirely (a NaN centroid, e.g.
+    a marginal frame just outside the detected run -- see
+    `suppress_overlap_bleed`) gets 0 confidence, not NaN: there's no
+    real position to measure separation from, and an unhandled NaN here
+    would silently propagate through `_smooth_run_field`'s solve and
+    corrupt the whole run, not just that one frame.
     """
     n = run_end - run_start + 1
     if reference_length <= 0:
@@ -803,7 +818,7 @@ def _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_le
     centroid_a = motion_a["centroid"][run_start:run_end + 1]
     centroid_b = motion_b["centroid"][run_start:run_end + 1]
     separation = np.linalg.norm(centroid_a - centroid_b, axis=1)
-    return np.clip(separation / reference_length, 0.0, 1.0)
+    return np.nan_to_num(np.clip(separation / reference_length, 0.0, 1.0), nan=0.0)
 
 
 def _tip_confidence_weights(motion_a, motion_b, run_start, run_end, frame_indices,
@@ -833,7 +848,11 @@ def _tip_confidence_weights(motion_a, motion_b, run_start, run_end, frame_indice
     Frames missing an override for either object get 0 confidence -- no
     trustworthy signal available, so tip-smoothing there falls back to
     the same anchor-pinned curve it already would without this function
-    (see `_smooth_run_field`'s zero-confidence guarantee).
+    (see `_smooth_run_field`'s zero-confidence guarantee). A frame with
+    a validated hilt override but a NaN raw `tip` (the tracker lost the
+    object that frame) also gets 0, not NaN -- an unhandled NaN here
+    would silently propagate through `_smooth_run_field`'s solve and
+    corrupt the whole run, not just that one frame.
 
     Returns `(weights_a, weights_b)`.
     """
@@ -849,6 +868,8 @@ def _tip_confidence_weights(motion_a, motion_b, run_start, run_end, frame_indice
         hilt_a, hilt_b = hilt_overrides_a[frame_num], hilt_overrides_b[frame_num]
         raw_tip_a = motion_a["tip"][run_start + offset]
         raw_tip_b = motion_b["tip"][run_start + offset]
+        if np.isnan(raw_tip_a).any() or np.isnan(raw_tip_b).any():
+            continue
         weights_a[offset] = np.clip(
             (_centroid_dist(raw_tip_a, hilt_b) - _centroid_dist(raw_tip_a, hilt_a)) / reference_length, 0.0, 1.0,
         )
@@ -1074,9 +1095,22 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     """Patch two already-written motion.npz files in place: for every run of
     consecutive frames where the two tracked objects' raw masks overlap
     past `iou_threshold` (see `_find_overlap_runs`), replace *both*
-    objects' fitted geometry for that run rather than trusting a per-frame
-    fit_blade result computed from a mask that may have bled into the
-    other object's blade.
+    objects' fitted geometry -- not just for the run itself, but for
+    every frame strictly between its two anchors -- rather than trusting
+    a per-frame fit_blade result computed from a mask that may have bled
+    into the other object's blade.
+
+    The correction deliberately reaches past the narrower [run_start,
+    run_end] IoU-overlap span to cover the whole [before+1, after-1]
+    gap: confirmed on real footage, a frame just below the overlap
+    threshold (too contaminated to trust as an *anchor*, see
+    `CROSS_OBJECT_ANCHOR_IOU_FRAC`) but not yet part of the detected run
+    is not any more trustworthy left on its own -- IoU climbs gradually
+    into a real overlap, so a frame at 0.087 (just under the 0.1 run
+    threshold) can already be as contaminated as one at 0.15. Left
+    uncorrected, that frame's own raw fit visibly diverged from the real
+    blade right at the moment contact began -- exactly where a viewer's
+    eye is drawn.
 
     Prefers to *smooth* a trajectory between the last good frame before the
     run and the first good frame after it, rather than freezing at a
@@ -1161,7 +1195,21 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
 
     n_held = 0
     for run_start, run_end, before, after, max_iou in runs:
-        start_frame, end_frame = frame_indices[run_start], frame_indices[run_end]
+        if before is not None and after is not None:
+            # Correct every frame strictly between the two anchors, not
+            # just the narrower [run_start, run_end] IoU-overlap span --
+            # confirmed on real footage, a frame just below the overlap
+            # threshold (too contaminated to trust as an anchor, see
+            # CROSS_OBJECT_ANCHOR_IOU_FRAC) but not yet part of the
+            # detected run was left with its own uncorrected raw fit,
+            # visibly diverging from the real blade right as contact
+            # began (measured: IoU 0.087 at that frame, just under the
+            # 0.1 run threshold, already well past the 0.02 anchor bar).
+            correct_start, correct_end = before + 1, after - 1
+        else:
+            correct_start, correct_end = run_start, run_end
+
+        start_frame, end_frame = frame_indices[correct_start], frame_indices[correct_end]
         if any(start_frame <= ex_end and end_frame >= ex_start for ex_start, ex_end in exclude_frame_ranges):
             continue
 
@@ -1170,7 +1218,7 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                 motion_a["length"][before], motion_a["length"][after],
                 motion_b["length"][before], motion_b["length"][after],
             ]))
-            weights = _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_length)
+            weights = _run_confidence_weights(motion_a, motion_b, correct_start, correct_end, reference_length)
             # tip gets its own confidence signal (and, with it, its own
             # stronger smoothing strength -- see TIP_SMOOTHING_STRENGTH)
             # only when both objects have validated hilt positions to
@@ -1183,19 +1231,19 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
             tip_weights_a = tip_weights_b = None
             if hilt_overrides_a and hilt_overrides_b:
                 tip_weights_a, tip_weights_b = _tip_confidence_weights(
-                    motion_a, motion_b, run_start, run_end, frame_indices,
+                    motion_a, motion_b, correct_start, correct_end, frame_indices,
                     hilt_overrides_a, hilt_overrides_b, reference_length,
                 )
-            _smooth_interpolate_run(motion_a, run_start, run_end, before, after, frame_indices, weights,
+            _smooth_interpolate_run(motion_a, correct_start, correct_end, before, after, frame_indices, weights,
                                      tip_weights=tip_weights_a)
-            _smooth_interpolate_run(motion_b, run_start, run_end, before, after, frame_indices, weights,
+            _smooth_interpolate_run(motion_b, correct_start, correct_end, before, after, frame_indices, weights,
                                      tip_weights=tip_weights_b)
             if hilt_overrides_a:
-                _apply_hilt_overrides(motion_a, run_start, run_end, frame_indices, hilt_overrides_a)
+                _apply_hilt_overrides(motion_a, correct_start, correct_end, frame_indices, hilt_overrides_a)
             if hilt_overrides_b:
-                _apply_hilt_overrides(motion_b, run_start, run_end, frame_indices, hilt_overrides_b)
+                _apply_hilt_overrides(motion_b, correct_start, correct_end, frame_indices, hilt_overrides_b)
         else:
-            for j in range(run_start, run_end + 1):
+            for j in range(correct_start, correct_end + 1):
                 if before is not None:
                     _freeze_row(motion_a, j, before)
                     _freeze_row(motion_b, j, before)
@@ -1205,12 +1253,12 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                 # else: no anchor at all -- nothing better than the raw fit.
 
         if before is not None or after is not None:
-            span = run_end - run_start + 1
+            span = correct_end - correct_start + 1
             n_held += span
             logger.warning(
                 "frames %d-%d: tracked objects' masks overlapped (IoU up to %.2f, cap %.2f) -- %s "
                 "both objects' geometry%s",
-                frame_indices[run_start], frame_indices[run_end], max_iou,
+                frame_indices[correct_start], frame_indices[correct_end], max_iou,
                 iou_threshold,
                 "smoothed" if before is not None and after is not None else "held",
                 (
@@ -1230,7 +1278,7 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                     "where there is no raw signal to lean on and it falls back to the same straight "
                     "line a plain interpolation would give; worth reviewing this stretch of the "
                     "render visually.",
-                    frame_indices[run_start], frame_indices[run_end], span,
+                    frame_indices[correct_start], frame_indices[correct_end], span,
                 )
 
     if n_held:

@@ -248,3 +248,53 @@ def test_compute_hilt_overrides_skips_excluded_ranges(tmp_path):
 
     assert overrides_a == {}
     assert overrides_b == {}
+
+
+def test_compute_hilt_overrides_covers_marginal_frames_around_the_run_too(tmp_path):
+    # Real footage shows IoU climbing gradually into a real overlap
+    # rather than jumping straight from zero -- see
+    # blade.CROSS_OBJECT_ANCHOR_IOU_FRAC. Frames 3 and 7 here sit in that
+    # gap (IoU ~0.053: under the 0.1 run threshold, over the 0.02 anchor
+    # threshold), so they're neither part of the detected run (4-6) nor
+    # trusted as anchors -- track_hilt_through_run already tracks
+    # through them (its forward/backward tracking spans the whole
+    # before/after gap regardless), so their positions must be included
+    # in the result, not silently dropped.
+    frames_dir = tmp_path / "frames"
+    n = 11
+    true_positions = _write_translating_checker_sequence(
+        frames_dir, start_frame=0, end_frame=n - 1, start_center=(80, 80), dx=1, dy=0.5,
+    )
+
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    for i in range(n):
+        mask_a = np.zeros((20, 20), dtype=bool)
+        mask_a[0:10, 0:10] = True
+        save_mask(str(masks_a), i, mask_a)
+        mask_b = np.zeros((20, 20), dtype=bool)
+        if 4 <= i <= 6:
+            mask_b[0:10, 0:10] = True  # identical to A -- IoU 1.0, the detected run
+        elif i in (3, 7):
+            mask_b[0:10, 9:19] = True  # one-column overlap -- IoU ~0.053, marginal
+        else:
+            mask_b[10:20, 10:20] = True  # disjoint -- IoU 0.0, a clean anchor
+        save_mask(str(masks_b), i, mask_b)
+
+    def geo(i):
+        x, y = true_positions[i]
+        return BladeGeometry(centroid=(x, y), axis=(1.0, 0.0), tip=(x + 50.0, y), hilt=(x, y),
+                              length=50.0, width=5.0, angle=0.0)
+
+    save_motion(str(motion_a), [geo(i) for i in range(n)])
+    save_motion(str(motion_b), [geo(i) for i in range(n)])
+
+    overrides_a, overrides_b = compute_hilt_overrides(
+        str(frames_dir), str(masks_a), str(masks_b), str(motion_a), str(motion_b),
+    )
+
+    # anchors are frames 2 and 8 (the nearest IoU-0.0 frames); every
+    # frame strictly between them (3-7) must be covered, not just the
+    # narrower detected run (4-6).
+    assert set(overrides_a.keys()) == set(range(3, 8))
+    assert set(overrides_b.keys()) == set(range(3, 8))

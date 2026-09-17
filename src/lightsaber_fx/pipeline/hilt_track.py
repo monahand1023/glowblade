@@ -240,7 +240,17 @@ def compute_hilt_overrides(
     for run_start, run_end, before, after, _max_iou in runs:
         if before is None or after is None:
             continue
-        start_frame, end_frame = frame_indices[run_start], frame_indices[run_end]
+        # Every frame strictly between the two anchors, not just the
+        # narrower [run_start, run_end] IoU-overlap span -- confirmed on
+        # real footage, a frame just below the overlap threshold (too
+        # contaminated to trust as an anchor, see blade's
+        # CROSS_OBJECT_ANCHOR_IOU_FRAC) but not yet part of the detected
+        # run was left with its own uncorrected raw fit, visibly
+        # diverging from the real blade right as contact began.
+        # track_hilt_through_run already tracks this whole span
+        # internally (forward/backward between the anchors) regardless;
+        # this just stops throwing away the marginal frames' results.
+        start_frame, end_frame = frame_indices[before + 1], frame_indices[after - 1]
         if any(start_frame <= ex_end and end_frame >= ex_start for ex_start, ex_end in exclude_frame_ranges):
             continue
         before_frame, after_frame = frame_indices[before], frame_indices[after]
