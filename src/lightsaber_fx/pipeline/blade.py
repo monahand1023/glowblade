@@ -857,9 +857,33 @@ def _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b,
 LONG_INTERPOLATION_SPAN_FRAMES = 90
 
 
+def _apply_hilt_overrides(motion, run_start, run_end, frame_indices, hilt_overrides):
+    """For every frame in [run_start, run_end] with a validated entry in
+    `hilt_overrides` ({frame number: (x, y)}, e.g. from
+    `hilt_track.compute_hilt_overrides`), replace `motion`'s `hilt` row
+    with it and re-derive `axis`/`length`/`angle` from the
+    (already-smoothed) `tip` and the new `hilt` -- the same
+    re-derive-from-tip-and-hilt pattern `_smooth_interpolate_run` already
+    uses. `centroid`/`width` are left untouched -- hilt-tracking only has
+    evidence about the hand's position, not the blade's overall shape.
+    """
+    for j in range(run_start, run_end + 1):
+        frame_num = frame_indices[j]
+        if frame_num not in hilt_overrides:
+            continue
+        motion["hilt"][j] = hilt_overrides[frame_num]
+        axis_vec = motion["tip"][j] - motion["hilt"][j]
+        norm = np.linalg.norm(axis_vec)
+        motion["length"][j] = norm
+        if norm > 0:
+            motion["axis"][j] = axis_vec / norm
+            motion["angle"][j] = np.arctan2(axis_vec[1], axis_vec[0])
+
+
 def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
                             iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
-                            anchor_iou_threshold=None, exclude_frame_ranges=()):
+                            anchor_iou_threshold=None, exclude_frame_ranges=(),
+                            hilt_overrides_a=None, hilt_overrides_b=None):
     """Patch two already-written motion.npz files in place: for every run of
     consecutive frames where the two tracked objects' raw masks overlap
     past `iou_threshold` (see `_find_overlap_runs`), replace *both*
@@ -910,6 +934,14 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     wrong, overwriting an accurate re-track with a worse interpolated
     approximation.
 
+    `hilt_overrides_a`/`hilt_overrides_b` (each an optional
+    `{frame_number: (x, y)}` dict, e.g. from
+    `hilt_track.compute_hilt_overrides`) replace a smoothed run's `hilt`
+    with a validated, independently-tracked position for whichever
+    frames are present -- see `_apply_hilt_overrides`. `centroid`/`width`
+    are left as the smoother produced them; only `hilt` (and
+    `axis`/`length`/`angle`, re-derived from it) are affected.
+
     A smoothed run longer than `LONG_INTERPOLATION_SPAN_FRAMES` gets a
     second, more detailed WARNING beyond the routine per-run one --
     confirmed on real footage, a run this long can still spend most of its
@@ -941,6 +973,10 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
             weights = _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_length)
             _smooth_interpolate_run(motion_a, run_start, run_end, before, after, frame_indices, weights)
             _smooth_interpolate_run(motion_b, run_start, run_end, before, after, frame_indices, weights)
+            if hilt_overrides_a:
+                _apply_hilt_overrides(motion_a, run_start, run_end, frame_indices, hilt_overrides_a)
+            if hilt_overrides_b:
+                _apply_hilt_overrides(motion_b, run_start, run_end, frame_indices, hilt_overrides_b)
         else:
             for j in range(run_start, run_end + 1):
                 if before is not None:

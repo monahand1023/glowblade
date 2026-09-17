@@ -1016,6 +1016,75 @@ def test_suppress_overlap_bleed_bends_toward_raw_data_when_raw_fits_are_well_sep
     assert result_b["length"][3] > 100.3
 
 
+def test_suppress_overlap_bleed_uses_a_hilt_override_when_provided(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 7
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2, 3, 4, 5})
+    _write_lengths(motion_a, [100] * n)
+    _write_lengths(motion_b, [100, 120, 150, 500, 150, 120, 100])
+
+    # A hilt position far from anything the smoother alone would produce
+    # at frame 3, to make the override's effect unambiguous.
+    suppress_overlap_bleed(
+        str(motion_a), str(masks_a), str(motion_b), str(masks_b),
+        hilt_overrides_b={3: (9000.0, -9000.0)},
+    )
+
+    result_b = load_motion(str(motion_b))
+    assert result_b["hilt"][3] == pytest.approx([9000.0, -9000.0])
+    # axis/length/angle re-derived from the (smoothed) tip and the new hilt
+    tip = result_b["tip"][3]
+    expected_length = float(np.hypot(tip[0] - 9000.0, tip[1] - (-9000.0)))
+    assert result_b["length"][3] == pytest.approx(expected_length)
+    # frames without an override in the dict are unaffected by it
+    assert result_b["hilt"][1] != pytest.approx([9000.0, -9000.0])
+
+
+def test_suppress_overlap_bleed_leaves_centroid_and_width_untouched_by_a_hilt_override(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 7
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2, 3, 4, 5})
+    _write_lengths(motion_a, [100] * n)
+    _write_lengths(motion_b, [100, 120, 150, 500, 150, 120, 100])
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+    baseline = load_motion(str(motion_b))
+
+    _write_lengths(motion_b, [100, 120, 150, 500, 150, 120, 100])  # reset (suppress_overlap_bleed patches in place)
+    suppress_overlap_bleed(
+        str(motion_a), str(masks_a), str(motion_b), str(masks_b),
+        hilt_overrides_b={3: (9000.0, -9000.0)},
+    )
+    overridden = load_motion(str(motion_b))
+
+    assert overridden["centroid"][3] == pytest.approx(baseline["centroid"][3])
+    assert overridden["width"][3] == pytest.approx(baseline["width"][3])
+
+
+def test_suppress_overlap_bleed_default_hilt_overrides_behave_exactly_as_before(tmp_path):
+    # Regression guard: omitting hilt_overrides_a/b entirely must produce
+    # the same output as every pre-existing suppress_overlap_bleed test --
+    # this is a pure addition, not a behavior change by default.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600, 150])
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+    result_a = load_motion(str(motion_a))
+
+    assert result_a["length"][0] == pytest.approx(100.0)
+    assert result_a["length"][3] == pytest.approx(150.0)
+    assert 100.0 < result_a["length"][1] < result_a["length"][2] < 150.0
+
+
 def test_smooth_run_field_reduces_to_linear_interpolation_when_weights_are_zero(tmp_path):
     # The key correctness property `_smooth_run_field`'s docstring
     # promises: a run with no usable raw signal at all (every confidence
