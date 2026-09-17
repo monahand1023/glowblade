@@ -440,12 +440,12 @@ def render_glow(
     knoll_dilate_frac=1.5,
     knoll_feather_frac=0.8,
     # B1.6 trail
-    trail_decay=0.7,
+    trail_decay=0.15,
     # Ignite/extinguish
     ignition_ramp_seconds=IGNITION_RAMP_SECONDS,
     # B1.7 directional motion blur
-    motion_blur_gain=0.35,
-    motion_blur_max_len=24,
+    motion_blur_gain=0.08,
+    motion_blur_max_len=6,
     # B1.8 chromatic bloom + flicker
     chromatic_bloom_frac=0.10,
     flicker_strength=0.04,
@@ -616,10 +616,10 @@ def render_glow_multi(
     knoll_darken_factor=0.7,
     knoll_dilate_frac=1.5,
     knoll_feather_frac=0.8,
-    trail_decay=0.7,
+    trail_decay=0.15,
     ignition_ramp_seconds=IGNITION_RAMP_SECONDS,
-    motion_blur_gain=0.35,
-    motion_blur_max_len=24,
+    motion_blur_gain=0.08,
+    motion_blur_max_len=6,
     chromatic_bloom_frac=0.10,
     flicker_strength=0.04,
     rng_seed=12345,

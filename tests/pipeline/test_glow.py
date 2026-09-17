@@ -95,14 +95,18 @@ def _load_png(output_frames_dir, idx):
 
 # Golden checksums pinning render_glow's output on the characterization clip
 # (6 frames, extending/motion/core/colour/glow/trail all exercised). Updated
-# after Task 1 fix round to include ignition (on by default).
+# after Task 1 fix round to include ignition (on by default). Updated again
+# after lowering the motion_blur_gain/motion_blur_max_len/trail_decay
+# defaults (0.35->0.08, 24->6, 0.7->0.15) to cut the excessive blur/ghosting
+# reported on real footage -- a deliberate, reviewed default change, not a
+# refactor side effect.
 EXPECTED_CHARACTERIZATION_CHECKSUMS = [
     12474070,  # frame 0
-    12492073,  # frame 1
-    12509242,  # frame 2
-    12529970,  # frame 3
-    12550266,  # frame 4
-    12561351,  # frame 5
+    12485576,  # frame 1
+    12498112,  # frame 2
+    12501893,  # frame 3
+    12497118,  # frame 4
+    12486148,  # frame 5
 ]
 
 
