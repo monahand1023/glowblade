@@ -108,3 +108,105 @@ def _track_points_sequential(frames_dir, frame_indices, seed_points):
         prev_gray = gray
 
     return positions
+
+
+# How far (as a fraction of the *validating* anchor's own fitted blade
+# length) a direction's tracked landing position may drift from that
+# anchor's true position before the direction is declined entirely --
+# mirrors reacquire.RETRACK_MAX_DRIFT_FRAC's already-proven
+# validate-against-the-known-good-anchor philosophy, applied to a tracked
+# hilt point instead of a whole re-tracked mask. Confirmed appropriate on
+# the real job: all four directions tested (forward/backward x two
+# objects) landed 20-29px from their true anchor, comfortably inside a
+# 25-62px cap at this fraction.
+HILT_TRACK_MAX_DRIFT_FRAC = 0.3
+
+
+def _track_direction(frames_dir, all_frame_indices, start_frame, start_hilt,
+                      validate_frame, validate_hilt, validate_length):
+    """Seed at `start_frame`/`start_hilt`, track sequentially through
+    every frame between `start_frame` and `validate_frame` (inclusive),
+    and validate the landing position at `validate_frame` against the
+    known-good `validate_hilt` -- must land within
+    `HILT_TRACK_MAX_DRIFT_FRAC * validate_length` px.
+
+    Returns the full {frame_idx: (x, y)} dict (covering every frame from
+    `start_frame` to `validate_frame`) if validated, or None if seeding
+    found no usable texture, tracking was lost before reaching
+    `validate_frame`, or validation failed.
+    """
+    lo, hi = sorted((start_frame, validate_frame))
+    path = [f for f in all_frame_indices if lo <= f <= hi]
+    if start_frame == hi:
+        path = list(reversed(path))
+    # path now starts at start_frame and ends at validate_frame
+
+    first_frame = cv2.imread(_frame_path(frames_dir, start_frame))
+    if first_frame is None:
+        return None
+    first_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+    seed_points = _seed_features(first_gray, start_hilt)
+    if seed_points is None:
+        return None
+
+    positions = _track_points_sequential(frames_dir, path, seed_points)
+    if validate_frame not in positions:
+        return None  # lost tracking (or ran out of frames) before reaching the far anchor
+
+    landing = positions[validate_frame]
+    drift = float(np.hypot(landing[0] - validate_hilt[0], landing[1] - validate_hilt[1]))
+    if drift > HILT_TRACK_MAX_DRIFT_FRAC * validate_length:
+        return None
+
+    return positions
+
+
+def track_hilt_through_run(
+    frames_dir, frame_indices, run_start_frame, run_end_frame,
+    before_frame, before_hilt, before_length,
+    after_frame, after_hilt, after_length,
+):
+    """Recover per-frame hilt (x, y) positions for one tracked object
+    through [run_start_frame, run_end_frame] (inclusive) by tracking
+    forward from before_hilt (known-good, at before_frame) and backward
+    from after_hilt (known-good, at after_frame), each validated against
+    the *other* side's known-good anchor (see `_track_direction`).
+
+    Where both directions validate, they are blended by
+    `t = (frame - before_frame) / (after_frame - before_frame)`:
+    `(1 - t) * forward + t * backward` -- at t=0 (the before_frame end)
+    this is 100% the forward track, which started there and has had zero
+    distance to drift; at t=1 it's 100% the backward track, for the same
+    reason at its own end. Where only one direction validates, it alone
+    is used. Where neither validates, returns {}.
+
+    Returns {frame_number: (x, y)} for every frame in
+    [run_start_frame, run_end_frame] a validated estimate exists for.
+    """
+    run_frames = [f for f in frame_indices if run_start_frame <= f <= run_end_frame]
+    if not run_frames:
+        return {}
+
+    forward = _track_direction(
+        frames_dir, frame_indices, before_frame, before_hilt, after_frame, after_hilt, after_length,
+    )
+    backward = _track_direction(
+        frames_dir, frame_indices, after_frame, after_hilt, before_frame, before_hilt, before_length,
+    )
+
+    if forward is None and backward is None:
+        return {}
+
+    span = after_frame - before_frame
+    result = {}
+    for f in run_frames:
+        fwd = forward.get(f) if forward is not None else None
+        bwd = backward.get(f) if backward is not None else None
+        if fwd is not None and bwd is not None:
+            t = (f - before_frame) / span
+            result[f] = ((1 - t) * fwd[0] + t * bwd[0], (1 - t) * fwd[1] + t * bwd[1])
+        elif fwd is not None:
+            result[f] = fwd
+        elif bwd is not None:
+            result[f] = bwd
+    return result
