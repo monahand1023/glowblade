@@ -724,8 +724,60 @@ def _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_le
     return np.clip(separation / reference_length, 0.0, 1.0)
 
 
+def _tip_confidence_weights(motion_a, motion_b, run_start, run_end, frame_indices,
+                             hilt_overrides_a, hilt_overrides_b, reference_length):
+    """Per-frame confidence, in `[0, 1]`, for trusting each object's own
+    raw `tip` specifically -- distinct from `_run_confidence_weights`'
+    centroid-based signal, which never looks at tip at all and can stay
+    high even when tip individually bleeds onto the other tracked
+    object's hand. Confirmed on real footage as a real, not theoretical,
+    gap: on the real 293-454 contact run, both objects' raw *centroids*
+    stayed well separated throughout (so `_run_confidence_weights` gave
+    tip-smoothing reasonable confidence to lean on raw data), while
+    several frames' raw `tip` values independently landed within a few
+    px of the *other* object's real hand -- a smoothed curve pulled
+    toward that contamination produced a rendered blade stretching
+    across nearly the entire frame (measured: length more than doubled,
+    ~200px to 388px, at one such frame).
+
+    Requires a validated hilt-tracking override (see
+    `hilt_track.compute_hilt_overrides`) for *both* objects at a frame --
+    the only frames with a trustworthy reference for "whose hand is
+    this." For those frames, confidence is how much closer this object's
+    raw tip sits to its own real hilt than to the other object's,
+    relative to `reference_length`, clipped to `[0, 1]` -- the same
+    clipped-relative-distance shape `_run_confidence_weights` already
+    uses, applied to the one thing that actually matters for tip.
+    Frames missing an override for either object get 0 confidence -- no
+    trustworthy signal available, so tip-smoothing there falls back to
+    the same anchor-pinned curve it already would without this function
+    (see `_smooth_run_field`'s zero-confidence guarantee).
+
+    Returns `(weights_a, weights_b)`.
+    """
+    n = run_end - run_start + 1
+    weights_a = np.zeros(n)
+    weights_b = np.zeros(n)
+    if reference_length <= 0:
+        return weights_a, weights_b
+    for offset in range(n):
+        frame_num = frame_indices[run_start + offset]
+        if frame_num not in hilt_overrides_a or frame_num not in hilt_overrides_b:
+            continue
+        hilt_a, hilt_b = hilt_overrides_a[frame_num], hilt_overrides_b[frame_num]
+        raw_tip_a = motion_a["tip"][run_start + offset]
+        raw_tip_b = motion_b["tip"][run_start + offset]
+        weights_a[offset] = np.clip(
+            (_centroid_dist(raw_tip_a, hilt_b) - _centroid_dist(raw_tip_a, hilt_a)) / reference_length, 0.0, 1.0,
+        )
+        weights_b[offset] = np.clip(
+            (_centroid_dist(raw_tip_b, hilt_a) - _centroid_dist(raw_tip_b, hilt_b)) / reference_length, 0.0, 1.0,
+        )
+    return weights_a, weights_b
+
+
 def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_indices, weights,
-                             smoothing_strength=RUN_SMOOTHING_STRENGTH):
+                             smoothing_strength=RUN_SMOOTHING_STRENGTH, tip_weights=None):
     """Replace `motion`'s rows `run_start..run_end` (inclusive, array
     indices) with a smoothed trajectory anchored at `before`/`after`
     (also array indices): `centroid`/`hilt`/`tip`/`width` are each
@@ -735,7 +787,15 @@ def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_ind
     (axis really is the unit vector from hilt to tip, length really is
     their distance) -- rather than smoothing all seven fields
     independently, which could disagree with each other.
+
+    `tip_weights` (default `weights`) lets the `tip` field use a
+    different confidence signal than `centroid`/`hilt`/`width` -- see
+    `_tip_confidence_weights`, whose whole reason to exist is that a
+    frame can have plenty of centroid-based confidence while its tip
+    specifically has bled onto the other tracked object.
     """
+    if tip_weights is None:
+        tip_weights = weights
     all_times = [frame_indices[before], *frame_indices[run_start:run_end + 1], frame_indices[after]]
     raw = {field: motion[field][run_start:run_end + 1].copy() for field in ("centroid", "hilt", "tip", "width")}
     before_row = {field: motion[field][before] for field in ("centroid", "hilt", "tip", "width")}
@@ -743,9 +803,11 @@ def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_ind
 
     smoothed = {}
     for field in ("centroid", "hilt", "tip"):
+        field_weights = tip_weights if field == "tip" else weights
         smoothed[field] = np.stack([
             _smooth_run_field(
-                raw[field][:, c], weights, all_times, before_row[field][c], after_row[field][c], smoothing_strength,
+                raw[field][:, c], field_weights, all_times, before_row[field][c], after_row[field][c],
+                smoothing_strength,
             )
             for c in (0, 1)
         ], axis=1)
@@ -888,59 +950,6 @@ def _apply_hilt_overrides(motion, run_start, run_end, frame_indices, hilt_overri
         _rederive_from_tip_hilt(motion, j)
 
 
-def _tip_is_plausible(raw_tip, own_hilt, other_hilt):
-    """True if `raw_tip` sits closer to `own_hilt` than to `other_hilt`.
-
-    Confirmed on real footage as the actual shape of a specific failure
-    the confidence-weighted smoother's own centroid-based confidence
-    signal (see `_run_confidence_weights`) does not catch: on a real
-    162-frame contact run, both objects' *centroids* stayed well
-    separated throughout (giving the smoother's tip-smoothing reasonably
-    high confidence to trust raw per-frame data), yet each object's
-    individually-fitted raw `tip` had, at some frames, bled almost
-    exactly onto the *other* tracked object's hand -- producing a
-    rendered blade stretching across nearly the entire frame (measured:
-    length more than doubled, from a normal ~200px to 388-423px,
-    reaching to within a few px of the opposite fencer's real hilt).
-    Centroid separation cannot catch this because it never looks at tip
-    at all; this checks the one thing that actually matters for tip
-    specifically -- whose hand does it actually sit closer to.
-    """
-    dist_own = _centroid_dist(raw_tip, own_hilt)
-    dist_other = _centroid_dist(raw_tip, other_hilt)
-    return dist_own < dist_other
-
-
-def _apply_tip_sanity_check(motion_a, motion_b, run_start, run_end, frame_indices,
-                             raw_tip_a, raw_tip_b, hilt_overrides_a, hilt_overrides_b):
-    """For every frame in [run_start, run_end] where *both* objects have a
-    validated hilt-tracking override (the only frames this has a trusted
-    reference for either object's real hand position), replace the
-    smoothed `tip` with the frame's own raw (pre-smoothing) `tip` when
-    `_tip_is_plausible` confirms it belongs to this object rather than
-    having bled onto the other one. `raw_tip_a`/`raw_tip_b` are each the
-    run's raw tip values captured *before* `_smooth_interpolate_run`
-    overwrote them, indexed by the same 0-based offset as
-    `frame_indices[run_start:run_end + 1]`.
-
-    A frame that fails the check (or is missing an override for either
-    object) keeps whatever `_smooth_interpolate_run` already produced --
-    a curvature-smoothed, anchor-pinned tip is a safer fallback than a
-    raw tip this check cannot confirm.
-    """
-    for offset, frame_num in enumerate(frame_indices[run_start:run_end + 1]):
-        if frame_num not in hilt_overrides_a or frame_num not in hilt_overrides_b:
-            continue
-        j = run_start + offset
-        hilt_a, hilt_b = hilt_overrides_a[frame_num], hilt_overrides_b[frame_num]
-        if _tip_is_plausible(raw_tip_a[offset], hilt_a, hilt_b):
-            motion_a["tip"][j] = raw_tip_a[offset]
-            _rederive_from_tip_hilt(motion_a, j)
-        if _tip_is_plausible(raw_tip_b[offset], hilt_b, hilt_a):
-            motion_b["tip"][j] = raw_tip_b[offset]
-            _rederive_from_tip_hilt(motion_b, j)
-
-
 def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
                             iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
                             anchor_iou_threshold=None, exclude_frame_ranges=(),
@@ -1003,18 +1012,18 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     are left as the smoother produced them; only `hilt` (and
     `axis`/`length`/`angle`, re-derived from it) are affected.
 
-    When *both* hilt overrides are given, every frame with a validated
-    override for both objects also gets a tip sanity check (see
-    `_apply_tip_sanity_check`/`_tip_is_plausible`): confirmed on real
-    footage, the smoother's own confidence signal (raw centroid
-    separation) can stay high while one object's individually-fitted raw
-    `tip` has still bled almost exactly onto the *other* object's hand --
-    a blade stretching across nearly the whole frame, since centroid
-    separation never looks at tip at all. Once both objects' real hand
-    positions are known (from hilt tracking), a frame's raw tip is
-    trusted over the smoothed one only when it sits closer to its own
-    object's hilt than to the other object's -- otherwise the smoothed
-    tip (a safer, if imperfect, fallback) is left alone.
+    When *both* hilt overrides are given, `tip` is smoothed using its own
+    confidence signal (see `_tip_confidence_weights`) instead of the
+    shared centroid-based `weights`: confirmed on real footage, raw
+    centroid separation can stay high (so the shared signal alone gives
+    tip-smoothing real confidence to lean on raw data) while one object's
+    individually-fitted raw `tip` has still bled almost exactly onto the
+    *other* object's hand -- a blade stretching across nearly the whole
+    frame, since centroid separation never looks at tip at all. Once both
+    objects' real hand positions are known (from hilt tracking),
+    tip-smoothing's confidence at a frame is instead how much closer that
+    frame's raw tip sits to its own object's hilt than to the other
+    object's.
 
     A smoothed run longer than `LONG_INTERPOLATION_SPAN_FRAMES` gets a
     second, more detailed WARNING beyond the routine per-run one --
@@ -1045,22 +1054,25 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                 motion_b["length"][before], motion_b["length"][after],
             ]))
             weights = _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_length)
-            # Captured before smoothing overwrites tip in place -- needed
-            # by _apply_tip_sanity_check below, which needs each frame's
-            # own raw (pre-smoothing) tip to check against.
-            raw_tip_a = motion_a["tip"][run_start:run_end + 1].copy()
-            raw_tip_b = motion_b["tip"][run_start:run_end + 1].copy()
-            _smooth_interpolate_run(motion_a, run_start, run_end, before, after, frame_indices, weights)
-            _smooth_interpolate_run(motion_b, run_start, run_end, before, after, frame_indices, weights)
+            # tip gets its own confidence signal when both objects have
+            # validated hilt positions to check it against -- see
+            # _tip_confidence_weights for why centroid-based `weights`
+            # alone isn't enough. Computed before _smooth_interpolate_run
+            # overwrites raw tip in place.
+            tip_weights_a, tip_weights_b = weights, weights
+            if hilt_overrides_a and hilt_overrides_b:
+                tip_weights_a, tip_weights_b = _tip_confidence_weights(
+                    motion_a, motion_b, run_start, run_end, frame_indices,
+                    hilt_overrides_a, hilt_overrides_b, reference_length,
+                )
+            _smooth_interpolate_run(motion_a, run_start, run_end, before, after, frame_indices, weights,
+                                     tip_weights=tip_weights_a)
+            _smooth_interpolate_run(motion_b, run_start, run_end, before, after, frame_indices, weights,
+                                     tip_weights=tip_weights_b)
             if hilt_overrides_a:
                 _apply_hilt_overrides(motion_a, run_start, run_end, frame_indices, hilt_overrides_a)
             if hilt_overrides_b:
                 _apply_hilt_overrides(motion_b, run_start, run_end, frame_indices, hilt_overrides_b)
-            if hilt_overrides_a and hilt_overrides_b:
-                _apply_tip_sanity_check(
-                    motion_a, motion_b, run_start, run_end, frame_indices,
-                    raw_tip_a, raw_tip_b, hilt_overrides_a, hilt_overrides_b,
-                )
         else:
             for j in range(run_start, run_end + 1):
                 if before is not None:
