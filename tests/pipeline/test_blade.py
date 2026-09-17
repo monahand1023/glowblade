@@ -4,6 +4,7 @@ import pytest
 from lightsaber_fx.pipeline.blade import (
     MIN_ELONGATION,
     BladeGeometry,
+    _mask_iou,
     angular_speed,
     classify_tip_by_taper,
     compute_motion,
@@ -15,6 +16,7 @@ from lightsaber_fx.pipeline.blade import (
     mask_frame_indices,
     save_mask,
     save_motion,
+    suppress_overlap_bleed,
     tip_speed,
     wrap_axis_angle_delta,
 )
@@ -575,9 +577,11 @@ def test_compute_motion_no_frame_to_frame_tip_hilt_flips(tmp_path):
 
 def test_compute_motion_static_clip_falls_back_to_taper(tmp_path):
     # No motion at all: the two ends are genuinely indistinguishable from
-    # position alone, so compute_motion must fall back explicitly to
-    # fit_blade's own per-frame taper guess -- exactly what fit_blade
-    # reports for that mask on its own -- rather than guess randomly.
+    # position alone, so the fallback's fixed-seed relabeling must land on
+    # exactly what fit_blade's own per-frame taper guess reports for that
+    # mask -- since an identical mask every frame never flips its own
+    # taper call, "seed once, apply everywhere" and "trust each frame's
+    # own guess" are the same thing here.
     masks_dir = tmp_path / "masks"
     masks_dir.mkdir()
     static_mask = _bat_base_mask()
@@ -592,6 +596,60 @@ def test_compute_motion_static_clip_falls_back_to_taper(tmp_path):
         assert motion["tip"][i] == pytest.approx(expected.tip, abs=1e-6)
         assert motion["hilt"][i] == pytest.approx(expected.hilt, abs=1e-6)
         assert motion["axis"][i] == pytest.approx(expected.axis, abs=1e-6)
+
+
+def _translating_bar_mask(x0, canvas=(60, 300), length=150, y0=27, y1=33, wide_end=None, bump=6):
+    """A uniform-width bar at `x0`, optionally with one end's rows widened
+    by `bump` over the outer third of its length -- enough to flip
+    `classify_tip_by_taper`'s tie-break for that one frame, while a plain
+    rigid translation across frames (both ends moving by the same delta)
+    keeps path_a/path_b equal, exactly the indecisive-ratio case."""
+    mask = np.zeros(canvas, dtype=bool)
+    mask[y0:y1, x0:x0 + length] = True
+    if wide_end == "left":
+        mask[y0 - bump:y1 + bump, x0:x0 + length // 3] = True
+    elif wide_end == "right":
+        mask[y0 - bump:y1 + bump, x0 + length - length // 3:x0 + length] = True
+    return mask
+
+
+def test_compute_motion_translating_object_does_not_flip_tip_hilt_mid_clip(tmp_path):
+    # The real regression this guards, confirmed on real fencing footage:
+    # a thrust translates the whole blade with the arm rather than
+    # pivoting it about a planted hilt, so hilt and tip travel nearly
+    # equal total distances (measured ratio 1.12, well under
+    # _MIN_PATH_RATIO) -- `_decide_tip_track` correctly can't call it, but
+    # the *previous* fallback ("leave each frame's own taper guess alone")
+    # let one frame's shape-only taper flip go straight through even
+    # though the mask barely changed shape, fully swapping tip and hilt
+    # for that frame and every one after it. This bar translates rigidly
+    # (ratio exactly 1.0) with one frame's taper deliberately flipped;
+    # every frame's *labeled* tip/hilt must still land on the same
+    # physical end regardless.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = [
+        _translating_bar_mask(50),
+        _translating_bar_mask(55),
+        _translating_bar_mask(60),
+        _translating_bar_mask(65, wide_end="left"),  # taper flips here alone
+        _translating_bar_mask(70),
+        _translating_bar_mask(75),
+    ]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    # the physical left end (tracked by its x-coordinate, which only ever
+    # increases by 5px/frame under this translation) must be labeled the
+    # same way -- tip or hilt -- on every single frame
+    left_is_tip = motion["tip"][:, 0] < motion["hilt"][:, 0]
+    assert np.all(left_is_tip) or np.all(~left_is_tip)
+    # and the reported axis must never reverse direction frame to frame
+    dots = np.sum(motion["axis"][:-1] * motion["axis"][1:], axis=1)
+    assert np.all(dots > 0)
 
 
 def test_compute_motion_bat_swing_with_nan_gap_still_orients_by_motion(tmp_path):
@@ -618,6 +676,326 @@ def test_compute_motion_bat_swing_with_nan_gap_still_orients_by_motion(tmp_path)
         tip_dist = _dist(motion["tip"][i], _SWING_PIVOT)
         assert hilt_dist < 20, f"frame {i}: hilt ({hilt_dist:.1f}px) should stay near the pivot/handle"
         assert tip_dist > 200, f"frame {i}: tip ({tip_dist:.1f}px) should be out at the barrel"
+
+
+# ---------------------------------------------------------------------------
+# compute_motion -- per-frame debug logging
+# ---------------------------------------------------------------------------
+
+def _bar_mask(x_end, canvas=(48, 400), x_start=50, y_start=20, y_end=26):
+    mask = np.zeros(canvas, dtype=bool)
+    mask[y_start:y_end, x_start:x_end] = True
+    return mask
+
+
+def test_compute_motion_debug_logs_per_frame_geometry(tmp_path, caplog):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    _write_masks(masks_dir, [_bar_mask(200)])
+    motion_path = tmp_path / "motion.npz"
+
+    with caplog.at_level("DEBUG", logger="lightsaber_fx.pipeline.blade"):
+        compute_motion(str(masks_dir), str(motion_path))
+
+    assert "length=" in caplog.text
+    assert "centroid=" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _mask_iou
+# ---------------------------------------------------------------------------
+
+def test_mask_iou_identical_masks_is_one():
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:5, 2:5] = True
+    assert _mask_iou(mask, mask) == pytest.approx(1.0)
+
+
+def test_mask_iou_disjoint_masks_is_zero():
+    a = np.zeros((10, 10), dtype=bool)
+    a[0:3, 0:3] = True
+    b = np.zeros((10, 10), dtype=bool)
+    b[7:10, 7:10] = True
+    assert _mask_iou(a, b) == 0.0
+
+
+def test_mask_iou_partial_overlap_matches_expected_fraction():
+    a = np.zeros((10, 10), dtype=bool)
+    a[0:4, 0:4] = True  # 16px
+    b = np.zeros((10, 10), dtype=bool)
+    b[2:6, 2:6] = True  # 16px, overlapping a 2x2=4px corner
+    assert _mask_iou(a, b) == pytest.approx(4 / 28)
+
+
+def test_mask_iou_both_empty_is_zero():
+    a = np.zeros((10, 10), dtype=bool)
+    b = np.zeros((10, 10), dtype=bool)
+    assert _mask_iou(a, b) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# suppress_overlap_bleed -- cross-object mask-overlap guard
+#
+# Confirmed directly on real footage: an earlier version of this guard
+# compared each object's fitted length only against its own recent history
+# (a growth-percentage cap), and could not tell genuine fast foreshortening
+# (length legitimately swinging widely, no mask overlap) from actual
+# cross-object mask bleed (mask overlap present) -- see the comment above
+# CROSS_OBJECT_OVERLAP_IOU_THRESHOLD in blade.py. These tests exercise the
+# corrected, overlap-gated version: two objects' raw masks are the trigger,
+# not either object's own length history.
+#
+# A second real-footage finding after that fix landed: a run of overlapping
+# frames can span several real seconds, and a real hilt travels 150-235px
+# across one -- freezing at a single value for the whole run visibly
+# detaches the glow from the hand holding it. These tests also cover the
+# interpolation this drove: a run with a good frame on both sides gets
+# interpolated between them; a run missing one side falls back to freezing
+# at whichever side exists.
+# ---------------------------------------------------------------------------
+
+def _motion_geo(length, i=0):
+    return BladeGeometry(
+        centroid=(float(i), 0.0), axis=(1.0, 0.0),
+        tip=(float(i) + length, 0.0), hilt=(float(i), 0.0),
+        length=length, width=5.0, angle=0.0,
+    )
+
+
+def _write_lengths(path, lengths):
+    """A minimal valid motion.npz (a `None` entry becomes a NaN row, same
+    as save_motion always has) -- only `length` matters to these tests, but
+    the full field set is written so suppress_overlap_bleed's per-field
+    copy has real arrays to work with, matching what compute_motion
+    actually produces."""
+    save_motion(str(path), [
+        _motion_geo(length, i) if length is not None else None
+        for i, length in enumerate(lengths)
+    ])
+
+
+def _write_overlap_masks(masks_dir, n_frames, overlapping_frames, canvas=(20, 20)):
+    """Object A's mask sits at a fixed block; object B's mask sits on top
+    of it (full overlap, IoU 1.0) on `overlapping_frames` and far away
+    (IoU 0.0) everywhere else. The mask content is otherwise unrelated to
+    any `length` a test writes via `_write_lengths` -- suppress_overlap_bleed
+    reads masks only to compute IoU, never to refit geometry."""
+    for i in range(n_frames):
+        mask = np.zeros(canvas, dtype=bool)
+        mask[0:4, 0:4] = True if i in overlapping_frames else False
+        if i not in overlapping_frames:
+            mask[15:17, 15:17] = True
+        save_mask(str(masks_dir), i, mask)
+
+
+def _write_fixed_mask(masks_dir, n_frames, canvas=(20, 20)):
+    """Object A's own mask: a fixed block, always at the same place --
+    what "overlapping" is measured against in `_write_overlap_masks`."""
+    for i in range(n_frames):
+        mask = np.zeros(canvas, dtype=bool)
+        mask[0:4, 0:4] = True
+        save_mask(str(masks_dir), i, mask)
+
+
+def test_suppress_overlap_bleed_interpolates_a_single_frame_between_its_neighbors(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 5
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={2})
+    _write_lengths(motion_a, [100, 100, 500, 100, 100])  # frame 2: corrupted
+    _write_lengths(motion_b, [200, 200, 999, 200, 200])
+
+    n_held = suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert n_held == 1
+    result_a = load_motion(str(motion_a))
+    result_b = load_motion(str(motion_b))
+    # both neighbors are 100/200, so the single interpolated frame lands
+    # exactly there too -- this case can't tell interpolation and freezing
+    # apart on its own; see the widening-gap test below for that.
+    assert result_a["length"][2] == pytest.approx(100.0)
+    assert result_b["length"][2] == pytest.approx(200.0)
+    for i in (0, 1, 3, 4):
+        assert result_a["length"][i] == pytest.approx([100, 100, 500, 100, 100][i])
+
+
+def test_suppress_overlap_bleed_interpolates_toward_the_after_anchor_not_a_flat_hold(tmp_path):
+    # The real-footage finding: a multi-frame run must move from the
+    # "before" value toward the "after" value, not freeze at "before" for
+    # the whole run (which is what visibly detached the glow from a moving
+    # hand on real footage).
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600, 150])
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"][0] == pytest.approx(100.0)  # before anchor, untouched
+    assert result_a["length"][3] == pytest.approx(150.0)  # after anchor, untouched
+    # strictly between the two anchors and moving monotonically toward
+    # "after" -- not frozen flat at "before" (100) for both frames
+    assert 100.0 < result_a["length"][1] < result_a["length"][2] < 150.0
+
+
+def test_suppress_overlap_bleed_leaves_wide_swings_untouched_when_masks_never_overlap(tmp_path):
+    # The exact false-positive the growth-percentage version couldn't
+    # avoid: large legitimate length swings with the masks never touching.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames=set())
+    lengths = [100, 250, 90]
+    _write_lengths(motion_a, lengths)
+    _write_lengths(motion_b, [200, 220, 210])
+
+    n_held = suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert n_held == 0
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"] == pytest.approx(lengths)
+
+
+def test_suppress_overlap_bleed_freezes_at_the_after_anchor_when_the_run_starts_at_frame_zero(tmp_path):
+    # Overlap starting from frame 0: there is no pre-overlap frame to
+    # interpolate from, so this falls back to freezing at the only anchor
+    # that exists -- the first good frame once the overlap ends -- rather
+    # than trusting a raw fit computed while the masks were still bled
+    # together.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={0, 1})
+    _write_lengths(motion_a, [500, 600, 120])
+    _write_lengths(motion_b, [510, 610, 130])
+
+    n_held = suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert n_held == 2
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"] == pytest.approx([120.0, 120.0, 120.0])
+
+
+def test_suppress_overlap_bleed_freezes_at_the_before_anchor_when_the_run_never_ends(tmp_path):
+    # The mirror image: overlap that lasts through the end of the clip has
+    # no "after" anchor to interpolate toward, so it falls back to
+    # freezing at the last good frame before the run started.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600])
+    _write_lengths(motion_b, [200, 500, 600])
+
+    n_held = suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert n_held == 2
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"] == pytest.approx([100.0, 100.0, 100.0])
+
+
+def test_suppress_overlap_bleed_does_not_use_a_nan_frame_as_an_anchor(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={2})
+    _write_lengths(motion_a, [100, None, 999, 110])  # frame 1: object lost (NaN)
+    _write_lengths(motion_b, [200, 210, 999, 220])
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    # interpolated between frame 0 (100) and frame 3 (110), skipping the
+    # NaN gap at frame 1 -- not NaN itself, and not the raw corrupted 999
+    assert not np.isnan(result_a["length"][2])
+    assert 100.0 < result_a["length"][2] < 110.0
+
+
+def test_suppress_overlap_bleed_skips_marginal_frames_when_picking_anchors(tmp_path):
+    # Real footage shows IoU climbing gradually into a real overlap rather
+    # than jumping straight from zero, so a frame just under the overlap
+    # cap can still be a few frames into the same contamination -- not a
+    # genuinely clean anchor. Frames 1 and 3 here sit under the 0.1
+    # overlap cap (~0.053 IoU, a thin one-column sliver) but over the
+    # stricter 0.02 anchor cap, so the true anchors must be frames 0 and 4
+    # (IoU 0.0) instead -- not 1 and 3.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 5
+    canvas = (20, 20)
+    for i in range(n):
+        mask = np.zeros(canvas, dtype=bool)
+        mask[0:10, 0:10] = True
+        save_mask(str(masks_a), i, mask)
+
+    far = np.zeros(canvas, dtype=bool)
+    far[10:20, 10:20] = True  # disjoint from A -- IoU 0.0
+    marginal = np.zeros(canvas, dtype=bool)
+    marginal[0:10, 9:19] = True  # one-column overlap with A -- IoU ~0.053
+    overlapping = np.zeros(canvas, dtype=bool)
+    overlapping[0:10, 0:10] = True  # identical to A -- IoU 1.0
+
+    for i, mask in enumerate([far, marginal, overlapping, marginal, far]):
+        save_mask(str(masks_b), i, mask)
+
+    _write_lengths(motion_a, [100, 150, 999, 150, 200])
+    _write_lengths(motion_b, [110, 160, 999, 160, 210])
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"][0] == pytest.approx(100.0)
+    assert result_a["length"][4] == pytest.approx(200.0)
+    assert 100.0 < result_a["length"][2] < 200.0
+    # marginal frames are below the overlap cap, so left at their own raw
+    # values -- just not trusted as anchors for frame 2's interpolation
+    assert result_a["length"][1] == pytest.approx(150.0)
+    assert result_a["length"][3] == pytest.approx(150.0)
+
+
+def test_suppress_overlap_bleed_leaves_raw_values_when_no_anchor_exists_anywhere(tmp_path):
+    # The masks overlap for the entire clip -- no good frame exists on
+    # either side to interpolate from or freeze at, so there is nothing
+    # better than the raw (possibly wrong) fit to keep.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={0, 1, 2})
+    lengths = [500, 600, 700]
+    _write_lengths(motion_a, lengths)
+    _write_lengths(motion_b, [510, 610, 710])
+
+    n_held = suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert n_held == 0
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"] == pytest.approx(lengths)
+
+
+def test_suppress_overlap_bleed_logs_a_warning_for_a_held_run(tmp_path, caplog):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600, 150])
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert "overlapped" in caplog.text
+    assert "frames 1-2" in caplog.text
 
 
 # ---------------------------------------------------------------------------

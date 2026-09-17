@@ -15,7 +15,7 @@ import json
 import cv2
 import numpy as np
 
-from .blade import fit_blade
+from .blade import _mask_iou, fit_blade
 from .detect import (
     MAX_MASK_AREA_FRAC,
     MAX_SPECKLES,
@@ -140,12 +140,6 @@ def _validate_box_mask(mask, max_mask_area):
 
 
 MASK_DEDUP_IOU_THRESHOLD = 0.5
-
-
-def _mask_iou(mask_a, mask_b):
-    intersection = np.logical_and(mask_a, mask_b).sum()
-    union = np.logical_or(mask_a, mask_b).sum()
-    return intersection / union if union else 0.0
 
 
 def _dedupe_by_mask_iou(proposals):

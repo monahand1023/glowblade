@@ -24,7 +24,7 @@ import tempfile
 import cv2
 import numpy as np
 
-from .blade import fit_blade, load_mask, load_mask_optional, mask_frame_indices, save_mask
+from .blade import _mask_iou, fit_blade, load_mask, load_mask_optional, mask_frame_indices, save_mask
 from .detect import MAX_MASK_AREA_FRAC, _build_image_predictor, _points_on_axis
 from .track import track_object
 from .vision_detect import (
@@ -32,7 +32,6 @@ from .vision_detect import (
     DETECTION_SCHEMA,
     GEMINI_MODEL,
     GEMINI_TIMEOUT_MS,
-    _mask_iou,
     _parse_gemini_response,
     _validate_box_mask,
 )

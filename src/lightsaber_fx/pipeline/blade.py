@@ -15,6 +15,7 @@ it:
   of the mask centroid, which barely moves when a blade pivots in place.
 """
 
+import logging
 import os
 from typing import NamedTuple
 
@@ -282,16 +283,19 @@ def _track_endpoints(geometries):
 
 def _decide_tip_track(path_a, path_b, n_valid):
     """Return 'a' or 'b' for whichever endpoint track travelled farther,
-    or None when the motion signal isn't trustworthy enough to use --
-    the caller should fall back to the per-frame taper guess.
+    or None when the motion signal isn't trustworthy enough to say which
+    physical end is the tip -- see `_orient_by_motion`, which still uses
+    the (already continuous) `a`/`b` tracks even then.
 
-    None (fallback) covers: fewer than two valid frames to measure a path
-    from; both tracks essentially static (a genuinely static clip, where
-    the two ends are indistinguishable from position alone); or the two
-    paths too close in length to call decisively (e.g. a pure translation
-    with no rotation, where every point of a rigid object moves by the
-    same amount and travelled-distance carries no tip/hilt information at
-    all).
+    None covers: fewer than two valid frames to measure a path from; both
+    tracks essentially static (a genuinely static clip, where the two ends
+    are indistinguishable from position alone); or the two paths too close
+    in length to call decisively. That last case is not rare -- confirmed
+    on real fencing footage, a thrust translates the whole blade with the
+    arm rather than pivoting it about a planted hilt, so the hilt end can
+    legitimately travel nearly as far as the tip over a whole clip (a
+    measured 9622px vs 8568px, ratio 1.12) with no reliable "tip travels
+    farther" signal at all.
     """
     if n_valid < _MIN_VALID_FRAMES_FOR_MOTION:
         return None
@@ -348,15 +352,26 @@ def _orient_by_motion(geometries):
     since it follows PCA's arbitrary eigenvector sign) -- exactly what
     `glow.py`'s `_stabilize_tip_hilt` has been papering over downstream.
     Deciding once, globally, and applying it to every frame can't flip.
+
+    That holds even when `_decide_tip_track` can't confidently say *which*
+    end is the tip (returns None): `_track_endpoints` already built two
+    continuous, non-flipping physical tracks ("a" and "b") by
+    nearest-neighbour, entirely independent of that decision, so this
+    picks 'a' -- an arbitrary but *fixed* choice, applied via the same
+    `_relabel_by_track` the decisive case uses -- rather than leaving each
+    frame's own taper guess in place. Confirmed as a real, not
+    theoretical, gap on real footage: a tracked object's tip/hilt fully
+    swapped ends between two adjacent frames whose actual mask barely
+    changed shape, because the previous "leave it alone" fallback let
+    per-frame taper's flip straight through. A downstream consumer that
+    reads tip/hilt across multiple frames (e.g. `suppress_overlap_bleed`,
+    or `tip_speed`/`angular_speed`) has no way to know a flip happened;
+    fixing it here, once, before anything downstream ever sees the data,
+    is far more robust than expecting every consumer to defend against it
+    independently.
     """
     path_a, path_b, assignments, n_valid = _track_endpoints(geometries)
-    tip_track = _decide_tip_track(path_a, path_b, n_valid)
-    if tip_track is None:
-        # Honest fallback: no trustworthy physical signal, so leave each
-        # frame's fit_blade/taper call as-is. For a static clip the two
-        # ends of a bat-like object really are indistinguishable from
-        # shape alone -- the taper assumption is a coin flip, not a fix.
-        return geometries
+    tip_track = _decide_tip_track(path_a, path_b, n_valid) or "a"
     return _relabel_by_track(geometries, assignments, tip_track)
 
 
@@ -534,6 +549,193 @@ def elongation_stats(motion):
     return float(elongation.mean()), float((elongation < MIN_ELONGATION).sum() / valid.sum())
 
 
+def _mask_iou(mask_a, mask_b):
+    """Intersection-over-union of two boolean masks, 0.0 if both are empty.
+
+    Lives here (not `vision_detect.py`, the original home of an identical
+    function) because it's pure numpy with no cv2 dependency, same as
+    everything else in this module -- and `suppress_overlap_bleed` below
+    needs it without importing `vision_detect` (which itself imports
+    `blade`, so the reverse import would be circular). `vision_detect.py`
+    and `reacquire.py` both import this copy rather than keeping their own.
+    """
+    intersection = np.logical_and(mask_a, mask_b).sum()
+    union = np.logical_or(mask_a, mask_b).sum()
+    return intersection / union if union else 0.0
+
+
+# A different real-footage failure mode than the disconnected-speck case
+# above: when two tracked objects' blades visually touch/cross without
+# SAM2 losing their identities outright (that full, sustained, symmetric
+# merge is `reacquire.py`'s `reconcile_pair` concern), one object's
+# per-frame mask can still bleed into a *connected* extension covering
+# part of the other object's blade for a stretch of frames. fit_blade then
+# reports an honest but wrong PCA fit over that unioned shape -- there is
+# no disconnected speck for `_largest_component` to drop.
+#
+# An earlier version of this guard compared each object's fitted length
+# only against its own recent history (a growth-percentage cap). That
+# could not be made reliable: on real fencing footage a blade's own fitted
+# length legitimately swings from ~50px to ~420px within a few dozen
+# frames as it points toward and away from the camera, which looks
+# identical, from inside one object's own length history, to genuine mask
+# corruption. The signal that actually separates the two, confirmed
+# directly against real footage: the two objects' *masks* only overlap at
+# all during a genuine bleed event (IoU up to 0.61 there) and are
+# perfectly disjoint (IoU 0.0) during every one of the fast-foreshortening
+# frames the growth heuristic falsely flagged. Below this threshold, two
+# blade masks brushing past each other without actually bleeding measured
+# at most 0.024 IoU on the same clip -- comfortably below this bar.
+CROSS_OBJECT_OVERLAP_IOU_THRESHOLD = 0.1
+
+
+# How much stricter than CROSS_OBJECT_OVERLAP_IOU_THRESHOLD a frame must be
+# to serve as an interpolation *anchor*, rather than merely to stay
+# uncorrected. Confirmed on real footage: IoU climbs gradually into a real
+# overlap rather than jumping straight from zero (0.000 -> 0.007 -> 0.024
+# -> 0.087 over 7 frames before crossing 0.1), so the frame immediately
+# below the overlap threshold can already be a few frames into the same
+# contamination -- not genuinely separated, just not (yet) over the bar
+# that triggers a correction. Anchoring an interpolation there inherits
+# that drift at exactly the point a wrong value matters most: the observed
+# visual result was a blade whose glow started measurably off from the
+# real hand and only converged onto it partway through the run. Every
+# frame below this stricter bar measured a real, stable 0.000-0.008 IoU on
+# the same footage -- comfortably clean.
+CROSS_OBJECT_ANCHOR_IOU_FRAC = 0.2
+
+
+def _good_frame_mask(motion_a, motion_b, ious, anchor_iou_threshold):
+    """A frame is usable as an interpolation anchor when both objects have
+    a real (non-NaN) fit and the masks are clean well below the
+    overlap-detection threshold -- see CROSS_OBJECT_ANCHOR_IOU_FRAC."""
+    valid = ~np.isnan(motion_a["length"]) & ~np.isnan(motion_b["length"])
+    return valid & (ious <= anchor_iou_threshold)
+
+
+def _interpolate_row(motion, i, before, after, t):
+    """Set row `i` of `motion` by interpolating fraction `t` of the way
+    from row `before` to row `after`, for `centroid`/`hilt`/`tip`/`width`,
+    then re-deriving `axis`/`length`/`angle` from the interpolated
+    `tip`/`hilt` so the geometry stays internally consistent (axis really
+    is the unit vector from hilt to tip, length really is their
+    distance) -- rather than blending all seven fields independently,
+    which could disagree with each other."""
+    for field in ("centroid", "hilt", "tip", "width"):
+        motion[field][i] = (1 - t) * motion[field][before] + t * motion[field][after]
+    axis_vec = motion["tip"][i] - motion["hilt"][i]
+    norm = np.linalg.norm(axis_vec)
+    motion["length"][i] = norm
+    if norm > 0:
+        motion["axis"][i] = axis_vec / norm
+        motion["angle"][i] = np.arctan2(axis_vec[1], axis_vec[0])
+
+
+def _freeze_row(motion, i, anchor):
+    for field in motion:
+        motion[field][i] = motion[field][anchor]
+
+
+def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
+                            iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
+                            anchor_iou_threshold=None):
+    """Patch two already-written motion.npz files in place: for every run of
+    consecutive frames where the two tracked objects' raw masks overlap
+    past `iou_threshold`, replace *both* objects' fitted geometry for that
+    run rather than trusting a per-frame fit_blade result computed from a
+    mask that may have bled into the other object's blade.
+
+    Prefers to *interpolate* linearly between the last good frame before
+    the run and the first good frame after it, rather than freezing at a
+    single value for the run's whole duration -- confirmed on real
+    footage, a real hilt travels 150-235px across a ~3s run of overlapping
+    frames (a real fencing exchange, not an instant touch), so a frozen
+    geometry visibly detaches from the hand holding it ("the blade
+    disembodies and floats") long before the run ends. Interpolating keeps
+    both endpoints exactly right and approximates the motion between them
+    -- not real tracking, but far closer to it than a dead hold, and either
+    endpoint missing (the run starts at frame 0, or never ends before the
+    clip does) falls back to freezing at whichever single endpoint exists.
+
+    Runs after `compute_motion` has produced both objects' motion.npz (it
+    patches, not produces, so it needs their finished output) and only for
+    a 2-object job -- see `runner.run_pipeline_multi`. Both objects are
+    corrected together, not just whichever one looks more corrupted --
+    with the masks actually overlapping, neither per-frame fit can be
+    trusted, and guessing which one is "more wrong" isn't necessary when
+    correcting both is cheap and safe.
+
+    `anchor_iou_threshold` (default `iou_threshold * CROSS_OBJECT_ANCHOR_IOU_FRAC`)
+    is the stricter bar an anchor frame must clear -- see that constant.
+
+    Returns the number of frames patched (interpolated or held).
+    """
+    if anchor_iou_threshold is None:
+        anchor_iou_threshold = iou_threshold * CROSS_OBJECT_ANCHOR_IOU_FRAC
+    logger = logging.getLogger(__name__)
+    motion_a = load_motion(motion_path_a)
+    motion_b = load_motion(motion_path_b)
+    frame_indices = mask_frame_indices(masks_dir_a)
+    n = len(frame_indices)
+
+    ious = np.array([
+        _mask_iou(load_mask(masks_dir_a, frame_idx), load_mask(masks_dir_b, frame_idx))
+        for frame_idx in frame_indices
+    ])
+    overlapping = ious > iou_threshold
+    good = _good_frame_mask(motion_a, motion_b, ious, anchor_iou_threshold)
+    good_indices = np.flatnonzero(good)
+
+    n_held = 0
+    i = 0
+    while i < n:
+        if not overlapping[i]:
+            i += 1
+            continue
+        run_start = i
+        while i < n and overlapping[i]:
+            i += 1
+        run_end = i - 1
+
+        earlier = good_indices[good_indices < run_start]
+        later = good_indices[good_indices > run_end]
+        before = int(earlier[-1]) if len(earlier) else None
+        after = int(later[0]) if len(later) else None
+
+        for j in range(run_start, run_end + 1):
+            if before is not None and after is not None:
+                t = (frame_indices[j] - frame_indices[before]) / (frame_indices[after] - frame_indices[before])
+                _interpolate_row(motion_a, j, before, after, t)
+                _interpolate_row(motion_b, j, before, after, t)
+            elif before is not None:
+                _freeze_row(motion_a, j, before)
+                _freeze_row(motion_b, j, before)
+            elif after is not None:
+                _freeze_row(motion_a, j, after)
+                _freeze_row(motion_b, j, after)
+            # else: no anchor at all -- nothing better than the raw fit.
+
+        if before is not None or after is not None:
+            n_held += run_end - run_start + 1
+            logger.warning(
+                "frames %d-%d: tracked objects' masks overlapped (IoU up to %.2f, cap %.2f) -- %s "
+                "both objects' geometry%s",
+                frame_indices[run_start], frame_indices[run_end], ious[run_start:run_end + 1].max(),
+                iou_threshold,
+                "interpolated" if before is not None and after is not None else "held",
+                (
+                    f" between frames {frame_indices[before]} and {frame_indices[after]}"
+                    if before is not None and after is not None
+                    else f" at frame {frame_indices[before if before is not None else after]}'s values"
+                ),
+            )
+
+    if n_held:
+        np.savez(motion_path_a, **motion_a)
+        np.savez(motion_path_b, **motion_b)
+    return n_held
+
+
 def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=20, progress_cb=None):
     """The motion pipeline stage: fit blade geometry for every tracked
     frame and write it to `motion_out_path` (see `save_motion`).
@@ -558,10 +760,19 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     enough (it's inverted for a bat) and when the motion-based decision
     falls back to the per-frame guess.
 
+    Every valid per-frame fit is logged at DEBUG (length/width/centroid/
+    angle) so a real run can be replayed from logs alone. This function
+    only ever sees one object's masks, so it can't tell a mask that's
+    bled into a nearby tracked object's blade from genuine fast motion --
+    see `suppress_overlap_bleed`, which runs afterward with both objects'
+    output in hand and can.
+
     Returns `(n_frames, n_with_blade)` so the caller can tell a good track
     from one that found nothing before paying for the glow stage -- see
     `runner._require_usable_track`.
     """
+    logger = logging.getLogger(__name__)
+
     def report(pct, message):
         if progress_cb:
             progress_cb(pct, message)
@@ -571,7 +782,13 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     geometries = []
     for i, frame_idx in enumerate(frame_indices):
         mask = load_mask(masks_dir, frame_idx)
-        geometries.append(fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins))
+        geo = fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins)
+        if geo is not None:
+            logger.debug(
+                "frame %d: length=%.1f width=%.1f centroid=(%.1f, %.1f) angle=%.2f",
+                frame_idx, geo.length, geo.width, geo.centroid[0], geo.centroid[1], geo.angle,
+            )
+        geometries.append(geo)
         report((i + 1) / n * 100, f"frame {i + 1}/{n}")
 
     geometries = _orient_by_motion(geometries)

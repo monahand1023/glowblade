@@ -3,7 +3,14 @@ import shutil
 
 from . import job_meta
 from .audio import mix_hums, synthesize_audio
-from .blade import LOW_ELONGATION_FRAC_THRESHOLD, MIN_ELONGATION, compute_motion, elongation_stats, load_motion
+from .blade import (
+    LOW_ELONGATION_FRAC_THRESHOLD,
+    MIN_ELONGATION,
+    compute_motion,
+    elongation_stats,
+    load_motion,
+    suppress_overlap_bleed,
+)
 from .frames import extract_frames
 from .glow import parse_color, render_glow, render_glow_multi
 from .mux import encode
@@ -316,10 +323,24 @@ def run_pipeline_multi(
             n_frames, checkpoint_path, config_name, device,
         )
 
+    track_counts = {}
     for oid in object_ids:
-        n_tracked, n_with_blade = compute_motion(
+        track_counts[oid] = compute_motion(
             paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
         )
+
+    if len(object_ids) == 2:
+        # Runs after both objects' motion.npz exist (it patches, not
+        # produces, so it needs their finished output) and before the
+        # usability check below, so a stretch of frames this corrects
+        # doesn't spuriously trip the low-elongation warning.
+        suppress_overlap_bleed(
+            paths["motion_paths"][0], paths["masks_dirs"][0],
+            paths["motion_paths"][1], paths["masks_dirs"][1],
+        )
+
+    for oid in object_ids:
+        n_tracked, n_with_blade = track_counts[oid]
         _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"), paths["motion_paths"][oid], obj_id=oid)
 
     return _render_multi_from_masks(

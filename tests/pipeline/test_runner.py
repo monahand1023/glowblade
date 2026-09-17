@@ -919,6 +919,103 @@ def test_run_pipeline_multi_skips_reconcile_pair_for_a_four_saber_job(tmp_path, 
     )
 
 
+def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+    calls = []
+
+    def fake_suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b):
+        # Must run after both objects' compute_motion, since it patches
+        # already-written motion.npz rather than producing it.
+        assert os.path.exists(motion_path_a)
+        assert os.path.exists(motion_path_b)
+        calls.append((motion_path_a, masks_dir_a, motion_path_b, masks_dir_b))
+        return 0
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert len(calls) == 1
+    _motion_path_a, masks_dir_a, _motion_path_b, masks_dir_b = calls[0]
+    assert masks_dir_a == str(job_dir / "masks" / "0")
+    assert masks_dir_b == str(job_dir / "masks" / "1")
+
+
+def test_run_pipeline_multi_skips_suppress_overlap_bleed_for_a_single_saber_job(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade}),
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("suppress_overlap_bleed should not run for a single-saber job")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[{"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"}],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+
+def test_run_pipeline_multi_skips_suppress_overlap_bleed_for_a_four_saber_job(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("suppress_overlap_bleed should not run for a four-saber job")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "green", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+
 def _write_longer_video(path, n_frames, width=64, height=48, fps=10.0):
     """Like the top-level `tiny_video_path` fixture's clip, but with a
     frame count this file controls -- merge detection needs 15+ sustained
