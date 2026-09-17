@@ -14,7 +14,7 @@ from .blade import (
 from .frames import extract_frames
 from .glow import parse_color, render_glow, render_glow_multi
 from .mux import encode
-from .reacquire import reconcile_pair
+from .reacquire import reconcile_pair, retrack_overlap_runs
 from .track import track_object, track_objects
 
 
@@ -318,6 +318,20 @@ def run_pipeline_multi(
     )
 
     if len(object_ids) == 2:
+        # reconcile_pair's own return value isn't used here: its
+        # real_tracked_range means "genuinely computed via SAM2
+        # propagation," not "verified accurate for its entire span," and
+        # confirmed on real footage, the two can diverge -- the re-tracked
+        # object can drift onto the other tracked object again later in
+        # that same span, a fresh problem reconcile_pair has no way to
+        # know about. Excluding that whole span from suppress_overlap_bleed
+        # (an earlier version of this code did) left a real, later overlap
+        # completely uncorrected -- a missing blade, confirmed via a full
+        # real end-to-end run, worse than the redundant-but-harmless
+        # correction excluding it was meant to avoid. Only
+        # retrack_overlap_runs' resolved_ranges below carry an actual
+        # accuracy check (drift against known-good geometry) and are
+        # trusted enough to exclude.
         reconcile_pair(
             paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
             n_frames, checkpoint_path, config_name, device,
@@ -330,13 +344,34 @@ def run_pipeline_multi(
         )
 
     if len(object_ids) == 2:
+        # Try a real independent re-track through each cross-object
+        # overlap run first -- strictly more accurate than
+        # suppress_overlap_bleed's geometry interpolation when it
+        # validates. Whichever objects it patches need compute_motion
+        # re-run (it rewrites mask files, not motion.npz) before anything
+        # downstream, including suppress_overlap_bleed itself, sees them.
+        retracked, resolved_ranges = retrack_overlap_runs(
+            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
+            paths["motion_paths"][0], paths["motion_paths"][1],
+            n_frames, checkpoint_path, config_name, device,
+        )
+        for oid in retracked:
+            track_counts[oid] = compute_motion(
+                paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
+            )
+
         # Runs after both objects' motion.npz exist (it patches, not
         # produces, so it needs their finished output) and before the
         # usability check below, so a stretch of frames this corrects
-        # doesn't spuriously trip the low-elongation warning.
+        # doesn't spuriously trip the low-elongation warning. Remains the
+        # fallback for whatever retrack_overlap_runs above couldn't fix;
+        # exclude_frame_ranges excludes only what it already fixed and
+        # validated -- see the reconcile_pair comment above for why
+        # reconcile_pair's own output isn't included here too.
         suppress_overlap_bleed(
             paths["motion_paths"][0], paths["masks_dirs"][0],
             paths["motion_paths"][1], paths["masks_dirs"][1],
+            exclude_frame_ranges=resolved_ranges,
         )
 
     for oid in object_ids:

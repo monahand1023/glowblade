@@ -4,6 +4,7 @@ import pytest
 from lightsaber_fx.pipeline.blade import (
     MIN_ELONGATION,
     BladeGeometry,
+    _find_overlap_runs,
     _mask_iou,
     angular_speed,
     classify_tip_by_taper,
@@ -797,6 +798,56 @@ def _write_fixed_mask(masks_dir, n_frames, canvas=(20, 20)):
         save_mask(str(masks_dir), i, mask)
 
 
+def test_find_overlap_runs_reports_run_bounds_and_both_anchors(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a_path, motion_b_path = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a_path, [100, 500, 600, 150])
+    _write_lengths(motion_b_path, [200, 500, 600, 250])
+    motion_a, motion_b = load_motion(str(motion_a_path)), load_motion(str(motion_b_path))
+
+    runs = _find_overlap_runs(str(masks_a), str(masks_b), motion_a, motion_b)
+
+    assert len(runs) == 1
+    run = runs[0]
+    assert (run.run_start, run.run_end) == (1, 2)
+    assert (run.before, run.after) == (0, 3)
+    assert run.max_iou == pytest.approx(1.0)
+
+
+def test_find_overlap_runs_reports_missing_anchors_as_none(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a_path, motion_b_path = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={0, 1})
+    _write_lengths(motion_a_path, [500, 600, 120])
+    _write_lengths(motion_b_path, [510, 610, 130])
+    motion_a, motion_b = load_motion(str(motion_a_path)), load_motion(str(motion_b_path))
+
+    runs = _find_overlap_runs(str(masks_a), str(masks_b), motion_a, motion_b)
+
+    assert len(runs) == 1
+    assert (runs[0].run_start, runs[0].run_end) == (0, 1)
+    assert runs[0].before is None
+    assert runs[0].after == 2
+
+
+def test_find_overlap_runs_returns_empty_list_when_masks_never_overlap(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a_path, motion_b_path = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames=set())
+    _write_lengths(motion_a_path, [100, 250, 90])
+    _write_lengths(motion_b_path, [200, 220, 210])
+    motion_a, motion_b = load_motion(str(motion_a_path)), load_motion(str(motion_b_path))
+
+    assert _find_overlap_runs(str(masks_a), str(masks_b), motion_a, motion_b) == []
+
+
 def test_suppress_overlap_bleed_interpolates_a_single_frame_between_its_neighbors(tmp_path):
     masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
     motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
@@ -960,6 +1011,50 @@ def test_suppress_overlap_bleed_skips_marginal_frames_when_picking_anchors(tmp_p
     # values -- just not trusted as anchors for frame 2's interpolation
     assert result_a["length"][1] == pytest.approx(150.0)
     assert result_a["length"][3] == pytest.approx(150.0)
+
+
+def test_suppress_overlap_bleed_skips_a_run_covered_by_exclude_frame_ranges(tmp_path):
+    # reacquire.retrack_overlap_runs already validated an independent
+    # re-track for this exact run -- genuine, correctly-tracked contact
+    # still reads as high mask IoU (that's what real contact looks like),
+    # so re-detecting it here must not "fix" already-correct masks by
+    # overwriting them with a worse interpolated approximation.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    lengths_a = [100, 500, 600, 150]
+    _write_lengths(motion_a, lengths_a)
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    n_held = suppress_overlap_bleed(
+        str(motion_a), str(masks_a), str(motion_b), str(masks_b),
+        exclude_frame_ranges=[(1, 2)],
+    )
+
+    assert n_held == 0
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"] == pytest.approx(lengths_a)  # untouched, including frames 1-2
+
+
+def test_suppress_overlap_bleed_still_corrects_a_run_outside_exclude_frame_ranges(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600, 150])
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    n_held = suppress_overlap_bleed(
+        str(motion_a), str(masks_a), str(motion_b), str(masks_b),
+        exclude_frame_ranges=[(10, 20)],  # doesn't overlap the actual run at all
+    )
+
+    assert n_held == 2
+    result_a = load_motion(str(motion_a))
+    assert 100.0 < result_a["length"][1] < result_a["length"][2] < 150.0
 
 
 def test_suppress_overlap_bleed_leaves_raw_values_when_no_anchor_exists_anywhere(tmp_path):

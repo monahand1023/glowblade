@@ -919,6 +919,232 @@ def test_run_pipeline_multi_skips_reconcile_pair_for_a_four_saber_job(tmp_path, 
     )
 
 
+def test_run_pipeline_multi_calls_retrack_overlap_runs_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+    calls = []
+
+    def fake_retrack_overlap_runs(frames_dir, masks_dir_0, masks_dir_1, motion_path_0, motion_path_1,
+                                   n_frames, checkpoint_path, config_name, device):
+        # Must run after both objects' compute_motion (it needs their
+        # finished motion.npz to find overlap runs) and before
+        # suppress_overlap_bleed.
+        assert os.path.exists(motion_path_0)
+        assert os.path.exists(motion_path_1)
+        calls.append((masks_dir_0, masks_dir_1, n_frames))
+        return set(), []
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert len(calls) == 1
+    masks_dir_0, masks_dir_1, _n_frames = calls[0]
+    assert masks_dir_0 == str(job_dir / "masks" / "0")
+    assert masks_dir_1 == str(job_dir / "masks" / "1")
+
+
+def test_run_pipeline_multi_skips_retrack_overlap_runs_for_a_single_saber_job(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade}),
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("retrack_overlap_runs should not run for a single-saber job")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[{"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"}],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+
+def test_run_pipeline_multi_skips_retrack_overlap_runs_for_a_four_saber_job(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("retrack_overlap_runs should not run for a four-saber job")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "green", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+
+def test_run_pipeline_multi_reruns_compute_motion_for_objects_retrack_overlap_runs_patches(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+
+    real_compute_motion = compute_motion
+    calls = []
+
+    def counting_compute_motion(masks_dir, motion_out_path, progress_cb=None):
+        calls.append(masks_dir)
+        return real_compute_motion(masks_dir, motion_out_path, progress_cb=progress_cb)
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.compute_motion", counting_compute_motion)
+    # Object 0 only: simulates a validated re-track that patched its masks.
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", lambda *a, **k: ({0}, []))
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", lambda *a, **k: 0)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    obj0_dir = str(job_dir / "masks" / "0")
+    obj1_dir = str(job_dir / "masks" / "1")
+    assert calls.count(obj0_dir) == 2  # initial pass + re-run after retrack patched it
+    assert calls.count(obj1_dir) == 1  # untouched, so no re-run needed
+
+
+def test_run_pipeline_multi_passes_resolved_ranges_as_exclude_frame_ranges(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # retrack_overlap_runs' second return value (runs it fully resolved)
+    # must reach suppress_overlap_bleed as exclude_frame_ranges -- silently
+    # dropping this wiring would let suppress_overlap_bleed "fix" a run
+    # that a validated independent re-track already got right, overwriting
+    # accurate masks with a worse interpolated approximation. See
+    # blade.suppress_overlap_bleed's docstring for why genuine contact
+    # still reads as high mask IoU.
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.retrack_overlap_runs",
+        lambda *a, **k: ({0, 1}, [(12, 34)]),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed",
+        lambda *a, exclude_frame_ranges=(), **k: calls.append(exclude_frame_ranges) or 0,
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert calls == [[(12, 34)]]
+
+
+def test_run_pipeline_multi_does_not_exclude_reconcile_pairs_own_output(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # reconcile_pair's return alone must NOT shrink what
+    # suppress_overlap_bleed is allowed to correct -- an earlier version
+    # of this wiring treated a successful reconcile_pair's re-tracked span
+    # as accurate for its entire length and excluded it, which left a
+    # real, later overlap within that same span uncorrected (confirmed via
+    # a full real end-to-end run: a completely missing blade for 162
+    # frames). Only retrack_overlap_runs' resolved_ranges -- which carries
+    # an actual accuracy check -- may exclude anything.
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.retrack_overlap_runs",
+        lambda *a, **k: (set(), [(12, 34)]),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed",
+        lambda *a, exclude_frame_ranges=(), **k: calls.append(list(exclude_frame_ranges)) or 0,
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert calls == [[(12, 34)]]  # only retrack_overlap_runs' resolved range, nothing from reconcile_pair
+
+
 def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
     monkeypatch.setattr(
         "lightsaber_fx.pipeline.runner.track_objects",
@@ -926,7 +1152,8 @@ def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp
     )
     calls = []
 
-    def fake_suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b):
+    def fake_suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
+                                     exclude_frame_ranges=()):
         # Must run after both objects' compute_motion, since it patches
         # already-written motion.npz rather than producing it.
         assert os.path.exists(motion_path_a)

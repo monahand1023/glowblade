@@ -1,7 +1,13 @@
 import numpy as np
 
-from lightsaber_fx.pipeline.blade import load_mask, save_mask
-from lightsaber_fx.pipeline.reacquire import detect_merge, find_clean_reference, match_detections_to_objects, patch_masks
+from lightsaber_fx.pipeline.blade import compute_motion, load_mask, save_mask
+from lightsaber_fx.pipeline.reacquire import (
+    detect_merge,
+    find_clean_reference,
+    match_detections_to_objects,
+    patch_masks,
+    retrack_overlap_runs,
+)
 
 
 def _mask_at(x, width=120, height=80, bar_width=6):
@@ -587,3 +593,166 @@ def test_reconcile_pair_detects_and_patches_the_lost_object_when_it_is_object_1(
         assert np.array_equal(load_mask(str(masks_1), i), _mask_at(20))
     for i in range(40, 50):
         assert np.array_equal(load_mask(str(masks_1), i), _mask_at(25))
+
+
+# ---------------------------------------------------------------------------
+# retrack_overlap_runs -- independent single-object re-tracking through a
+# partial cross-object mask bleed, tried before suppress_overlap_bleed's
+# geometry interpolation. Real footage: a real hilt travels 150-235px
+# across a multi-second overlap run, which a straight-line interpolation
+# only approximates -- a validated independent re-track is strictly more
+# accurate when it works.
+# ---------------------------------------------------------------------------
+
+def _write_bleed_masks(masks_0, masks_1, n_frames):
+    """Object 0's own track: clean at x=20 before the run, bled onto
+    object 1's position (x=60) for frames [10, 20), clean again at x=25
+    after -- the exact partial-bleed shape retrack_overlap_runs exists
+    to fix. Object 1 stays put at x=60 throughout, never itself bled."""
+    for i in range(n_frames):
+        x0 = 20 if i < 10 else (60 if i < 20 else 25)
+        save_mask(str(masks_0), i, _mask_at(x0))
+        save_mask(str(masks_1), i, _mask_at(60))
+
+
+def _fake_track_object_threading_object_0(frames_dir, out_masks_dir, points, labels, checkpoint_path,
+                                           config_name, device, n_frames, prompt_frame=0, progress_cb=None):
+    """A correct independent re-track for whichever object's seed points
+    this was called with: object 0's seed (x=20, from its own before-
+    anchor mask) threads through x=22 during the contact and lands on its
+    true recovered position (x=25); object 1's seed (x=60) stays there,
+    since it was never actually displaced."""
+    seed_x = points[0][0]
+    for i in range(prompt_frame, n_frames):
+        if seed_x < 40:
+            x = 20 if i < 10 else (22 if i < 20 else 25)
+        else:
+            x = 60
+        save_mask(out_masks_dir, i, _mask_at(x))
+
+
+def test_retrack_overlap_runs_patches_masks_that_validate(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    n_frames = 30
+    _write_bleed_masks(masks_0, masks_1, n_frames)
+
+    motion_path_0 = tmp_path / "0.npz"
+    motion_path_1 = tmp_path / "1.npz"
+    compute_motion(str(masks_0), str(motion_path_0))
+    compute_motion(str(masks_1), str(motion_path_1))
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.reacquire.track_object", _fake_track_object_threading_object_0,
+    )
+
+    patched, resolved_ranges = retrack_overlap_runs(
+        "unused-frames-dir", str(masks_0), str(masks_1), str(motion_path_0), str(motion_path_1),
+        n_frames, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched == {0, 1}
+    assert resolved_ranges == [(10, 19)]  # both objects validated -- fully resolved
+    # Object 0's run-range masks now hold the fresh re-track (x=22), not
+    # the original bled value (x=60).
+    for i in range(10, 20):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(22))
+    # Untouched outside the run.
+    for i in list(range(10)) + list(range(20, 30)):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(20 if i < 10 else 25))
+
+
+def test_retrack_overlap_runs_leaves_masks_untouched_when_retrack_drifts_too_far(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    n_frames = 30
+    _write_bleed_masks(masks_0, masks_1, n_frames)
+
+    motion_path_0 = tmp_path / "0.npz"
+    motion_path_1 = tmp_path / "1.npz"
+    compute_motion(str(masks_0), str(motion_path_0))
+    compute_motion(str(masks_1), str(motion_path_1))
+
+    def fake_track_object_stuck_at_60(frames_dir, out_masks_dir, points, labels, checkpoint_path,
+                                       config_name, device, n_frames, prompt_frame=0, progress_cb=None):
+        # Every object's independent re-track drifts onto x=60 (object 1's
+        # position) instead of finding its own true recovered position --
+        # simulating a failed disentanglement.
+        for i in range(prompt_frame, n_frames):
+            save_mask(out_masks_dir, i, _mask_at(60))
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.reacquire.track_object", fake_track_object_stuck_at_60,
+    )
+
+    patched, resolved_ranges = retrack_overlap_runs(
+        "unused-frames-dir", str(masks_0), str(masks_1), str(motion_path_0), str(motion_path_1),
+        n_frames, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    # Object 0's re-track (true after-position x=25) drifted to x=60 --
+    # over the cap -- so it's declined. Object 1's re-track (true
+    # after-position x=60) coincidentally matches x=60 exactly, so it
+    # still validates.
+    assert patched == {1}
+    # Not fully resolved (only one of two objects validated) -- still
+    # needs suppress_overlap_bleed's fallback pass.
+    assert resolved_ranges == []
+    for i in range(10, 20):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(60))  # unchanged: still the raw bleed
+
+
+def test_retrack_overlap_runs_skips_a_run_missing_an_anchor(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    n_frames = 20
+    # The bleed runs from frame 0 (no "before" anchor exists at all).
+    for i in range(n_frames):
+        x0 = 60 if i < 10 else 25
+        save_mask(str(masks_0), i, _mask_at(x0))
+        save_mask(str(masks_1), i, _mask_at(60))
+
+    motion_path_0 = tmp_path / "0.npz"
+    motion_path_1 = tmp_path / "1.npz"
+    compute_motion(str(masks_0), str(motion_path_0))
+    compute_motion(str(masks_1), str(motion_path_1))
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("track_object should not run for a run with no anchor to validate against")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fail_if_called)
+
+    patched, resolved_ranges = retrack_overlap_runs(
+        "unused-frames-dir", str(masks_0), str(masks_1), str(motion_path_0), str(motion_path_1),
+        n_frames, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched == set()
+    assert resolved_ranges == []
+    for i in range(10):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(60))
+
+
+def test_retrack_overlap_runs_never_raises_on_unexpected_failure(tmp_path, monkeypatch):
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    n_frames = 30
+    _write_bleed_masks(masks_0, masks_1, n_frames)
+
+    motion_path_0 = tmp_path / "0.npz"
+    motion_path_1 = tmp_path / "1.npz"
+    compute_motion(str(masks_0), str(motion_path_0))
+    compute_motion(str(masks_1), str(motion_path_1))
+
+    def boom(*a, **k):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._find_overlap_runs", boom)
+
+    patched, resolved_ranges = retrack_overlap_runs(
+        "unused-frames-dir", str(masks_0), str(masks_1), str(motion_path_0), str(motion_path_1),
+        n_frames, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert patched == set()
+    assert resolved_ranges == []

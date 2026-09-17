@@ -636,45 +636,38 @@ def _freeze_row(motion, i, anchor):
         motion[field][i] = motion[field][anchor]
 
 
-def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
-                            iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
-                            anchor_iou_threshold=None):
-    """Patch two already-written motion.npz files in place: for every run of
-    consecutive frames where the two tracked objects' raw masks overlap
-    past `iou_threshold`, replace *both* objects' fitted geometry for that
-    run rather than trusting a per-frame fit_blade result computed from a
-    mask that may have bled into the other object's blade.
+class OverlapRun(NamedTuple):
+    """One run of consecutive frames where two tracked objects' masks
+    overlapped past a threshold -- see `_find_overlap_runs`.
 
-    Prefers to *interpolate* linearly between the last good frame before
-    the run and the first good frame after it, rather than freezing at a
-    single value for the run's whole duration -- confirmed on real
-    footage, a real hilt travels 150-235px across a ~3s run of overlapping
-    frames (a real fencing exchange, not an instant touch), so a frozen
-    geometry visibly detaches from the hand holding it ("the blade
-    disembodies and floats") long before the run ends. Interpolating keeps
-    both endpoints exactly right and approximates the motion between them
-    -- not real tracking, but far closer to it than a dead hold, and either
-    endpoint missing (the run starts at frame 0, or never ends before the
-    clip does) falls back to freezing at whichever single endpoint exists.
+    `run_start`/`run_end` (inclusive) and `before`/`after` are *array*
+    indices into `mask_frame_indices(masks_dir_a)`/the motion arrays, not
+    raw frame numbers -- callers needing a frame number convert via
+    `frame_indices[idx]`, same as `suppress_overlap_bleed` does internally.
+    `before`/`after` are `None` when no clean frame exists on that side
+    (the run starts at frame 0, or runs through the end of the clip).
+    """
 
-    Runs after `compute_motion` has produced both objects' motion.npz (it
-    patches, not produces, so it needs their finished output) and only for
-    a 2-object job -- see `runner.run_pipeline_multi`. Both objects are
-    corrected together, not just whichever one looks more corrupted --
-    with the masks actually overlapping, neither per-frame fit can be
-    trusted, and guessing which one is "more wrong" isn't necessary when
-    correcting both is cheap and safe.
+    run_start: int
+    run_end: int
+    before: int | None
+    after: int | None
+    max_iou: float
 
-    `anchor_iou_threshold` (default `iou_threshold * CROSS_OBJECT_ANCHOR_IOU_FRAC`)
-    is the stricter bar an anchor frame must clear -- see that constant.
 
-    Returns the number of frames patched (interpolated or held).
+def _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b,
+                        iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
+                        anchor_iou_threshold=None):
+    """Every `OverlapRun` in `masks_dir_a`/`masks_dir_b`'s shared frame
+    range, with the nearest clean anchor frame on each side (see
+    `CROSS_OBJECT_ANCHOR_IOU_FRAC`) -- the shared detection step behind
+    both `suppress_overlap_bleed`'s geometry interpolation and
+    `reacquire.retrack_overlap_runs`' independent re-tracking attempt, so
+    the two can't quietly disagree about where a run starts, ends, or
+    which frames are trustworthy anchors.
     """
     if anchor_iou_threshold is None:
         anchor_iou_threshold = iou_threshold * CROSS_OBJECT_ANCHOR_IOU_FRAC
-    logger = logging.getLogger(__name__)
-    motion_a = load_motion(motion_path_a)
-    motion_b = load_motion(motion_path_b)
     frame_indices = mask_frame_indices(masks_dir_a)
     n = len(frame_indices)
 
@@ -686,7 +679,7 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     good = _good_frame_mask(motion_a, motion_b, ious, anchor_iou_threshold)
     good_indices = np.flatnonzero(good)
 
-    n_held = 0
+    runs = []
     i = 0
     while i < n:
         if not overlapping[i]:
@@ -701,6 +694,73 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
         later = good_indices[good_indices > run_end]
         before = int(earlier[-1]) if len(earlier) else None
         after = int(later[0]) if len(later) else None
+
+        runs.append(OverlapRun(
+            run_start=run_start, run_end=run_end, before=before, after=after,
+            max_iou=float(ious[run_start:run_end + 1].max()),
+        ))
+    return runs
+
+
+def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
+                            iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
+                            anchor_iou_threshold=None, exclude_frame_ranges=()):
+    """Patch two already-written motion.npz files in place: for every run of
+    consecutive frames where the two tracked objects' raw masks overlap
+    past `iou_threshold` (see `_find_overlap_runs`), replace *both*
+    objects' fitted geometry for that run rather than trusting a per-frame
+    fit_blade result computed from a mask that may have bled into the
+    other object's blade.
+
+    Prefers to *interpolate* linearly between the last good frame before
+    the run and the first good frame after it, rather than freezing at a
+    single value for the run's whole duration -- confirmed on real
+    footage, a real hilt travels 150-235px across a ~3s run of overlapping
+    frames (a real fencing exchange, not an instant touch), so a frozen
+    geometry visibly detaches from the hand holding it ("the blade
+    disembodies and floats") long before the run ends. Interpolating keeps
+    both endpoints exactly right and approximates the motion between them
+    -- not real tracking, but far closer to it than a dead hold, and either
+    endpoint missing (the run starts at frame 0, or never ends before the
+    clip does) falls back to freezing at whichever single endpoint exists.
+
+    Runs after `compute_motion` has produced both objects' motion.npz (it
+    patches, not produces, so it needs their finished output), after
+    `reacquire.retrack_overlap_runs` has had a chance to replace a run with
+    real independently-tracked masks instead (this is the fallback for
+    whatever that couldn't fix), and only for a 2-object job -- see
+    `runner.run_pipeline_multi`. Both objects are corrected together, not
+    just whichever one looks more corrupted -- with the masks actually
+    overlapping, neither per-frame fit can be trusted, and guessing which
+    one is "more wrong" isn't necessary when correcting both is cheap and
+    safe.
+
+    `anchor_iou_threshold` (default `iou_threshold * CROSS_OBJECT_ANCHOR_IOU_FRAC`)
+    is the stricter bar an anchor frame must clear -- see that constant.
+
+    `exclude_frame_ranges` (a list of `(start_frame, end_frame)` tuples,
+    inclusive) skips any detected run overlapping one entirely -- for runs
+    `reacquire.retrack_overlap_runs` already resolved with a validated
+    independent re-track for *both* objects. Two blades in genuine,
+    correctly-tracked contact still show high mask IoU (that's what real
+    contact looks like), so without this, re-detecting from the
+    already-correct masks would "fix" a run that was never actually
+    wrong, overwriting an accurate re-track with a worse interpolated
+    approximation.
+
+    Returns the number of frames patched (interpolated or held).
+    """
+    logger = logging.getLogger(__name__)
+    motion_a = load_motion(motion_path_a)
+    motion_b = load_motion(motion_path_b)
+    frame_indices = mask_frame_indices(masks_dir_a)
+    runs = _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b, iou_threshold, anchor_iou_threshold)
+
+    n_held = 0
+    for run_start, run_end, before, after, max_iou in runs:
+        start_frame, end_frame = frame_indices[run_start], frame_indices[run_end]
+        if any(start_frame <= ex_end and end_frame >= ex_start for ex_start, ex_end in exclude_frame_ranges):
+            continue
 
         for j in range(run_start, run_end + 1):
             if before is not None and after is not None:
@@ -720,7 +780,7 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
             logger.warning(
                 "frames %d-%d: tracked objects' masks overlapped (IoU up to %.2f, cap %.2f) -- %s "
                 "both objects' geometry%s",
-                frame_indices[run_start], frame_indices[run_end], ious[run_start:run_end + 1].max(),
+                frame_indices[run_start], frame_indices[run_end], max_iou,
                 iou_threshold,
                 "interpolated" if before is not None and after is not None else "held",
                 (

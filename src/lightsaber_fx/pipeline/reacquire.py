@@ -1,20 +1,29 @@
-"""Recovering tracked-object identity after two tracked objects visually
-cross and SAM2's shared multi-object tracking session loses the
-distinction between them -- confirmed on real footage (a fencing bout)
-where both objects' masks permanently converged onto the same blade after
-a crossing and never recovered on their own.
+"""Recovering tracked-object identity and geometry after two tracked
+objects visually cross, two related but distinct failure modes:
 
-Runs as a post-hoc reconciliation stage in the multi-object pipeline,
-after `track.track_objects` finishes and before `blade.compute_motion`
-runs: reads the masks `track_objects` already wrote, and where it finds a
-crossing between exactly two tracked objects, patches the lost object's
-mask files in place before anything downstream sees them.
+- `reconcile_pair`: SAM2's shared multi-object tracking session loses the
+  distinction between the two objects outright -- confirmed on real
+  footage (a fencing bout) where both objects' masks permanently
+  converged onto the same blade after a crossing and never recovered on
+  their own. Runs as a post-hoc reconciliation stage after
+  `track.track_objects` finishes and before `blade.compute_motion` runs:
+  reads the masks `track_objects` already wrote, and where it finds a
+  crossing, patches the lost object's mask files in place before anything
+  downstream sees them.
+
+- `retrack_overlap_runs`: a *partial* mask bleed between the two objects
+  that never becomes the full, sustained, symmetric merge
+  `reconcile_pair` detects. Runs after `blade.compute_motion` (needs
+  finished motion.npz for both objects to find these runs) and before
+  `blade.suppress_overlap_bleed`, attempting a real independent re-track
+  through each run before falling back to that function's geometry
+  interpolation.
 
 See docs/superpowers/specs/2026-09-16-cross-object-identity-recovery-design.md.
 
 All frame-count/threshold constants below are starting defaults, validated
-only loosely against the one real clip this was diagnosed on -- tune as
-more real footage is tested against this.
+only loosely against the handful of real clips this was diagnosed on --
+tune as more real footage is tested against this.
 """
 
 import logging
@@ -24,7 +33,16 @@ import tempfile
 import cv2
 import numpy as np
 
-from .blade import _mask_iou, fit_blade, load_mask, load_mask_optional, mask_frame_indices, save_mask
+from .blade import (
+    _find_overlap_runs,
+    _mask_iou,
+    fit_blade,
+    load_mask,
+    load_mask_optional,
+    load_motion,
+    mask_frame_indices,
+    save_mask,
+)
 from .detect import MAX_MASK_AREA_FRAC, _build_image_predictor, _points_on_axis
 from .track import track_object
 from .vision_detect import (
@@ -280,9 +298,24 @@ def reacquire_pair(
 def reconcile_pair(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_path, config_name, device, client=None):
     """Best-effort recovery from a detected crossing between exactly two
     tracked objects (object 0 and object 1). Returns `True` if either
-    object's masks were patched, `False` if no merge was found or
-    recovery failed at any step -- in the `False` case, both objects'
-    masks are left completely untouched.
+    object's masks were changed, `False` if no merge was found or recovery
+    failed at any step -- in the `False` case, both objects' masks are
+    left completely untouched.
+
+    A successful patch's `[reacquire_frame, n_frames)` portion is
+    genuinely computed via SAM2 propagation, not frozen/approximated --
+    but that is not the same guarantee as "accurate for its entire span."
+    Confirmed on real footage: the re-tracked object can drift onto the
+    other tracked object again later in that same span, a fresh problem
+    this function has no way to know about at the time it returns. An
+    earlier version of this function reported that span for a caller to
+    exclude from `blade.suppress_overlap_bleed`'s own correction pass;
+    that trusted the span more than it had earned and left a real, later
+    overlap (confirmed via a full real end-to-end run: a completely
+    missing blade for 162 frames) uncorrected. Only
+    `retrack_overlap_runs`' `resolved_ranges` carries an actual accuracy
+    check (drift against known-good geometry) and is safe to exclude that
+    way -- this function's own output isn't.
 
     Never raises, structurally: the entire body runs inside one outer
     try/except, so this contract holds even for a failure this function
@@ -380,3 +413,167 @@ def _reconcile_pair_impl(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpo
         patch_masks(lost_masks_dir, fresh_masks_dir, reference_frame, merge_start, reacquire_frame, n_frames)
 
     return True
+
+
+# How far (as a fraction of the object's own fitted length at the
+# known-good "after" anchor) an independently re-tracked object's
+# centroid may land from the true position there before the re-track is
+# distrusted. Generous enough to tolerate ordinary tracking noise, but
+# tight enough to catch the real failure mode this guards against: the
+# independent session drifting onto the *other* tracked object during the
+# very contact it's meant to track through, which lands it roughly a
+# blade-length away, not a fraction of one.
+RETRACK_MAX_DRIFT_FRAC = 0.5
+
+
+def retrack_overlap_runs(frames_dir, masks_dir_0, masks_dir_1, motion_path_0, motion_path_1,
+                          n_frames, checkpoint_path, config_name, device):
+    """Best-effort upgrade over `blade.suppress_overlap_bleed`'s geometry
+    interpolation: for each run of cross-object mask overlap that has a
+    known-good frame on both sides (see `blade._find_overlap_runs`), try
+    tracking each object through the run independently. A single-object
+    SAM2 session, seeded from that object's own mask at the frame just
+    before the run, has no *other* tracked object in its session to bleed
+    into -- unlike the shared multi-object session that produced the
+    bleed in the first place.
+
+    Validated against the known-good geometry at the frame just after the
+    run: only a re-track whose centroid lands close to the true position
+    there (see `RETRACK_MAX_DRIFT_FRAC`) is trusted and spliced in. A run
+    missing either anchor is always left alone -- there is nothing to
+    validate an independent re-track against, same reasoning
+    `suppress_overlap_bleed` uses to fall back to freezing there instead
+    of interpolating.
+
+    Runs after `compute_motion` has produced both objects' motion.npz (it
+    reads them to find overlap runs, same as `suppress_overlap_bleed`) and
+    before `suppress_overlap_bleed` itself, which remains the fallback for
+    every run this can't fix -- failed validation, a missing anchor, or
+    this function's own outer failure. The caller must re-run
+    `compute_motion` for any object this patches before
+    `suppress_overlap_bleed` runs, since this rewrites mask files, not
+    motion.npz.
+
+    Never raises, structurally, matching `reconcile_pair`: the entire body
+    runs inside one outer try/except.
+
+    Returns `(patched, resolved_ranges)`: `patched` is the set of object
+    indices (a subset of `{0, 1}`) whose masks were changed; `resolved_ranges`
+    is a list of `(run_start_frame, run_end_frame)` tuples for runs where
+    *both* objects validated. A caller must pass `resolved_ranges` on to
+    `suppress_overlap_bleed` as `exclude_frame_ranges` -- two blades in
+    genuine, correctly-tracked contact still show high mask IoU (that's
+    what real contact looks like), so without excluding them,
+    `suppress_overlap_bleed`'s own re-detection would "fix" a run this
+    function already got right, overwriting an accurate independent
+    re-track with a worse interpolated approximation. A run where only one
+    object validated is *not* included here -- the other object's data is
+    still bad, so the run still needs `suppress_overlap_bleed`'s pass
+    (which corrects both objects together; see its own docstring for why
+    that's the right tradeoff).
+    """
+    try:
+        return _retrack_overlap_runs_impl(
+            frames_dir, masks_dir_0, masks_dir_1, motion_path_0, motion_path_1,
+            n_frames, checkpoint_path, config_name, device,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "re-tracking through overlap failed unexpectedly, leaving masks as-is for "
+            "suppress_overlap_bleed to interpolate",
+            exc_info=True,
+        )
+        return set(), []
+
+
+def _retrack_one_object(frames_dir, masks_dir, obj_idx, before_frame, after_frame,
+                         run_start_frame, run_end_frame, n_frames, checkpoint_path, config_name, device):
+    """Try re-tracking a single object through `[run_start_frame,
+    run_end_frame]`, seeded from its own mask at `before_frame`. Returns
+    True if the re-track validated and `masks_dir`'s files for that range
+    were replaced, False otherwise (masks_dir is left untouched on any
+    False return)."""
+    logger = logging.getLogger(__name__)
+    after_mask = load_mask(masks_dir, after_frame)
+    true_after_geo = fit_blade(after_mask)
+    if true_after_geo is None:
+        return False
+
+    before_mask = load_mask(masks_dir, before_frame)
+    points = _points_on_axis(before_mask)
+
+    with tempfile.TemporaryDirectory() as fresh_masks_dir:
+        try:
+            track_object(
+                frames_dir, fresh_masks_dir, points, [1] * len(points),
+                checkpoint_path, config_name, device, n_frames, prompt_frame=before_frame,
+            )
+        except Exception:
+            logger.warning(
+                "object %d: independent re-track through frames %d-%d failed, leaving to the "
+                "interpolation fallback", obj_idx, run_start_frame, run_end_frame, exc_info=True,
+            )
+            return False
+
+        fresh_after_mask = load_mask_optional(fresh_masks_dir, after_frame)
+        fresh_after_geo = fit_blade(fresh_after_mask) if fresh_after_mask is not None else None
+        if fresh_after_geo is None:
+            logger.warning(
+                "object %d: independent re-track lost the blade by frame %d, leaving to the "
+                "interpolation fallback", obj_idx, after_frame,
+            )
+            return False
+
+        drift = _centroid_dist(fresh_after_geo.centroid, true_after_geo.centroid)
+        cap = RETRACK_MAX_DRIFT_FRAC * true_after_geo.length
+        if drift > cap:
+            logger.warning(
+                "object %d: independent re-track drifted %.1fpx from the known-good frame %d position "
+                "(cap %.1fpx) -- likely locked onto the other tracked object during contact, leaving to "
+                "the interpolation fallback", obj_idx, drift, after_frame, cap,
+            )
+            return False
+
+        fresh_run_masks = [load_mask(fresh_masks_dir, f) for f in range(run_start_frame, run_end_frame + 1)]
+        for f, mask in zip(range(run_start_frame, run_end_frame + 1), fresh_run_masks, strict=True):
+            save_mask(masks_dir, f, mask)
+
+    logger.info(
+        "object %d: independent re-track validated (drift %.1fpx, cap %.1fpx) -- replaced frames "
+        "%d-%d with real tracked masks instead of interpolation",
+        obj_idx, drift, cap, run_start_frame, run_end_frame,
+    )
+    return True
+
+
+def _retrack_overlap_runs_impl(frames_dir, masks_dir_0, masks_dir_1, motion_path_0, motion_path_1,
+                                n_frames, checkpoint_path, config_name, device):
+    motion_0 = load_motion(motion_path_0)
+    motion_1 = load_motion(motion_path_1)
+    frame_indices = mask_frame_indices(masks_dir_0)
+    runs = _find_overlap_runs(masks_dir_0, masks_dir_1, motion_0, motion_1)
+
+    patched = set()
+    resolved_ranges = []
+    for run in runs:
+        if run.before is None or run.after is None:
+            continue
+        before_frame = frame_indices[run.before]
+        after_frame = frame_indices[run.after]
+        run_start_frame = frame_indices[run.run_start]
+        run_end_frame = frame_indices[run.run_end]
+
+        validated_this_run = set()
+        for obj_idx, masks_dir in ((0, masks_dir_0), (1, masks_dir_1)):
+            ok = _retrack_one_object(
+                frames_dir, masks_dir, obj_idx, before_frame, after_frame,
+                run_start_frame, run_end_frame, n_frames, checkpoint_path, config_name, device,
+            )
+            if ok:
+                patched.add(obj_idx)
+                validated_this_run.add(obj_idx)
+
+        if validated_this_run == {0, 1}:
+            resolved_ranges.append((run_start_frame, run_end_frame))
+
+    return patched, resolved_ranges
