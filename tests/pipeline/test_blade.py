@@ -7,6 +7,7 @@ from lightsaber_fx.pipeline.blade import (
     _find_overlap_runs,
     _mask_iou,
     _smooth_run_field,
+    _tip_is_plausible,
     angular_speed,
     classify_tip_by_taper,
     compute_motion,
@@ -1078,6 +1079,100 @@ def test_suppress_overlap_bleed_default_hilt_overrides_behave_exactly_as_before(
     _write_lengths(motion_b, [200, 500, 600, 250])
 
     suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+    result_a = load_motion(str(motion_a))
+
+    assert result_a["length"][0] == pytest.approx(100.0)
+    assert result_a["length"][3] == pytest.approx(150.0)
+    assert 100.0 < result_a["length"][1] < result_a["length"][2] < 150.0
+
+
+def test_tip_is_plausible_true_when_closer_to_own_hilt():
+    assert _tip_is_plausible((10.0, 0.0), own_hilt=(0.0, 0.0), other_hilt=(100.0, 0.0)) is True
+
+
+def test_tip_is_plausible_false_when_closer_to_other_hilt():
+    # The exact real-footage failure mode this exists to catch: a raw tip
+    # that has bled almost onto the *other* tracked object's hand.
+    assert _tip_is_plausible((90.0, 0.0), own_hilt=(0.0, 0.0), other_hilt=(100.0, 0.0)) is False
+
+
+def test_suppress_overlap_bleed_trusts_raw_tip_when_it_sits_near_its_own_hilt_override(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 7
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2, 3, 4, 5})
+
+    def geo(hilt, tip):
+        axis_vec = np.array(tip) - np.array(hilt)
+        length = float(np.linalg.norm(axis_vec))
+        axis = tuple(axis_vec / length) if length > 0 else (1.0, 0.0)
+        angle = float(np.arctan2(axis_vec[1], axis_vec[0])) if length > 0 else 0.0
+        return BladeGeometry(centroid=tuple(hilt), axis=axis, tip=tuple(tip), hilt=tuple(hilt),
+                              length=length, width=5.0, angle=angle)
+
+    # Object A: hilt near (i, 0) throughout (anchors included). Its raw
+    # tip is 100px away from its own hilt at every run frame *except*
+    # frame 3, where it has bled to (295, 0) -- almost exactly object B's
+    # hilt -- the real failure mode confirmed on real footage. Anchors
+    # (frames 0, 6) use a *different* length (50px) than the run's clean
+    # frames (100px), so a correctly-working sanity check is
+    # unambiguously distinguishable from the anchor-smoothed fallback.
+    # 100px from own hilt (i) is clearly closer than from object B's
+    # hilt (300+i) -- 100 vs 200 -- so _tip_is_plausible has an
+    # unambiguous answer, not a tie.
+    geoms_a = []
+    for i in range(n):
+        if i in (0, 6):
+            geoms_a.append(geo((float(i), 0.0), (float(i) + 50.0, 0.0)))
+        elif i == 3:
+            geoms_a.append(geo((float(i), 0.0), (295.0, 0.0)))
+        else:
+            geoms_a.append(geo((float(i), 0.0), (float(i) + 100.0, 0.0)))
+    # Object B: hilt near (300+i, 0), raw tip always safely further away
+    # (300+i+100, 0) -- never close to object A, nothing to reject here.
+    geoms_b = [geo((300.0 + i, 0.0), (300.0 + i + 100.0, 0.0)) for i in range(n)]
+
+    save_motion(str(motion_a), geoms_a)
+    save_motion(str(motion_b), geoms_b)
+
+    hilt_overrides_a = {i: (float(i), 0.0) for i in range(1, 6)}
+    hilt_overrides_b = {i: (300.0 + i, 0.0) for i in range(1, 6)}
+
+    suppress_overlap_bleed(
+        str(motion_a), str(masks_a), str(motion_b), str(masks_b),
+        hilt_overrides_a=hilt_overrides_a, hilt_overrides_b=hilt_overrides_b,
+    )
+
+    result_a = load_motion(str(motion_a))
+    # frame 2: raw tip is clean (100px from its own hilt) -- trusted.
+    assert result_a["length"][2] == pytest.approx(100.0)
+    assert result_a["tip"][2] == pytest.approx([102.0, 0.0])
+    # frame 3: raw tip (295, 0) is far closer to object B's hilt (303, 0)
+    # than to object A's own hilt (3, 0) -- must be rejected. The
+    # contaminated raw tip would give length ~292; the safe (smoothed)
+    # fallback stays close to the anchors' 50px.
+    assert result_a["length"][3] < 100.0
+
+
+def test_suppress_overlap_bleed_skips_tip_sanity_check_without_both_hilt_overrides(tmp_path):
+    # Regression guard: the tip sanity check only runs when *both*
+    # objects have a hilt override for a frame (it needs both real hand
+    # positions to judge "closer to which"). Passing only one (or
+    # neither) must not raise and must leave tip exactly as the smoother
+    # produced it.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600, 150])
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    suppress_overlap_bleed(
+        str(motion_a), str(masks_a), str(motion_b), str(masks_b),
+        hilt_overrides_a={99: (9000.0, -9000.0)},  # frame 99 doesn't exist in this run -- a no-op override
+    )
     result_a = load_motion(str(motion_a))
 
     assert result_a["length"][0] == pytest.approx(100.0)
