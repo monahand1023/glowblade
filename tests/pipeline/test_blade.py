@@ -152,6 +152,63 @@ def test_fit_blade_keeps_the_largest_of_several_disconnected_components():
     assert geo.centroid[0] < 100  # centered on the real blade, not pulled toward the blob
 
 
+def _two_equal_component_mask():
+    """Two disconnected, near-equal-sized components -- the real failure
+    this session found on real footage: a tracked object's own scoring
+    cable, comparable in size to the real blade, occasionally exceeding
+    it. `_largest_component`'s plain size comparison alone cannot tell
+    these apart; only `reference_point` continuity can."""
+    mask = np.zeros((60, 250), dtype=bool)
+    mask[27:33, 10:90] = True  # component near x=50 (the "real blade")
+    mask[45:51, 160:240] = True  # component near x=200 (the "cable"), comparable size
+    return mask
+
+
+def test_fit_blade_uses_reference_point_to_reject_an_implausibly_far_component(tmp_path):
+    mask = _two_equal_component_mask()
+
+    # reference_point close to the x=50 component -- must be picked even
+    # though the two components are comparably sized (a plain
+    # largest-wins pick could go either way).
+    geo = fit_blade(mask, reference_point=(50.0, 30.0))
+
+    assert geo.centroid[0] < 100
+
+
+def test_fit_blade_reference_point_also_accepts_the_other_component_when_thats_where_tracking_was(tmp_path):
+    mask = _two_equal_component_mask()
+
+    # mirror case: reference_point near the x=200 component instead --
+    # confirms this is genuine continuity-based selection, not just
+    # "always prefer the first/smaller one".
+    geo = fit_blade(mask, reference_point=(200.0, 48.0))
+
+    assert geo.centroid[0] > 150
+
+
+def test_fit_blade_without_reference_point_falls_back_to_largest_component(tmp_path):
+    mask = _two_equal_component_mask()
+    mask[45:51, 160:241] = True  # make the second component 1px wider -- unambiguously the largest
+
+    geo = fit_blade(mask)  # no reference_point -- must ignore position entirely
+
+    assert geo.centroid[0] > 150  # picks the (now) larger component, regardless of location
+
+
+def test_fit_blade_reference_point_does_not_override_an_unambiguous_largest_component(tmp_path):
+    # When the largest component is already close to reference_point,
+    # behavior must be identical to the no-reference-point case -- this
+    # only ever kicks in for an implausible jump, not routine tracking.
+    mask = np.zeros((60, 200), dtype=bool)
+    mask[27:33, 10:90] = True  # real blade, 480px
+    mask[45:50, 150:154] = True  # small stray speck, 20px, disconnected
+
+    geo = fit_blade(mask, reference_point=(50.0, 30.0))
+
+    assert geo.length == pytest.approx(79.0, abs=1.0)
+    assert geo.centroid[0] < 100
+
+
 # ---------------------------------------------------------------------------
 # classify_tip_by_taper -- the disambiguation heuristic, tested in isolation
 # ---------------------------------------------------------------------------
@@ -692,6 +749,39 @@ def _bar_mask(x_end, canvas=(48, 400), x_start=50, y_start=20, y_end=26):
     return mask
 
 
+def test_compute_motion_uses_reference_point_continuity_to_reject_a_growing_secondary_component(tmp_path, caplog):
+    # Reproduces the real failure end to end: a tracked object's mask
+    # carries a persistent secondary component (its own scoring cable, on
+    # real footage) that occasionally outsizes the real blade for a
+    # couple of frames. Without frame-to-frame continuity, fit_blade
+    # would snap onto the cable's location for those frames;
+    # compute_motion's per-frame reference_point (the previous frame's
+    # fitted centroid) must keep it on the real blade instead.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+
+    def frame(cable_x_end):
+        mask = np.zeros((60, 300), dtype=bool)
+        mask[20:26, 50:130] = True  # real blade, 480px, stays put
+        mask[40:46, 200:cable_x_end] = True  # cable, size varies
+        return mask
+
+    masks = [frame(270) for _ in range(3)]  # cable smaller than blade (420px)
+    masks += [frame(285) for _ in range(2)]  # cable now bigger than blade (510px) -- the glitch
+    masks += [frame(270) for _ in range(3)]  # back to normal
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        compute_motion(str(masks_dir), str(motion_path))
+
+    motion = load_motion(str(motion_path))
+    # every frame's centroid must stay near the real blade (x~90), never
+    # jumping to the cable's location (x~235-245)
+    assert (motion["centroid"][:, 0] < 150).all()
+    assert "using a smaller component" in caplog.text
+
+
 def test_compute_motion_debug_logs_per_frame_geometry(tmp_path, caplog):
     masks_dir = tmp_path / "masks"
     masks_dir.mkdir()
@@ -792,6 +882,31 @@ def test_compute_motion_logs_a_warning_for_a_position_glitch(tmp_path, caplog):
 
     assert "tracking glitch" in caplog.text
     assert "held 1/3" in caplog.text
+
+
+def test_compute_motion_logs_a_warning_for_an_unresolved_multi_frame_jump(tmp_path, caplog):
+    # The gap this session's real-footage investigation found: a jump
+    # that doesn't match the single-frame bracketed pattern (here, the
+    # object stays at the new position instead of snapping back) must
+    # not be silently ignored -- see _suppress_position_glitches'
+    # updated docstring for why a previous version produced no log
+    # output at all for this case.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    canvas = (48, 700)
+    masks = [
+        _bar_mask(100, canvas=canvas, x_start=50),
+        _bar_mask(105, canvas=canvas, x_start=55),
+        _bar_mask(600, canvas=canvas, x_start=550),  # jumps far from frame 1...
+        _bar_mask(605, canvas=canvas, x_start=555),  # ...and stays there, not bracketed back
+    ]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        compute_motion(str(masks_dir), str(motion_path))
+
+    assert "doesn't match the bracketed single-frame-glitch pattern" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -113,9 +113,9 @@ def _median_perpendicular_extent(proj, perp, n_bins=20):
     return float(np.median(extents))
 
 
-def _largest_component(mask):
-    """`mask`, reduced to its largest 8-connected blob -- dropping any
-    smaller, disconnected ones.
+def _largest_component(mask, reference_point=None, max_jump_px=None):
+    """`mask`, reduced to its most plausible 8-connected blob -- dropping
+    any other, smaller-or-implausibly-located, disconnected ones.
 
     Measured on real footage: SAM2's per-frame video-tracking mask is
     usually one clean blob, but on a noisy frame (fast motion, an
@@ -130,23 +130,105 @@ def _largest_component(mask):
     `_speckle_count`); this is the same principle applied per-frame,
     right before the geometry that `render_glow`'s `blade_extend`
     extrapolates from.
+
+    Picking the *largest* component alone isn't always enough: confirmed
+    on real footage, one tracked object's mask carried a persistent
+    secondary component for the majority of a whole clip -- almost
+    certainly the fencer's own scoring cable, elongated and substantial
+    enough to look blade-like -- comparable in size to the real blade
+    throughout, and for a few separate, consecutive-frame stretches it
+    briefly *exceeded* the real blade's own pixel count. Each time, the
+    whole fitted blade snapped onto the cable's location instead:
+    measured, the fitted centroid jumped 500+px in a single frame, then
+    jumped back by a similar amount once the real blade regained the
+    larger component -- against real per-frame blade motion in that same
+    stretch of footage that never exceeded ~10px between frames (95th
+    percentile 8.3px) outside these incidents. A wide, unambiguous gap.
+
+    When `reference_point` (`(x, y)`, typically the previous frame's
+    fitted centroid) is given: if the largest component's centroid is
+    within `max_jump_px` (default `POSITION_GLITCH_JUMP_PX`) of it, it's
+    used exactly as before. If not -- the largest component just jumped
+    implausibly far -- this looks for a *smaller* component that IS
+    within `max_jump_px` of `reference_point`, and uses that one
+    instead. If no component is close to `reference_point` either, falls
+    back to the largest component (matches the old behavior -- better
+    than inventing a new guess when nothing looks trustworthy).
+    `reference_point=None` (the default, and what every caller except
+    `compute_motion`'s per-frame loop uses) always keeps the original
+    largest-wins behavior.
+
+    Whenever the two largest components are near-equal in size (second
+    at least 90% of the largest's pixel count), that's logged at WARNING
+    -- visible in the logs even on the frames this picks correctly, not
+    only discoverable by rendering the result and watching for it. 0.9
+    is calibrated, not guessed: on the real footage described above,
+    every frame that actually picked wrong measured a 0.94-0.99 ratio,
+    while the ordinary case (a real blade with a persistent-but-clearly-
+    smaller secondary component most frames) sits at a median of 0.36 --
+    a threshold anywhere in that gap avoids flooding the logs with the
+    routine case while still catching every genuine near-tie.
     """
+    logger = logging.getLogger(__name__)
     labeled, n = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
     if n <= 1:
         return mask
     sizes = ndimage.sum(mask, labeled, index=range(1, n + 1))
-    largest_label = 1 + int(np.argmax(sizes))
+    order = np.argsort(sizes)[::-1]
+    largest_label = 1 + int(order[0])
+
+    if n >= 2 and sizes[order[1]] > 0.9 * sizes[order[0]]:
+        logger.warning(
+            "mask has two nearly-equal-sized components (%.0f px and %.0f px, ratio %.2f) -- "
+            "picking between them, not just taking the larger one blindly",
+            sizes[order[0]], sizes[order[1]], sizes[order[1]] / sizes[order[0]],
+        )
+
+    if reference_point is None:
+        return labeled == largest_label
+
+    if max_jump_px is None:
+        max_jump_px = POSITION_GLITCH_JUMP_PX
+
+    def centroid_of(label_id):
+        ys, xs = np.nonzero(labeled == label_id)
+        return float(xs.mean()), float(ys.mean())
+
+    largest_centroid = centroid_of(largest_label)
+    largest_jump = _centroid_dist(largest_centroid, reference_point)
+    if largest_jump <= max_jump_px:
+        return labeled == largest_label
+
+    for idx in order[1:]:
+        label_id = 1 + int(idx)
+        candidate_centroid = centroid_of(label_id)
+        candidate_jump = _centroid_dist(candidate_centroid, reference_point)
+        if candidate_jump <= max_jump_px:
+            logger.warning(
+                "largest mask component jumped %.0fpx from the previous frame's position "
+                "(cap %.0fpx) -- using a smaller component %.0fpx away instead, likely the "
+                "real blade with a persistent secondary component (e.g. a body cable) "
+                "briefly larger than it",
+                largest_jump, max_jump_px, candidate_jump,
+            )
+            return labeled == label_id
+
     return labeled == largest_label
 
 
-def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20):
+def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20, reference_point=None):
     """Fit blade geometry from a binary mask.
 
-    Method: restrict to the mask's largest connected component (see
-    `_largest_component`), then PCA over its points gives the long axis;
-    projecting all points onto that axis gives the two endpoints (min/max
-    projection) and the perpendicular spread gives the width;
+    Method: restrict to the mask's most plausible connected component
+    (see `_largest_component`), then PCA over its points gives the long
+    axis; projecting all points onto that axis gives the two endpoints
+    (min/max projection) and the perpendicular spread gives the width;
     `classify_tip_by_taper` disambiguates which endpoint is the tip.
+
+    `reference_point` (`(x, y)`, typically the previous frame's fitted
+    centroid) is passed straight through to `_largest_component` -- see
+    its docstring for why a mask with two comparably-sized components
+    needs it to pick correctly.
 
     Returns None when the mask has no foreground pixels at all.
     """
@@ -154,7 +236,7 @@ def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20):
     if len(xs) == 0:
         return None
 
-    mask = _largest_component(mask)
+    mask = _largest_component(mask, reference_point=reference_point)
     ys, xs = np.nonzero(mask)
 
     points = np.stack([xs, ys], axis=1).astype(np.float64)
@@ -1215,7 +1297,13 @@ def _suppress_position_glitches(geometries, frame_indices, jump_px=POSITION_GLIT
     before settling at 250, plausibly a genuine (if noisy) transition
     rather than a glitch -- so this does not try to resolve runs of
     consecutive bad frames; a wrong guess there costs more than the
-    narrower scope.
+    narrower scope. A frame whose jump doesn't match the correctable
+    pattern (bracketed by two close neighbors) is left untouched, but
+    still logged -- confirmed necessary on real footage: a multi-frame
+    excursion this can't fix (the real blade's own mask losing out to a
+    persistent secondary component -- see `_largest_component` -- for
+    more than one consecutive frame) previously produced no log output
+    at all, discoverable only by rendering the clip and watching for it.
 
     Processes forward, comparing each frame against the last *accepted*
     (already-corrected) frame rather than the last raw one, so a
@@ -1255,6 +1343,17 @@ def _suppress_position_glitches(geometries, frame_indices, jump_px=POSITION_GLIT
                     result[i] = _interpolate_geometry(prev_geo, after_geo, t)
                     n_suppressed += 1
                     continue
+                if dist_to_prev > jump_px and dist_to_after <= jump_px:
+                    logger.warning(
+                        "frame %d: centroid jumped %.0fpx from frame %d (last accepted), but is "
+                        "only %.0fpx from frame %d (next) -- doesn't match the bracketed "
+                        "single-frame-glitch pattern this function corrects (see its own "
+                        "docstring for why multi-frame runs are out of scope), so left as "
+                        "tracked; worth checking whether this starts a real multi-frame "
+                        "tracking problem",
+                        frame_indices[i], dist_to_prev, frame_indices[last_good_idx],
+                        dist_to_after, frame_indices[after_idx],
+                    )
         last_good_idx = i
 
     return result, n_suppressed
@@ -1277,15 +1376,20 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     lost that frame) gets a None geometry, which `save_motion` turns into a
     NaN row.
 
-    Each frame's tip/hilt is initially guessed per-frame by `fit_blade`
-    (shape/taper only). `_suppress_position_glitches` then holds an
-    interpolated position for any frame whose centroid jumps far from its
-    neighbors and back -- an isolated SAM2 tracking glitch, not genuine
-    motion -- before `_orient_by_motion` re-decides tip vs hilt once for
-    the whole sequence from which endpoint actually travelled farther
-    (run in that order so a wild single-frame glitch can't throw off
-    `_orient_by_motion`'s own nearest-neighbour endpoint tracking too) --
-    see each function's docstring for more.
+    Each frame's tip/hilt is initially guessed per-frame by `fit_blade`,
+    seeded with the previous valid frame's fitted centroid as
+    `reference_point` so `_largest_component` can reject a comparably-
+    sized but implausibly-located component (e.g. a tracked object's own
+    body cable briefly outsizing the real blade) instead of just taking
+    whichever component happens to have more pixels -- see that
+    function's docstring. `_suppress_position_glitches` then holds an
+    interpolated position for any *remaining* frame whose centroid jumps
+    far from its neighbors and back -- an isolated SAM2 tracking glitch,
+    not genuine motion -- before `_orient_by_motion` re-decides tip vs
+    hilt once for the whole sequence from which endpoint actually
+    travelled farther (run in that order so a wild single-frame glitch
+    can't throw off `_orient_by_motion`'s own nearest-neighbour endpoint
+    tracking too) -- see each function's docstring for more.
 
     Every valid per-frame fit is logged at DEBUG (length/width/centroid/
     angle) so a real run can be replayed from logs alone. This function
@@ -1307,14 +1411,16 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     frame_indices = mask_frame_indices(masks_dir)
     n = len(frame_indices)
     geometries = []
+    last_good_centroid = None
     for i, frame_idx in enumerate(frame_indices):
         mask = load_mask(masks_dir, frame_idx)
-        geo = fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins)
+        geo = fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins, reference_point=last_good_centroid)
         if geo is not None:
             logger.debug(
                 "frame %d: length=%.1f width=%.1f centroid=(%.1f, %.1f) angle=%.2f",
                 frame_idx, geo.length, geo.width, geo.centroid[0], geo.centroid[1], geo.angle,
             )
+            last_good_centroid = geo.centroid
         geometries.append(geo)
         report((i + 1) / n * 100, f"frame {i + 1}/{n}")
 
