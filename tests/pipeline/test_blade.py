@@ -703,6 +703,95 @@ def test_compute_motion_debug_logs_per_frame_geometry(tmp_path, caplog):
 
 
 # ---------------------------------------------------------------------------
+# compute_motion -- isolated single-frame position-glitch suppression
+#
+# A third, distinct real-footage failure mode from the two above: an
+# isolated SAM2 tracking glitch for one frame (the mask briefly jumps to
+# an unrelated position, then the very next frame is back to normal),
+# unrelated to any cross-object contact. Confirmed on real footage: one
+# object's centroid jumped to the opposite edge of a 1280px frame for
+# exactly one frame, sandwiched between two frames only 1px apart, with
+# zero mask IoU against the other tracked object throughout. These tests
+# exercise the guard that holds an interpolated position instead of
+# trusting an isolated jump-and-back.
+# ---------------------------------------------------------------------------
+
+def test_compute_motion_interpolates_an_isolated_single_frame_position_glitch(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = [
+        _bar_mask(200),               # frame0: baseline, centroid x=124.5
+        _bar_mask(200),               # frame1: baseline
+        _bar_mask(390, x_start=350),  # frame2: glitch, centroid x=369.5
+        _bar_mask(200),               # frame3: back to baseline
+        _bar_mask(200),               # frame4: baseline
+    ]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    # interpolated between frames 1 and 3, both baseline -- lands back on
+    # the baseline position, nowhere near the raw glitch (x=369.5)
+    assert motion["centroid"][2][0] == pytest.approx(motion["centroid"][1][0], abs=1.0)
+    assert motion["centroid"][2][0] < 200
+
+
+def test_compute_motion_does_not_suppress_sustained_fast_motion(tmp_path):
+    # A real, consistent trend (each frame further than the last, never
+    # snapping back) must pass through untouched, however large the
+    # per-frame jump -- only a jump-and-return is a glitch's signature.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = [
+        _bar_mask(200, x_start=50),    # centroid x=124.5
+        _bar_mask(300, x_start=150),   # centroid x=224.5 (+100)
+        _bar_mask(400, x_start=250),   # centroid x=324.5 (+100, keeps going)
+    ]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    assert motion["centroid"][1][0] == pytest.approx(224.5, abs=1.0)
+
+
+def test_compute_motion_position_glitch_skips_a_nan_gap_when_finding_last_good(tmp_path):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = [
+        _bar_mask(200),                          # frame0: baseline x=124.5
+        np.zeros((48, 400), dtype=bool),         # frame1: object lost
+        _bar_mask(390, x_start=350),              # frame2: glitch
+        _bar_mask(200),                          # frame3: baseline
+    ]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    compute_motion(str(masks_dir), str(motion_path))
+    motion = load_motion(str(motion_path))
+
+    assert np.isnan(motion["centroid"][1][0])  # gap untouched
+    assert motion["centroid"][2][0] == pytest.approx(motion["centroid"][0][0], abs=1.0)
+
+
+def test_compute_motion_logs_a_warning_for_a_position_glitch(tmp_path, caplog):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = [_bar_mask(200), _bar_mask(390, x_start=350), _bar_mask(200)]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        compute_motion(str(masks_dir), str(motion_path))
+
+    assert "tracking glitch" in caplog.text
+    assert "held 1/3" in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # _mask_iou
 # ---------------------------------------------------------------------------
 

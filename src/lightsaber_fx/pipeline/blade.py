@@ -796,6 +796,110 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     return n_held
 
 
+# A tracked object's fitted centroid jumping this far from BOTH its
+# immediate accepted-neighbor and the next raw frame, while those two
+# neighbors sit close to each other, is a single-frame (or short) SAM2
+# tracking glitch -- not genuine motion, which moves the "after" position
+# consistently *away* from "before" as it goes rather than snapping back
+# to nearly the same spot a frame or two later. Confirmed on real footage,
+# unrelated to any cross-object contact (IoU between the two tracked
+# objects was 0 throughout): one object's centroid jumped to the opposite
+# edge of a 1280px-wide frame for exactly one frame, sandwiched between
+# two frames only 1px apart. A scan of one ~20s real clip found 8 such
+# glitches across two tracked objects -- common enough to fix, not a
+# one-off.
+POSITION_GLITCH_JUMP_PX = 50.0
+
+
+def _centroid_dist(p, q):
+    return float(np.hypot(p[0] - q[0], p[1] - q[1]))
+
+
+def _interpolate_geometry(before, after, t):
+    """A BladeGeometry `t` of the way from `before` to `after`, built the
+    same way `_interpolate_row` builds an interpolated motion.npz row:
+    blend centroid/hilt/tip/width directly, then re-derive axis/length/
+    angle from the interpolated hilt/tip so the result stays internally
+    consistent instead of blending all seven fields independently."""
+    centroid = (1 - t) * np.asarray(before.centroid) + t * np.asarray(after.centroid)
+    hilt = (1 - t) * np.asarray(before.hilt) + t * np.asarray(after.hilt)
+    tip = (1 - t) * np.asarray(before.tip) + t * np.asarray(after.tip)
+    width = (1 - t) * before.width + t * after.width
+    axis_vec = tip - hilt
+    norm = np.linalg.norm(axis_vec)
+    if norm > 0:
+        axis = axis_vec / norm
+        angle = float(np.arctan2(axis[1], axis[0]))
+    else:
+        axis = np.asarray(before.axis)
+        angle = before.angle
+    return BladeGeometry(
+        centroid=(float(centroid[0]), float(centroid[1])),
+        axis=(float(axis[0]), float(axis[1])),
+        tip=(float(tip[0]), float(tip[1])),
+        hilt=(float(hilt[0]), float(hilt[1])),
+        length=float(norm), width=float(width), angle=angle,
+    )
+
+
+def _suppress_position_glitches(geometries, frame_indices, jump_px=POSITION_GLITCH_JUMP_PX):
+    """Replace a frame's geometry with an interpolation between its
+    neighbors when its centroid jumps far from both the last *accepted*
+    frame and the very next raw frame, while those two sit close to each
+    other -- see `POSITION_GLITCH_JUMP_PX`.
+
+    Deliberately narrow: only catches a single bad frame immediately
+    followed by a good one. A real multi-frame example on real footage
+    (checked while building this) turned out ambiguous even on close
+    inspection -- length alternated 140/250/140/250 across four frames
+    before settling at 250, plausibly a genuine (if noisy) transition
+    rather than a glitch -- so this does not try to resolve runs of
+    consecutive bad frames; a wrong guess there costs more than the
+    narrower scope.
+
+    Processes forward, comparing each frame against the last *accepted*
+    (already-corrected) frame rather than the last raw one, so a
+    corrected frame becomes solid ground for the next comparison.
+
+    Returns `(geometries, n_suppressed)`.
+    """
+    logger = logging.getLogger(__name__)
+    result = list(geometries)
+    n = len(result)
+    n_suppressed = 0
+    last_good_idx = None
+
+    for i in range(n):
+        geo = result[i]
+        if geo is None:
+            continue
+        if last_good_idx is not None:
+            after_idx = next((j for j in range(i + 1, n) if geometries[j] is not None), None)
+            if after_idx is not None:
+                prev_geo = result[last_good_idx]
+                after_geo = geometries[after_idx]
+                neighbor_dist = _centroid_dist(prev_geo.centroid, after_geo.centroid)
+                dist_to_prev = _centroid_dist(geo.centroid, prev_geo.centroid)
+                dist_to_after = _centroid_dist(geo.centroid, after_geo.centroid)
+                if dist_to_prev > jump_px and dist_to_after > jump_px and neighbor_dist < jump_px:
+                    t = (frame_indices[i] - frame_indices[last_good_idx]) / (
+                        frame_indices[after_idx] - frame_indices[last_good_idx]
+                    )
+                    logger.warning(
+                        "frame %d: centroid jumped %.0fpx from frame %d and %.0fpx from frame %d "
+                        "(which are only %.0fpx apart) -- holding an interpolated position instead "
+                        "of a likely tracking glitch",
+                        frame_indices[i], dist_to_prev, frame_indices[last_good_idx],
+                        dist_to_after, frame_indices[after_idx], neighbor_dist,
+                    )
+                    result[i] = _interpolate_geometry(prev_geo, after_geo, t)
+                    n_suppressed += 1
+                    continue
+        last_good_idx = i
+
+    return result, n_suppressed
+
+
 def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=20, progress_cb=None):
     """The motion pipeline stage: fit blade geometry for every tracked
     frame and write it to `motion_out_path` (see `save_motion`).
@@ -814,11 +918,14 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     NaN row.
 
     Each frame's tip/hilt is initially guessed per-frame by `fit_blade`
-    (shape/taper only), then `_orient_by_motion` re-decides tip vs hilt
-    once for the whole sequence from which endpoint actually travelled
-    farther -- see that function's docstring for why shape alone isn't
-    enough (it's inverted for a bat) and when the motion-based decision
-    falls back to the per-frame guess.
+    (shape/taper only). `_suppress_position_glitches` then holds an
+    interpolated position for any frame whose centroid jumps far from its
+    neighbors and back -- an isolated SAM2 tracking glitch, not genuine
+    motion -- before `_orient_by_motion` re-decides tip vs hilt once for
+    the whole sequence from which endpoint actually travelled farther
+    (run in that order so a wild single-frame glitch can't throw off
+    `_orient_by_motion`'s own nearest-neighbour endpoint tracking too) --
+    see each function's docstring for more.
 
     Every valid per-frame fit is logged at DEBUG (length/width/centroid/
     angle) so a real run can be replayed from logs alone. This function
@@ -850,6 +957,13 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
             )
         geometries.append(geo)
         report((i + 1) / n * 100, f"frame {i + 1}/{n}")
+
+    geometries, n_glitches = _suppress_position_glitches(geometries, frame_indices)
+    if n_glitches:
+        logger.warning(
+            "%s: held %d/%d frame(s) at an interpolated position due to isolated tracking glitches",
+            masks_dir, n_glitches, n,
+        )
 
     geometries = _orient_by_motion(geometries)
 
