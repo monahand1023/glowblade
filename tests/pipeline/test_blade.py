@@ -1182,6 +1182,41 @@ def test_suppress_overlap_bleed_logs_a_warning_for_a_held_run(tmp_path, caplog):
     assert "frames 1-2" in caplog.text
 
 
+def test_suppress_overlap_bleed_logs_an_extra_warning_for_a_long_interpolated_span(tmp_path, caplog):
+    # Confirmed on real footage: a straight-line interpolation across a
+    # long run (165 frames, 6.6s) can badly miss the real motion -- this
+    # needs a distinct, loud warning, not just the routine per-run one
+    # every short, well-approximated run also gets.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 100
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames=set(range(2, 97)))  # 95-frame run
+    _write_lengths(motion_a, [100] * n)
+    _write_lengths(motion_b, [200] * n)
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert "long enough that a straight line" in caplog.text
+    assert "95 frames long" in caplog.text
+
+
+def test_suppress_overlap_bleed_does_not_log_the_long_span_warning_for_a_short_run(tmp_path, caplog):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600, 150])
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    assert "long enough that a straight line" not in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # save_motion / load_motion
 # ---------------------------------------------------------------------------

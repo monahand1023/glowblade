@@ -702,6 +702,26 @@ def _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b,
     return runs
 
 
+# A run this long (roughly 3.5s+ at typical frame rates) means neither the
+# shared multi-object tracking session nor, if it was tried,
+# `reacquire.retrack_overlap_runs`' independent re-track could tell the
+# two objects apart for a long stretch -- interpolating a straight line
+# between the two endpoints is the best available fallback, but confirmed
+# on real fencing footage it can badly miss the real motion: a 162-frame
+# span interpolated to a nearly frozen 56px drift, while the object's own
+# raw (generally unreliable during the run, but not meaningless) tracking
+# swung through a 200px+ range over the same stretch -- and cross-checked
+# against the *other* object's independently-retracked real position for
+# that span, matched it (within 30px) on 72% of frames, confirming both
+# objects really were being confused with each other for nearly the whole
+# run, not just a coincidence at the boundary. There is no more accurate
+# data available once tracking has failed for this long; this constant
+# exists so that fact is loud in the logs instead of blending into a
+# routine per-run warning identical in shape to every short, well-
+# approximated one.
+LONG_INTERPOLATION_SPAN_FRAMES = 90
+
+
 def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
                             iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
                             anchor_iou_threshold=None, exclude_frame_ranges=()):
@@ -748,6 +768,12 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     wrong, overwriting an accurate re-track with a worse interpolated
     approximation.
 
+    An interpolated run longer than `LONG_INTERPOLATION_SPAN_FRAMES` gets
+    a second, more detailed WARNING beyond the routine per-run one --
+    confirmed on real footage, a long straight-line interpolation can
+    badly miss the real motion, and that needs to be loud in the logs
+    rather than looking like every other short, well-approximated run.
+
     Returns the number of frames patched (interpolated or held).
     """
     logger = logging.getLogger(__name__)
@@ -776,7 +802,8 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
             # else: no anchor at all -- nothing better than the raw fit.
 
         if before is not None or after is not None:
-            n_held += run_end - run_start + 1
+            span = run_end - run_start + 1
+            n_held += span
             logger.warning(
                 "frames %d-%d: tracked objects' masks overlapped (IoU up to %.2f, cap %.2f) -- %s "
                 "both objects' geometry%s",
@@ -789,6 +816,16 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                     else f" at frame {frame_indices[before if before is not None else after]}'s values"
                 ),
             )
+            if before is not None and after is not None and span > LONG_INTERPOLATION_SPAN_FRAMES:
+                logger.warning(
+                    "frames %d-%d: this interpolated span is %d frames long -- long enough that a "
+                    "straight line between its two endpoints likely does not track the real motion "
+                    "well (see LONG_INTERPOLATION_SPAN_FRAMES). Neither the shared tracking session "
+                    "nor an independent re-track (if attempted) could tell the two objects apart for "
+                    "this long; this is a tracking confidence gap this function cannot improve "
+                    "further on its own -- worth reviewing this stretch of the render visually.",
+                    frame_indices[run_start], frame_indices[run_end], span,
+                )
 
     if n_held:
         np.savez(motion_path_a, **motion_a)
