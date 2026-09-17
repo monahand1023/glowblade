@@ -613,22 +613,156 @@ def _good_frame_mask(motion_a, motion_b, ious, anchor_iou_threshold):
     return valid & (ious <= anchor_iou_threshold)
 
 
-def _interpolate_row(motion, i, before, after, t):
-    """Set row `i` of `motion` by interpolating fraction `t` of the way
-    from row `before` to row `after`, for `centroid`/`hilt`/`tip`/`width`,
-    then re-deriving `axis`/`length`/`angle` from the interpolated
-    `tip`/`hilt` so the geometry stays internally consistent (axis really
-    is the unit vector from hilt to tip, length really is their
-    distance) -- rather than blending all seven fields independently,
-    which could disagree with each other."""
-    for field in ("centroid", "hilt", "tip", "width"):
-        motion[field][i] = (1 - t) * motion[field][before] + t * motion[field][after]
-    axis_vec = motion["tip"][i] - motion["hilt"][i]
-    norm = np.linalg.norm(axis_vec)
-    motion["length"][i] = norm
-    if norm > 0:
-        motion["axis"][i] = axis_vec / norm
-        motion["angle"][i] = np.arctan2(axis_vec[1], axis_vec[0])
+def _curvature_matrix(times):
+    """`(T, T+2)` matrix `L` such that `L @ y` -- for `y` of length `T+2`,
+    with `y[0]`/`y[-1]` fixed boundary values and `y[1:-1]` the `T`
+    interior unknowns -- gives each interior point's curvature
+    (second-derivative) estimate under `times`' (length `T+2`) spacing,
+    which need not be uniform. Standard three-point second-derivative
+    estimate; reduces to the familiar `y[k-1] - 2*y[k] + y[k+1]` when
+    consecutive `times` are evenly spaced.
+
+    This is the building block of `_smooth_run_field`'s "prefer a
+    physically smooth path" prior: a sequence with zero curvature
+    everywhere is, by construction, the straight line between its two
+    fixed endpoints.
+    """
+    t = np.asarray(times, dtype=np.float64)
+    T = len(t) - 2
+    L = np.zeros((T, T + 2))
+    for k in range(1, T + 1):
+        h0 = t[k] - t[k - 1]
+        h1 = t[k + 1] - t[k]
+        L[k - 1, k - 1] = 2.0 / (h0 * (h0 + h1))
+        L[k - 1, k] = -2.0 / (h0 * h1)
+        L[k - 1, k + 1] = 2.0 / (h1 * (h0 + h1))
+    return L
+
+
+# How strongly `_smooth_run_field` favors a physically-smooth (low
+# curvature) path over chasing each frame's own raw fit within an overlap
+# run. Calibrated against the real 293-454 (162-frame) contact run: swept
+# over three orders of magnitude (10 to 100,000) and compared each
+# candidate's resulting path against the raw per-frame data's own
+# frame-to-frame acceleration (a jitter proxy, mean 10.64px/frame^2 on
+# that run) and total travelled span (up to 282px on one channel). At
+# this value the smoothed path's mean acceleration is ~0.07px/frame^2 --
+# about 150x smoother than the raw data, visibly not chasing its jitter
+# -- while still covering ~72% of the raw data's travelled span (202 of
+# 282px) on the channel checked, versus the plain straight line's ~9%
+# (26.6px). Because the weighted data term vanishes wherever confidence
+# (see `_run_confidence_weights`) is exactly 0, this value has *no*
+# effect on a run whose two objects' raw fits coincide throughout -- that
+# degrades to the same straight line regardless of this constant (see
+# `_curvature_matrix`'s docstring).
+RUN_SMOOTHING_STRENGTH = 2000.0
+
+
+def _smooth_run_field(raw, weights, all_times, before_value, after_value,
+                       smoothing_strength=RUN_SMOOTHING_STRENGTH):
+    """The `len(raw)` interior values that minimize weighted deviation
+    from `raw` (weight `weights[i]` per frame) plus `smoothing_strength`
+    times squared curvature (see `_curvature_matrix`), pinned to
+    `before_value`/`after_value` at the two times just outside
+    `all_times[1:-1]`'s span (`all_times[0]` and `all_times[-1]`).
+
+    A weight of 0 for every frame reduces exactly to linear interpolation
+    between `before_value` and `after_value` -- minimizing pure curvature
+    with fixed endpoints has the straight line as its unique solution --
+    so a run with no usable raw signal at all degrades to the same plain
+    straight-line fallback this replaced, not to something worse. Where
+    `weights` is nonzero, the solution bends toward `raw` there,
+    proportional to how much that frame's mask overlap allows it to be
+    trusted.
+    """
+    raw = np.asarray(raw, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    n_interior = len(raw)
+    curvature = _curvature_matrix(all_times)
+    curvature_int = curvature[:, 1:n_interior + 1]
+    curvature_bnd = curvature[:, [0, n_interior + 1]]
+    y_bnd = np.array([before_value, after_value], dtype=np.float64)
+
+    a = smoothing_strength * (curvature_int.T @ curvature_int) + np.diag(weights)
+    b = weights * raw - smoothing_strength * (curvature_int.T @ (curvature_bnd @ y_bnd))
+    return np.linalg.solve(a, b)
+
+
+def _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_length):
+    """Per-frame confidence, in `[0, 1]`, for using each object's own raw
+    fitted geometry as weak evidence while smoothing through an overlap
+    run: the distance between the two objects' raw centroids at that
+    frame, relative to `reference_length` (a typical blade length for
+    this pair), clipped to `[0, 1]`.
+
+    An earlier version of this used `1 - iou` (the cross-object mask IoU
+    that detected the run in the first place) as the confidence signal
+    instead. Confirmed wrong on real footage: at frame 410 of a real
+    162-frame contact run, mask IoU was 0.845 -- comfortably below the
+    run's 0.95 peak, so `1 - iou` reported a plausible-looking 0.155
+    confidence -- yet the two objects' independently-fitted raw
+    centroids landed 0.5px apart, both objects' `fit_blade` having
+    latched onto essentially the same visible blade. Trusting that
+    "confidence" pulled *both* objects' smoothed trajectories onto the
+    same line for several consecutive frames, a worse and more visually
+    obvious failure (both glow blades collapsing onto one, in the same
+    color-blended spot) than the plain straight line it replaced. Two
+    masks not being pixel-identical does not mean the *fitted geometry*
+    disagrees -- a partially-merged mask can still leave PCA landing on
+    the same shape for both objects -- so confidence has to measure that
+    disagreement directly instead of inferring it from mask overlap.
+    Two coincident raw fits (distance ~0, both objects visibly on the
+    same blade) get 0 confidence regardless of what the mask pixels say;
+    two fits a full blade-length or more apart get full confidence.
+    """
+    n = run_end - run_start + 1
+    if reference_length <= 0:
+        return np.zeros(n)
+    centroid_a = motion_a["centroid"][run_start:run_end + 1]
+    centroid_b = motion_b["centroid"][run_start:run_end + 1]
+    separation = np.linalg.norm(centroid_a - centroid_b, axis=1)
+    return np.clip(separation / reference_length, 0.0, 1.0)
+
+
+def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_indices, weights,
+                             smoothing_strength=RUN_SMOOTHING_STRENGTH):
+    """Replace `motion`'s rows `run_start..run_end` (inclusive, array
+    indices) with a smoothed trajectory anchored at `before`/`after`
+    (also array indices): `centroid`/`hilt`/`tip`/`width` are each
+    smoothed independently (per x/y coordinate for the vector fields) via
+    `_smooth_run_field`, then `axis`/`length`/`angle` are re-derived from
+    the smoothed `tip`/`hilt` so the geometry stays internally consistent
+    (axis really is the unit vector from hilt to tip, length really is
+    their distance) -- rather than smoothing all seven fields
+    independently, which could disagree with each other.
+    """
+    all_times = [frame_indices[before], *frame_indices[run_start:run_end + 1], frame_indices[after]]
+    raw = {field: motion[field][run_start:run_end + 1].copy() for field in ("centroid", "hilt", "tip", "width")}
+    before_row = {field: motion[field][before] for field in ("centroid", "hilt", "tip", "width")}
+    after_row = {field: motion[field][after] for field in ("centroid", "hilt", "tip", "width")}
+
+    smoothed = {}
+    for field in ("centroid", "hilt", "tip"):
+        smoothed[field] = np.stack([
+            _smooth_run_field(
+                raw[field][:, c], weights, all_times, before_row[field][c], after_row[field][c], smoothing_strength,
+            )
+            for c in (0, 1)
+        ], axis=1)
+    smoothed["width"] = _smooth_run_field(
+        raw["width"], weights, all_times, before_row["width"], after_row["width"], smoothing_strength,
+    )
+
+    for field, values in smoothed.items():
+        motion[field][run_start:run_end + 1] = values
+
+    axis_vecs = motion["tip"][run_start:run_end + 1] - motion["hilt"][run_start:run_end + 1]
+    norms = np.linalg.norm(axis_vecs, axis=1)
+    motion["length"][run_start:run_end + 1] = norms
+    nonzero = norms > 0
+    row_idx = np.arange(run_start, run_end + 1)[nonzero]
+    motion["axis"][row_idx] = axis_vecs[nonzero] / norms[nonzero, None]
+    motion["angle"][row_idx] = np.arctan2(axis_vecs[nonzero, 1], axis_vecs[nonzero, 0])
 
 
 def _freeze_row(motion, i, anchor):
@@ -704,21 +838,22 @@ def _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b,
 
 # A run this long (roughly 3.5s+ at typical frame rates) means neither the
 # shared multi-object tracking session nor, if it was tried,
-# `reacquire.retrack_overlap_runs`' independent re-track could tell the
-# two objects apart for a long stretch -- interpolating a straight line
-# between the two endpoints is the best available fallback, but confirmed
-# on real fencing footage it can badly miss the real motion: a 162-frame
-# span interpolated to a nearly frozen 56px drift, while the object's own
-# raw (generally unreliable during the run, but not meaningless) tracking
-# swung through a 200px+ range over the same stretch -- and cross-checked
-# against the *other* object's independently-retracked real position for
-# that span, matched it (within 30px) on 72% of frames, confirming both
-# objects really were being confused with each other for nearly the whole
-# run, not just a coincidence at the boundary. There is no more accurate
-# data available once tracking has failed for this long; this constant
-# exists so that fact is loud in the logs instead of blending into a
-# routine per-run warning identical in shape to every short, well-
-# approximated one.
+# `reacquire.retrack_overlap_runs`'s independent re-track could tell the
+# two objects apart for a long stretch. `_smooth_interpolate_run`'s
+# confidence-weighted smoother (see `_run_confidence_weights`) does
+# meaningfully better than a plain straight line here -- it bends toward
+# each frame's own raw fit wherever the two objects' independently
+# fitted raw geometry is far enough apart to trust -- but on a span this
+# long, a large fraction of frames can still have the two objects' raw
+# fits essentially coincide (confirmed on real fencing footage: on the
+# 162-frame 293-454 run, several multi-frame stretches had the two
+# objects' raw centroids landing within a few pixels of each other even
+# where mask IoU alone looked only moderately bad), where confidence is
+# ~0 and the smoother has nothing but the boundary anchors and a
+# smoothness prior to go on, same as a plain interpolation would. This
+# constant exists so that fact is loud in the logs instead of blending
+# into a routine per-run warning identical in shape to every short,
+# well-approximated one.
 LONG_INTERPOLATION_SPAN_FRAMES = 90
 
 
@@ -732,17 +867,24 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     fit_blade result computed from a mask that may have bled into the
     other object's blade.
 
-    Prefers to *interpolate* linearly between the last good frame before
-    the run and the first good frame after it, rather than freezing at a
+    Prefers to *smooth* a trajectory between the last good frame before the
+    run and the first good frame after it, rather than freezing at a
     single value for the run's whole duration -- confirmed on real
     footage, a real hilt travels 150-235px across a ~3s run of overlapping
     frames (a real fencing exchange, not an instant touch), so a frozen
     geometry visibly detaches from the hand holding it ("the blade
-    disembodies and floats") long before the run ends. Interpolating keeps
-    both endpoints exactly right and approximates the motion between them
-    -- not real tracking, but far closer to it than a dead hold, and either
-    endpoint missing (the run starts at frame 0, or never ends before the
-    clip does) falls back to freezing at whichever single endpoint exists.
+    disembodies and floats") long before the run ends. The smoother
+    (`_smooth_interpolate_run`) pins both endpoints exactly and fills the
+    gap with a low-curvature path that also bends toward each frame's own
+    raw fit wherever the two objects' raw fits are far enough apart from
+    *each other* to trust (see `_run_confidence_weights`) -- confirmed on
+    real footage to track a real, non-monotonic engagement (blades
+    disengage and re-engage) far better than a straight line would, while
+    degrading gracefully to exactly that straight line on a stretch where
+    the two objects' raw fits coincide throughout and no raw signal is
+    usable at all. Either endpoint missing (the run starts at frame 0, or
+    never ends before the clip does) falls back to freezing at whichever
+    single endpoint exists.
 
     Runs after `compute_motion` has produced both objects' motion.npz (it
     patches, not produces, so it needs their finished output), after
@@ -768,13 +910,16 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     wrong, overwriting an accurate re-track with a worse interpolated
     approximation.
 
-    An interpolated run longer than `LONG_INTERPOLATION_SPAN_FRAMES` gets
-    a second, more detailed WARNING beyond the routine per-run one --
-    confirmed on real footage, a long straight-line interpolation can
-    badly miss the real motion, and that needs to be loud in the logs
-    rather than looking like every other short, well-approximated run.
+    A smoothed run longer than `LONG_INTERPOLATION_SPAN_FRAMES` gets a
+    second, more detailed WARNING beyond the routine per-run one --
+    confirmed on real footage, a run this long can still spend most of its
+    length with the two objects' raw fits essentially coinciding, where
+    the smoother has no raw signal to lean on and falls back to the same
+    straight line a plain interpolation would give, and that needs to be
+    loud in the logs rather than looking like every other short,
+    well-approximated run.
 
-    Returns the number of frames patched (interpolated or held).
+    Returns the number of frames patched (smoothed or held).
     """
     logger = logging.getLogger(__name__)
     motion_a = load_motion(motion_path_a)
@@ -788,18 +933,23 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
         if any(start_frame <= ex_end and end_frame >= ex_start for ex_start, ex_end in exclude_frame_ranges):
             continue
 
-        for j in range(run_start, run_end + 1):
-            if before is not None and after is not None:
-                t = (frame_indices[j] - frame_indices[before]) / (frame_indices[after] - frame_indices[before])
-                _interpolate_row(motion_a, j, before, after, t)
-                _interpolate_row(motion_b, j, before, after, t)
-            elif before is not None:
-                _freeze_row(motion_a, j, before)
-                _freeze_row(motion_b, j, before)
-            elif after is not None:
-                _freeze_row(motion_a, j, after)
-                _freeze_row(motion_b, j, after)
-            # else: no anchor at all -- nothing better than the raw fit.
+        if before is not None and after is not None:
+            reference_length = float(np.mean([
+                motion_a["length"][before], motion_a["length"][after],
+                motion_b["length"][before], motion_b["length"][after],
+            ]))
+            weights = _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_length)
+            _smooth_interpolate_run(motion_a, run_start, run_end, before, after, frame_indices, weights)
+            _smooth_interpolate_run(motion_b, run_start, run_end, before, after, frame_indices, weights)
+        else:
+            for j in range(run_start, run_end + 1):
+                if before is not None:
+                    _freeze_row(motion_a, j, before)
+                    _freeze_row(motion_b, j, before)
+                elif after is not None:
+                    _freeze_row(motion_a, j, after)
+                    _freeze_row(motion_b, j, after)
+                # else: no anchor at all -- nothing better than the raw fit.
 
         if before is not None or after is not None:
             span = run_end - run_start + 1
@@ -809,7 +959,7 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                 "both objects' geometry%s",
                 frame_indices[run_start], frame_indices[run_end], max_iou,
                 iou_threshold,
-                "interpolated" if before is not None and after is not None else "held",
+                "smoothed" if before is not None and after is not None else "held",
                 (
                     f" between frames {frame_indices[before]} and {frame_indices[after]}"
                     if before is not None and after is not None
@@ -820,10 +970,13 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                 logger.warning(
                     "frames %d-%d: this interpolated span is %d frames long -- long enough that a "
                     "straight line between its two endpoints likely does not track the real motion "
-                    "well (see LONG_INTERPOLATION_SPAN_FRAMES). Neither the shared tracking session "
-                    "nor an independent re-track (if attempted) could tell the two objects apart for "
-                    "this long; this is a tracking confidence gap this function cannot improve "
-                    "further on its own -- worth reviewing this stretch of the render visually.",
+                    "well (see LONG_INTERPOLATION_SPAN_FRAMES). The confidence-weighted smoother "
+                    "(_smooth_interpolate_run) bends toward each frame's own raw fit wherever the two "
+                    "objects' raw fits are far enough apart to trust, but a run this long can still "
+                    "spend most of its length with the two objects' raw fits essentially coinciding, "
+                    "where there is no raw signal to lean on and it falls back to the same straight "
+                    "line a plain interpolation would give; worth reviewing this stretch of the "
+                    "render visually.",
                     frame_indices[run_start], frame_indices[run_end], span,
                 )
 
@@ -853,10 +1006,9 @@ def _centroid_dist(p, q):
 
 
 def _interpolate_geometry(before, after, t):
-    """A BladeGeometry `t` of the way from `before` to `after`, built the
-    same way `_interpolate_row` builds an interpolated motion.npz row:
-    blend centroid/hilt/tip/width directly, then re-derive axis/length/
-    angle from the interpolated hilt/tip so the result stays internally
+    """A BladeGeometry `t` of the way from `before` to `after`: blend
+    centroid/hilt/tip/width directly, then re-derive axis/length/angle
+    from the interpolated hilt/tip so the result stays internally
     consistent instead of blending all seven fields independently."""
     centroid = (1 - t) * np.asarray(before.centroid) + t * np.asarray(after.centroid)
     hilt = (1 - t) * np.asarray(before.hilt) + t * np.asarray(after.hilt)

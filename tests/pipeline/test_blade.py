@@ -6,6 +6,7 @@ from lightsaber_fx.pipeline.blade import (
     BladeGeometry,
     _find_overlap_runs,
     _mask_iou,
+    _smooth_run_field,
     angular_speed,
     classify_tip_by_taper,
     compute_motion,
@@ -844,22 +845,25 @@ def test_mask_iou_both_empty_is_zero():
 # at whichever side exists.
 # ---------------------------------------------------------------------------
 
-def _motion_geo(length, i=0):
+def _motion_geo(length, i=0, x_offset=0.0):
     return BladeGeometry(
-        centroid=(float(i), 0.0), axis=(1.0, 0.0),
-        tip=(float(i) + length, 0.0), hilt=(float(i), 0.0),
+        centroid=(float(i) + x_offset, 0.0), axis=(1.0, 0.0),
+        tip=(float(i) + x_offset + length, 0.0), hilt=(float(i) + x_offset, 0.0),
         length=length, width=5.0, angle=0.0,
     )
 
 
-def _write_lengths(path, lengths):
+def _write_lengths(path, lengths, x_offset=0.0):
     """A minimal valid motion.npz (a `None` entry becomes a NaN row, same
-    as save_motion always has) -- only `length` matters to these tests, but
-    the full field set is written so suppress_overlap_bleed's per-field
-    copy has real arrays to work with, matching what compute_motion
-    actually produces."""
+    as save_motion always has) -- only `length` matters to most of these
+    tests, but the full field set is written so suppress_overlap_bleed's
+    per-field copy has real arrays to work with, matching what
+    compute_motion actually produces. `x_offset` shifts every frame's
+    centroid/hilt/tip by a fixed amount -- used to give two objects a
+    real raw-geometry separation for `_run_confidence_weights` (see
+    `_motion_geo`); 0.0 (the default) matches every existing caller."""
     save_motion(str(path), [
-        _motion_geo(length, i) if length is not None else None
+        _motion_geo(length, i, x_offset=x_offset) if length is not None else None
         for i, length in enumerate(lengths)
     ])
 
@@ -981,6 +985,68 @@ def test_suppress_overlap_bleed_interpolates_toward_the_after_anchor_not_a_flat_
     # strictly between the two anchors and moving monotonically toward
     # "after" -- not frozen flat at "before" (100) for both frames
     assert 100.0 < result_a["length"][1] < result_a["length"][2] < 150.0
+
+
+def test_suppress_overlap_bleed_bends_toward_raw_data_when_raw_fits_are_well_separated(tmp_path):
+    # The real-footage finding this drove: on a long run, a plain straight
+    # line between the two anchors can badly miss real (non-monotonic)
+    # motion. Here both anchors are identical (100), so a plain straight
+    # line would hold flat at 100 for the whole run -- but object B's own
+    # raw length spikes to 500 in the middle. Object B's whole geometry is
+    # offset 300px from object A's (`x_offset`), well past the ~100px
+    # reference length `_run_confidence_weights` compares against, so the
+    # two objects' raw fits are confidently distinct throughout the run
+    # (see `_run_confidence_weights` -- cross-object mask IoU alone was
+    # confirmed on real footage *not* to be a reliable stand-in for this).
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 7
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2, 3, 4, 5})
+    _write_lengths(motion_a, [100] * n)
+    _write_lengths(motion_b, [100, 120, 150, 500, 150, 120, 100], x_offset=300.0)
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_b = load_motion(str(motion_b))
+    assert result_b["length"][0] == pytest.approx(100.0)  # before anchor, untouched
+    assert result_b["length"][6] == pytest.approx(100.0)  # after anchor, untouched
+    # a plain straight line between two equal anchors would hold flat at
+    # 100.0 for the whole run -- this must be measurably above that.
+    assert result_b["length"][3] > 100.3
+
+
+def test_smooth_run_field_reduces_to_linear_interpolation_when_weights_are_zero(tmp_path):
+    # The key correctness property `_smooth_run_field`'s docstring
+    # promises: a run with no usable raw signal at all (every confidence
+    # weight 0, e.g. a fully-merged IoU-1.0 run) must degrade to exactly
+    # the same result the old plain straight-line fallback gave, not to
+    # something worse.
+    raw = np.array([999.0, -50.0, 1e6, 3.0])  # deliberately irrelevant: weight is 0
+    weights = np.zeros(4)
+    all_times = [0, 10, 20, 30, 40, 50]  # 4 interior frames, non-uniform spacing
+    before_value, after_value = 10.0, 210.0
+
+    smoothed = _smooth_run_field(raw, weights, all_times, before_value, after_value, smoothing_strength=500.0)
+
+    interior_times = np.array(all_times[1:-1], dtype=float)
+    t0, t1 = all_times[0], all_times[-1]
+    expected_linear = before_value + (after_value - before_value) * (interior_times - t0) / (t1 - t0)
+    assert smoothed == pytest.approx(expected_linear, abs=1e-6)
+
+
+def test_smooth_run_field_bends_toward_raw_data_when_confidently_weighted(tmp_path):
+    # The mirror case: full confidence (weight 1) everywhere and a small
+    # smoothing strength should pull the result close to the raw data's
+    # own shape, not the straight line between the anchors.
+    raw = np.array([10.0, 10.0, 100.0, 10.0, 10.0])
+    weights = np.ones(5)
+    all_times = [0, 1, 2, 3, 4, 5, 6]
+    before_value, after_value = 10.0, 10.0  # a straight line would be flat at 10.0
+
+    smoothed = _smooth_run_field(raw, weights, all_times, before_value, after_value, smoothing_strength=0.01)
+
+    assert smoothed[2] > 50.0  # bends strongly toward the raw spike, not flat at 10.0
 
 
 def test_suppress_overlap_bleed_leaves_wide_swings_untouched_when_masks_never_overlap(tmp_path):
