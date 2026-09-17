@@ -13,6 +13,7 @@ from .blade import (
 )
 from .frames import extract_frames
 from .glow import parse_color, render_glow, render_glow_multi
+from .hilt_track import compute_hilt_overrides
 from .mux import encode
 from .reacquire import reconcile_pair, retrack_overlap_runs
 from .track import track_object, track_objects
@@ -360,6 +361,20 @@ def run_pipeline_multi(
                 paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
             )
 
+        # For whatever overlap run retrack_overlap_runs above couldn't
+        # resolve, try recovering each object's hilt (hand/grip) position
+        # via optical flow on the raw frames -- a different technique
+        # from anything else in this pipeline (it never touches SAM2
+        # masks), so it can succeed exactly where the mask-based
+        # approaches got confused. Same exclude_frame_ranges as
+        # suppress_overlap_bleed below -- a run retrack_overlap_runs
+        # already resolved needs nothing further.
+        hilt_overrides_0, hilt_overrides_1 = compute_hilt_overrides(
+            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
+            paths["motion_paths"][0], paths["motion_paths"][1],
+            exclude_frame_ranges=resolved_ranges,
+        )
+
         # Runs after both objects' motion.npz exist (it patches, not
         # produces, so it needs their finished output) and before the
         # usability check below, so a stretch of frames this corrects
@@ -372,6 +387,7 @@ def run_pipeline_multi(
             paths["motion_paths"][0], paths["masks_dirs"][0],
             paths["motion_paths"][1], paths["masks_dirs"][1],
             exclude_frame_ranges=resolved_ranges,
+            hilt_overrides_a=hilt_overrides_0, hilt_overrides_b=hilt_overrides_1,
         )
 
     for oid in object_ids:

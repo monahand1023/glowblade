@@ -1018,6 +1018,83 @@ def test_run_pipeline_multi_skips_retrack_overlap_runs_for_a_four_saber_job(
     )
 
 
+def test_run_pipeline_multi_calls_compute_hilt_overrides_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade}),
+    )
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.retrack_overlap_runs",
+        lambda *a, **k: (set(), [(3, 5)]),
+    )
+    calls = []
+
+    def fake_compute_hilt_overrides(frames_dir, masks_dir_a, masks_dir_b, motion_path_a, motion_path_b,
+                                     exclude_frame_ranges=()):
+        # Must run after both objects' compute_motion (it reads their
+        # finished motion.npz) and before suppress_overlap_bleed.
+        assert os.path.exists(motion_path_a)
+        assert os.path.exists(motion_path_b)
+        calls.append(list(exclude_frame_ranges))
+        return {7: (1.0, 2.0)}, {}
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.compute_hilt_overrides", fake_compute_hilt_overrides
+    )
+
+    overload_calls = []
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed",
+        lambda *a, hilt_overrides_a=None, hilt_overrides_b=None, **k: overload_calls.append(
+            (hilt_overrides_a, hilt_overrides_b)
+        ) or 0,
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert calls == [[(3, 5)]]  # same resolved_ranges threaded through as exclude_frame_ranges
+    assert overload_calls == [({7: (1.0, 2.0)}, {})]
+
+
+def test_run_pipeline_multi_skips_compute_hilt_overrides_for_a_single_saber_job(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade}),
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("compute_hilt_overrides should not run for a single-saber job")
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.compute_hilt_overrides", fail_if_called)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[{"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"}],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+
 def test_run_pipeline_multi_reruns_compute_motion_for_objects_retrack_overlap_runs_patches(
     tmp_path, monkeypatch, tiny_video_path
 ):
@@ -1153,7 +1230,7 @@ def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp
     calls = []
 
     def fake_suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
-                                     exclude_frame_ranges=()):
+                                     exclude_frame_ranges=(), hilt_overrides_a=None, hilt_overrides_b=None):
         # Must run after both objects' compute_motion, since it patches
         # already-written motion.npz rather than producing it.
         assert os.path.exists(motion_path_a)
