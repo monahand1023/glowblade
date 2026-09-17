@@ -6,6 +6,7 @@ from lightsaber_fx.pipeline.blade import (
     BladeGeometry,
     _find_overlap_runs,
     _mask_iou,
+    _smooth_interpolate_run,
     _smooth_run_field,
     _tip_confidence_weights,
     angular_speed,
@@ -1182,11 +1183,50 @@ def test_suppress_overlap_bleed_pulls_tip_toward_raw_data_only_where_it_is_not_c
     assert result_a["length"][3] < 100.0
     # frame 2 (clean, full tip confidence) must be pulled measurably
     # above the anchors' flat 50px, toward its own 100px raw signal --
-    # RUN_SMOOTHING_STRENGTH is calibrated for real-footage scale, so a
-    # tiny toy run like this one only bends slightly even at full
-    # confidence (see _smooth_run_field's own calibration tests for the
-    # same effect); the point here is direction, not magnitude.
-    assert result_a["length"][2] > 50.2
+    # TIP_SMOOTHING_STRENGTH is calibrated for real-footage scale (a
+    # 162-frame run, positions in the hundreds of px), so a tiny 5-frame
+    # toy run like this one only bends slightly above the flat baseline
+    # even at full confidence; the point here is direction, not
+    # magnitude (see TIP_SMOOTHING_STRENGTH's own comment for why it
+    # needs to be this strong).
+    assert result_a["length"][2] > 50.001
+
+
+def test_smooth_interpolate_run_escalates_tip_strength_only_when_tip_weights_given():
+    # The exact regression this session hit twice: suppress_overlap_bleed
+    # once passed an explicit tip_weights value on every call (even one
+    # numerically equal to `weights`, when no hilt overrides existed),
+    # which silently escalated tip's smoothing strength everywhere,
+    # breaking the already-validated no-override behavior. This isolates
+    # _smooth_interpolate_run directly: same raw data, same (all-ones)
+    # weights passed both ways -- the *only* difference between the two
+    # calls is whether `tip_weights` was given at all.
+    n = 7
+
+    def fresh_motion():
+        m = {
+            "centroid": np.zeros((n, 2)), "hilt": np.zeros((n, 2)),
+            "tip": np.zeros((n, 2)), "axis": np.zeros((n, 2)),
+            "length": np.zeros(n), "width": np.zeros(n), "angle": np.zeros(n),
+        }
+        for i in range(n):
+            m["hilt"][i] = (float(i), 0.0)
+            m["centroid"][i] = (float(i), 0.0)
+            m["width"][i] = 5.0
+            # a spike at frame 3 so the smoothing effect is visible
+            m["tip"][i] = (float(i) + (500.0 if i == 3 else 100.0), 0.0)
+        return m
+
+    motion_default, motion_escalated = fresh_motion(), fresh_motion()
+    weights = np.ones(5)
+
+    _smooth_interpolate_run(motion_default, 1, 5, 0, 6, list(range(n)), weights)
+    _smooth_interpolate_run(motion_escalated, 1, 5, 0, 6, list(range(n)), weights, tip_weights=weights)
+
+    # both anchors are ~100-106 -- the escalated (stronger) smoothing
+    # must land measurably closer to that flat baseline at the frame-3
+    # spike than the default (shared RUN_SMOOTHING_STRENGTH) smoothing.
+    assert motion_escalated["tip"][3, 0] < motion_default["tip"][3, 0]
 
 
 def test_suppress_overlap_bleed_skips_tip_confidence_weighting_without_both_hilt_overrides(tmp_path):

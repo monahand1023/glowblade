@@ -776,8 +776,31 @@ def _tip_confidence_weights(motion_a, motion_b, run_start, run_end, frame_indice
     return weights_a, weights_b
 
 
+# _smooth_run_field's regularization strength, specifically for the
+# `tip` field, when tip has its own confidence signal
+# (_tip_confidence_weights) rather than the shared centroid-based one.
+# Confirmed necessary on real footage, and confirmed NOT just "more
+# smoothing is always safer": at RUN_SMOOTHING_STRENGTH (2000), a sparse
+# cluster of real, correctly-high-confidence points concentrated near
+# one end of a 162-frame run (frames 432-454, ramping to full
+# confidence right before the "after" anchor) pulled the *entire* curve
+# into a smooth but wildly wrong bow reaching 933px on a 1280px-wide
+# frame -- neither anchor exceeds 751px. This is `_smooth_run_field`
+# behaving as designed (a curvature-minimizing spline distributes
+# curvature across its whole domain to reach a sparse, asymmetric pull
+# smoothly, rather than "hooking in" locally near it) but is unsafe at
+# this strength when the trustworthy signal is this asymmetric. Swept
+# 2,000-1,000,000 directly against the real run: the object with the
+# overshoot needs at least ~100,000 to keep the curve within its own
+# anchors' range (measured max 750px, vs both anchors near 669-751px);
+# the object that never had this problem is confirmed unaffected by the
+# higher value (measured max changes by <1px across the whole sweep).
+TIP_SMOOTHING_STRENGTH = 100000
+
+
 def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_indices, weights,
-                             smoothing_strength=RUN_SMOOTHING_STRENGTH, tip_weights=None):
+                             smoothing_strength=RUN_SMOOTHING_STRENGTH, tip_weights=None,
+                             tip_smoothing_strength=None):
     """Replace `motion`'s rows `run_start..run_end` (inclusive, array
     indices) with a smoothed trajectory anchored at `before`/`after`
     (also array indices): `centroid`/`hilt`/`tip`/`width` are each
@@ -792,10 +815,21 @@ def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_ind
     different confidence signal than `centroid`/`hilt`/`width` -- see
     `_tip_confidence_weights`, whose whole reason to exist is that a
     frame can have plenty of centroid-based confidence while its tip
-    specifically has bled onto the other tracked object.
+    specifically has bled onto the other tracked object. Only when
+    `tip_weights` is actually given does `tip` also default to its own,
+    stronger `tip_smoothing_strength` (see `TIP_SMOOTHING_STRENGTH`)
+    instead of the shared `smoothing_strength` -- the sparse-pull
+    overshoot that constant's own comment documents is a property of the
+    sharp, sparse confidence `_tip_confidence_weights` produces, not of
+    the shared centroid-based `weights` (confirmed: `smoothing_strength`
+    alone was already safe for every field before `tip_weights` existed,
+    and stays that way when `tip_weights` is left unset).
     """
+    using_tip_specific_weights = tip_weights is not None
     if tip_weights is None:
         tip_weights = weights
+    if tip_smoothing_strength is None:
+        tip_smoothing_strength = TIP_SMOOTHING_STRENGTH if using_tip_specific_weights else smoothing_strength
     all_times = [frame_indices[before], *frame_indices[run_start:run_end + 1], frame_indices[after]]
     raw = {field: motion[field][run_start:run_end + 1].copy() for field in ("centroid", "hilt", "tip", "width")}
     before_row = {field: motion[field][before] for field in ("centroid", "hilt", "tip", "width")}
@@ -804,10 +838,11 @@ def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_ind
     smoothed = {}
     for field in ("centroid", "hilt", "tip"):
         field_weights = tip_weights if field == "tip" else weights
+        field_strength = tip_smoothing_strength if field == "tip" else smoothing_strength
         smoothed[field] = np.stack([
             _smooth_run_field(
                 raw[field][:, c], field_weights, all_times, before_row[field][c], after_row[field][c],
-                smoothing_strength,
+                field_strength,
             )
             for c in (0, 1)
         ], axis=1)
@@ -1054,12 +1089,16 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                 motion_b["length"][before], motion_b["length"][after],
             ]))
             weights = _run_confidence_weights(motion_a, motion_b, run_start, run_end, reference_length)
-            # tip gets its own confidence signal when both objects have
-            # validated hilt positions to check it against -- see
-            # _tip_confidence_weights for why centroid-based `weights`
-            # alone isn't enough. Computed before _smooth_interpolate_run
-            # overwrites raw tip in place.
-            tip_weights_a, tip_weights_b = weights, weights
+            # tip gets its own confidence signal (and, with it, its own
+            # stronger smoothing strength -- see TIP_SMOOTHING_STRENGTH)
+            # only when both objects have validated hilt positions to
+            # check it against -- see _tip_confidence_weights for why
+            # centroid-based `weights` alone isn't enough. Computed
+            # before _smooth_interpolate_run overwrites raw tip in
+            # place. Left as None (not defaulted to `weights` here) when
+            # unavailable, so _smooth_interpolate_run's own default
+            # correctly falls back to the shared smoothing strength too.
+            tip_weights_a = tip_weights_b = None
             if hilt_overrides_a and hilt_overrides_b:
                 tip_weights_a, tip_weights_b = _tip_confidence_weights(
                     motion_a, motion_b, run_start, run_end, frame_indices,
