@@ -171,29 +171,48 @@ it patched) and right before `suppress_overlap_bleed`, passing
 `resolved_ranges` through as `exclude_frame_ranges` and threading the two
 resulting override dicts into the `suppress_overlap_bleed` call.
 
-## Constants (starting values -- calibrate against the real job during implementation)
+## Constants (calibrated against the real job before writing the implementation plan)
 
 Every constant in this codebase that governs a fuzzy real-footage decision
 (`RUN_SMOOTHING_STRENGTH`, `POSITION_GLITCH_JUMP_PX`,
 `CROSS_OBJECT_OVERLAP_IOU_THRESHOLD`, `RETRACK_MAX_DRIFT_FRAC`, ...) was
 picked by measuring against the real job, not guessed a priori and left
-alone. These follow the same rule -- the values below are reasoned starting
-points for the implementer to begin from, not final:
+alone. Before writing the implementation plan, the core approach was
+spiked directly against the real job's hilt positions at frames 290 and
+455 (the anchors either side of the 162-frame dead zone) to de-risk the
+whole design before committing a full plan to it:
 
 - `HILT_SEED_WINDOW_RADIUS_PX = 45` -- half-width of the square seed
-  window. Large enough to cover a gloved hand at this footage's framing,
-  small enough to avoid pulling in the *other* tracked object's hand or
-  blade during close contact.
-- `MIN_SEED_FEATURES = 4` -- fewer good corners than this makes the
-  per-frame median position too noisy to trust.
-- `HILT_TRACK_MAX_DRIFT_FRAC = 0.3` -- tighter than
-  `RETRACK_MAX_DRIFT_FRAC`'s 0.5, since a hilt point should track more
-  precisely than a whole re-tracked blade mask.
-- `cv2.calcOpticalFlowPyrLK`'s own `winSize`/`maxLevel` and
-  `cv2.goodFeaturesToTrack`'s `qualityLevel`/`minDistance` -- standard
-  OpenCV defaults are a reasonable starting point (`winSize=(21, 21)`,
-  `maxLevel=3`, `qualityLevel=0.3`, `minDistance=7`); tune only if real-data
-  validation shows a specific failure these don't explain.
+  window. Confirmed sufficient at this footage's framing; a wider radius
+  (60, 80) tested no better at the quality level below.
+- `cv2.goodFeaturesToTrack`'s `qualityLevel = 0.1` (not the library's own
+  0.3 default) -- **this mattered more than any other parameter.** At
+  quality 0.3, only 1-3 corners were found in the seed window (below
+  `MIN_SEED_FEATURES`, would have declined immediately); at 0.1, 9-16
+  corners were found consistently across both objects and both anchors.
+  `minDistance = 5`, `maxCorners = 20`.
+- `MIN_SEED_FEATURES = 4` -- comfortably cleared in practice (9-16 found)
+  at `qualityLevel = 0.1`; kept as a floor for a pathologically flat
+  window, not because real seeding is marginal.
+- `HILT_TRACK_MAX_DRIFT_FRAC = 0.3` -- confirmed appropriate: all four
+  real directions tested (forward/backward x object 0/object 1) landed
+  20-29px from their true validating anchor, comfortably inside a
+  25-62px cap (`0.3 * that anchor's own fitted blade length`).
+- `cv2.calcOpticalFlowPyrLK`'s `winSize=(21, 21)`, `maxLevel=3`,
+  `criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)`
+  -- standard OpenCV defaults, not tuned further since tracking already
+  held 9-13/9-13 seed points surviving the full 165-frame span in every
+  direction tested.
+
+**Result:** forward-tracking object 0's hilt across the *entire* 165-frame
+before-455 span landed within 21px of the true position; object 1 within
+21px; the backward direction similarly within 23-29px for both objects --
+against a straight-line fallback that, on this exact run, drifts the
+rendered blade completely off the real hand for a majority of the run
+(see Problem). This confirms the core assumption (the hand/glove region
+holds enough texture to track through contact that confuses the thin
+blade masks) actually holds on this footage before any implementation
+work started.
 
 ## Testing
 
