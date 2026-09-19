@@ -1305,6 +1305,112 @@ def _apply_hilt_overrides(motion, run_start, run_end, frame_indices, hilt_overri
         _rederive_from_tip_hilt(motion, j)
 
 
+# A tracked object's raw SAM2 mask can genuinely undersegment the blade for
+# several consecutive frames (not just a single isolated one -- see
+# POSITION_GLITCH_JUMP_PX's docstring for why that corrector is deliberately
+# narrower) while its *direction* stays smooth and correct, because
+# undersegmentation truncates the far end of an otherwise-straight object
+# rather than displacing it. Confirmed on real footage: one tracked
+# object's angle progressed smoothly and continuously (167 degrees ->
+# -147 degrees over 20 frames) across a stretch where its fitted length
+# swung wildly (122-251px on the same ~230px blade) with no centroid jump
+# anywhere near large enough to trip `_suppress_position_glitches` --
+# undersegmentation shortens a mask without moving its center anywhere
+# near as far as the lost length itself.
+#
+# Telling this apart from genuine motion (a real, gradual foreshortening
+# as a blade rotates toward the camera) needs more than a single
+# threshold: both a real trend and real noise change the length
+# frame-to-frame. Comparing only against a wide window's raw max flagged
+# a real 30-frame gradual decline (254px -> 179px; confirmed against the
+# raw source frames that the blade was fully extended and not
+# foreshortened there) as if it were degraded. What actually separates
+# them is the window's own local scatter: a real trend's frame-to-frame
+# values still sit close to *some* smooth curve through the window, while
+# genuine degradation scatters widely around a roughly constant true
+# value. MAD (median absolute deviation from the window's own median) is
+# used rather than a least-squares line's residual because the
+# degradation is asymmetric -- it only ever shortens the blade, never
+# lengthens it past the true value -- and a least-squares fit gets pulled
+# down by its own low outliers in a way the median resists.
+LENGTH_STABILIZE_WINDOW = 15
+LENGTH_STABILIZE_MAD_PX = 8.0
+LENGTH_STABILIZE_REL_THRESHOLD = 0.20
+LENGTH_STABILIZE_MIN_SAMPLES = 10
+
+
+def _stabilize_length_outliers(motion, frame_indices, window=LENGTH_STABILIZE_WINDOW,
+                                mad_px=LENGTH_STABILIZE_MAD_PX,
+                                rel_threshold=LENGTH_STABILIZE_REL_THRESHOLD,
+                                min_samples=LENGTH_STABILIZE_MIN_SAMPLES):
+    """Mutate `motion`'s `tip`/`length`/`axis`/`angle` arrays in place
+    wherever a frame's fitted length falls at least `rel_threshold` below
+    the median of a `window`-sized neighborhood, but only within a
+    neighborhood whose own MAD is at least `mad_px` -- seeing that much
+    scatter is what distinguishes real degradation from a smooth genuine
+    trend (see this section's constants' docstring above). `hilt` and the
+    fitted *direction* are trusted as-is; only the tip is pulled back in
+    along that same direction to the window's median length.
+
+    `frame_indices` supplies real video frame numbers for the log message
+    only -- pass `np.arange(len(motion["length"]))` if the true mapping
+    isn't available (e.g. a post-hoc pass with no masks_dir in hand).
+
+    Returns the number of frames corrected."""
+    logger = logging.getLogger(__name__)
+    hilt = motion["hilt"]
+    tip = motion["tip"]
+    axis = motion["axis"]
+    length = motion["length"]
+    n = len(length)
+    valid = ~np.isnan(length)
+    n_corrected = 0
+    for i in range(n):
+        if not valid[i]:
+            continue
+        lo, hi = max(0, i - window), min(n, i + window + 1)
+        idxs = np.nonzero(valid[lo:hi])[0] + lo
+        if len(idxs) < min_samples:
+            continue
+        vals = length[idxs]
+        med = float(np.median(vals))
+        mad = float(np.median(np.abs(vals - med)))
+        if mad >= mad_px and length[i] < med * (1 - rel_threshold):
+            logger.warning(
+                "frame %d: fitted length %.1fpx is a local outlier (window median %.1fpx, "
+                "MAD %.1fpx) -- extending tip back out along the fitted direction to match",
+                frame_indices[i], length[i], med, mad,
+            )
+            tip[i] = hilt[i] + axis[i] * med
+            _rederive_from_tip_hilt(motion, i)
+            n_corrected += 1
+    return n_corrected
+
+
+def stabilize_blade_length(motion_path):
+    """Post-hoc, single-object pass: corrects a locally-outlying fitted
+    length (see `_stabilize_length_outliers`) and writes `motion_path`
+    back in place if anything changed. For a 2-object job, the same
+    correction runs from inside `suppress_overlap_bleed` instead, against
+    its own in-memory arrays -- a real contact run's raw (pre-correction)
+    length is often *inflated* by cross-object mask bleed rather than
+    undersegmented, which would otherwise contaminate a nearby window's
+    median before that run gets fixed. This standalone entry point is for
+    a single-object job, where `suppress_overlap_bleed` never runs at
+    all."""
+    logger = logging.getLogger(__name__)
+    motion = load_motion(motion_path)
+    frame_indices = np.arange(len(motion["length"]))
+    n_corrected = _stabilize_length_outliers(motion, frame_indices)
+    if n_corrected:
+        logger.warning(
+            "%s: stabilized %d/%d frame(s) with a locally-outlying fitted length",
+            motion_path, n_corrected, len(motion["length"]),
+        )
+        np.savez(motion_path, **motion)
+    return n_corrected
+
+
 def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
                             iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
                             anchor_iou_threshold=None, exclude_frame_ranges=(),
@@ -1516,6 +1622,25 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                     frame_indices[correct_start], frame_indices[correct_end], span,
                 )
 
+    # Stabilize each object's fitted length against local outliers (see
+    # _stabilize_length_outliers) before computing bend below, so bend is
+    # measured against this correction too, not just the overlap-run
+    # smoothing above -- consistent with the bend comment's own "FINAL,
+    # already-corrected hilt-tip line" framing. Runs on the
+    # already-overlap-corrected arrays, not the raw per-object
+    # compute_motion output: a real contact run's raw length is often
+    # inflated (cross-object mask bleed), which would otherwise
+    # contaminate a nearby window's median before the correction above
+    # gets a chance to fix it.
+    n_length_corrected_a = _stabilize_length_outliers(motion_a, frame_indices)
+    n_length_corrected_b = _stabilize_length_outliers(motion_b, frame_indices)
+    for masks_dir, n_corrected in ((masks_dir_a, n_length_corrected_a), (masks_dir_b, n_length_corrected_b)):
+        if n_corrected:
+            logger.warning(
+                "%s: stabilized %d/%d frame(s) with a locally-outlying fitted length",
+                masks_dir, n_corrected, len(frame_indices),
+            )
+
     # Compute each object's bend candidate directly from its own raw
     # mask (every foreground pixel, not just the largest connected
     # component -- see _bend_offset_from_mask) against the FINAL,
@@ -1555,7 +1680,7 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
         _smooth_bend_field(motion_a)
         _smooth_bend_field(motion_b)
 
-    if n_held or had_bend_candidate:
+    if n_held or had_bend_candidate or n_length_corrected_a or n_length_corrected_b:
         np.savez(motion_path_a, **motion_a)
         np.savez(motion_path_b, **motion_b)
     return n_held

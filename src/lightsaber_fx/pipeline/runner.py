@@ -9,6 +9,7 @@ from .blade import (
     compute_motion,
     elongation_stats,
     load_motion,
+    stabilize_blade_length,
     suppress_overlap_bleed,
 )
 from .frames import extract_frames
@@ -199,6 +200,10 @@ def run_pipeline(
     n_tracked, n_with_blade = compute_motion(
         paths["masks_dir"], paths["motion_path"], progress_cb=stage_cb("motion"),
     )
+    # No suppress_overlap_bleed call in this single-object pipeline (there's
+    # only one object to bleed into), so this correction needs its own
+    # entry point here -- see stabilize_blade_length's docstring for why.
+    stabilize_blade_length(paths["motion_path"])
     _require_usable_track(n_tracked, n_with_blade, stage_cb("motion"), paths["motion_path"])
 
     return _render_from_masks(
@@ -389,6 +394,13 @@ def run_pipeline_multi(
             exclude_frame_ranges=resolved_ranges,
             hilt_overrides_a=hilt_overrides_0, hilt_overrides_b=hilt_overrides_1,
         )
+    else:
+        # The 2-object case gets this same correction from inside
+        # suppress_overlap_bleed above (it needs to run against those
+        # in-memory arrays, not a fresh load -- see that function's call
+        # to it). A single-object job has no suppress_overlap_bleed call
+        # at all, so it needs its own entry point here.
+        stabilize_blade_length(paths["motion_paths"][object_ids[0]])
 
     for oid in object_ids:
         n_tracked, n_with_blade = track_counts[oid]

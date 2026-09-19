@@ -25,6 +25,7 @@ from lightsaber_fx.pipeline.blade import (
     mask_frame_indices,
     save_mask,
     save_motion,
+    stabilize_blade_length,
     suppress_overlap_bleed,
     tip_speed,
     wrap_axis_angle_delta,
@@ -1029,6 +1030,101 @@ def test_compute_motion_does_not_warn_for_an_ordinary_length_change(tmp_path, ca
         compute_motion(str(masks_dir), str(motion_path))
 
     assert "fitted length jumped" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# stabilize_blade_length
+#
+# The length-jump warning above is diagnostic only; this is the actual
+# correction. Real footage showed a tracked object's fitted length
+# scattering wildly (122-251px on a ~230px blade) over an extended stretch
+# while its centroid stayed put (never tripping _suppress_position_glitches)
+# and its fitted direction stayed smooth -- undersegmentation truncates a
+# mask without moving its center or changing which way it points. A first
+# attempt (compare each frame only to a wide window's raw max) flagged a
+# real, smooth 30-frame decline in the same footage (254px -> 179px,
+# confirmed via the raw source frames as a genuinely extended, unforeshortened
+# blade) as if it were degraded -- seeing this false positive land on real
+# data before it shipped is why the guard below (test two) exists as a
+# permanent regression check, not just the positive case (test one).
+# ---------------------------------------------------------------------------
+
+def test_stabilize_blade_length_corrects_a_locally_outlying_short_frame(tmp_path):
+    # Realistic small frame-to-frame jitter (+-10px, alternating) around a
+    # stable ~200px true length, with one frame (12) dropping to 100px --
+    # a sharp, isolated undershoot the way a truncated raw mask produces.
+    # Window MAD here is 20px (comfortably over LENGTH_STABILIZE_MAD_PX),
+    # so the window is judged noisy enough to check; frame 12 sits well
+    # under its window median (190px) times the correction threshold.
+    n = 25
+    lengths = [200 + 10 * ((-1) ** i) for i in range(n)]
+    lengths[12] = 100
+    motion_path = tmp_path / "motion.npz"
+    _write_lengths(motion_path, lengths)
+
+    n_corrected = stabilize_blade_length(str(motion_path))
+
+    assert n_corrected == 1
+    result = load_motion(str(motion_path))
+    # hilt (i, 0) and axis (1, 0) per _motion_geo -- tip pulled back out
+    # along that same direction to the window's median length (190px)
+    assert result["length"][12] == pytest.approx(190.0)
+    assert result["tip"][12] == pytest.approx([12.0 + 190.0, 0.0])
+    assert result["hilt"][12] == pytest.approx([12.0, 0.0])  # untouched
+    # every other frame's own (jittery-but-real) length is untouched
+    for i in range(n):
+        if i != 12:
+            assert result["length"][i] == pytest.approx(lengths[i])
+
+
+def test_stabilize_blade_length_leaves_a_smooth_real_decline_untouched(tmp_path):
+    # A perfectly linear decline -- no scatter around any local value, just
+    # a real, gradual trend -- must not be corrected at all, however far
+    # a late frame's value sits below an early frame's, matching the real
+    # false positive this function's docstring describes.
+    n = 31
+    lengths = [250 - (100.0 / 30) * i for i in range(n)]
+    motion_path = tmp_path / "motion.npz"
+    _write_lengths(motion_path, lengths)
+
+    n_corrected = stabilize_blade_length(str(motion_path))
+
+    assert n_corrected == 0
+    result = load_motion(str(motion_path))
+    for i in range(n):
+        assert result["length"][i] == pytest.approx(lengths[i])
+
+
+def test_stabilize_blade_length_no_op_below_the_minimum_sample_count(tmp_path):
+    # Too few valid neighboring frames to trust a window median at all --
+    # must not "correct" against a handful of points.
+    lengths = [200, 200, 50, 200, 200]  # only 5 frames, well under the minimum
+    motion_path = tmp_path / "motion.npz"
+    _write_lengths(motion_path, lengths)
+
+    n_corrected = stabilize_blade_length(str(motion_path))
+
+    assert n_corrected == 0
+
+
+def test_suppress_overlap_bleed_also_stabilizes_an_outlying_length(tmp_path):
+    # The 2-object pipeline gets this same correction from inside
+    # suppress_overlap_bleed (see that function's own comment for why it
+    # must run there rather than being left to a separate post-hoc pass).
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 25
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames=set())  # no contact at all
+    lengths_a = [200 + 10 * ((-1) ** i) for i in range(n)]
+    lengths_a[12] = 100
+    _write_lengths(motion_a, lengths_a)
+    _write_lengths(motion_b, [100] * n)
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert result_a["length"][12] == pytest.approx(190.0)
 
 
 # ---------------------------------------------------------------------------
