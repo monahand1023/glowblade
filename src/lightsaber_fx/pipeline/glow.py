@@ -210,14 +210,28 @@ def _curved_capsule_mask(shape, hilt, tip, bend, width, extend_frac, hilt_taper_
     tip_pt = (round(centerline[-1][0]), round(centerline[-1][1]))
     cv2.circle(out, tip_pt, max(1, round(half_w)), 255, -1)
 
+    # The wedge's wide edge sits at `body_start`, exactly where the curve
+    # body's own first segment starts -- so it must use that segment's
+    # perpendicular, not the straight hilt-tip axis's. Confirmed visually
+    # on real bend magnitudes: the curve's tangent at `body_start` diverges
+    # from the straight axis as soon as `bend` pulls the centerline off the
+    # line, and using the straight-axis `perp` for the wedge left a visible
+    # notch/seam cut into the blade's edge right at the wedge/body join
+    # (the two edges met at an angle instead of lining up). The hilt-side
+    # edge keeps using the straight-axis `perp`: it touches nothing else,
+    # so its direction is cosmetically free.
+    body_tangent = centerline[1] - centerline[0]
+    body_tangent_norm = np.linalg.norm(body_tangent)
+    body_perp = np.array([-body_tangent[1], body_tangent[0]]) / body_tangent_norm if body_tangent_norm > 0 else perp
+
     hilt_half_w = half_w * hilt_taper_min_frac
     wedge = np.array([
         hilt + perp * hilt_half_w,
-        body_start + perp * half_w,
-        body_start - perp * half_w,
+        body_start + body_perp * half_w,
+        body_start - body_perp * half_w,
         hilt - perp * hilt_half_w,
     ])
-    cv2.fillConvexPoly(out, np.round(wedge).astype(np.int32), 255)
+    cv2.fillPoly(out, [np.round(wedge).astype(np.int32)], 255)
 
     return out
 

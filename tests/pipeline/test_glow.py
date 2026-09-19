@@ -149,6 +149,29 @@ def test_rendered_curve_magnitude_matches_the_masks_own_measured_bow():
     assert curved[round(bend[1]), round(bend[0])]
 
 
+def test_curved_capsule_hilt_wedge_has_no_seam_against_the_curve_body():
+    """Regression guard for a cosmetic defect found on real footage: the
+    hilt-side wedge's wide edge (at `body_start`) used the perpendicular
+    of the *straight* hilt-tip axis, while the curve body's own first
+    segment starts at that same point using the perpendicular of its
+    local *tangent* -- which diverges from the straight axis as soon as
+    `bend` pulls the centerline off the line. The two edges met at an
+    angle instead of lining up, cutting a small notch into the blade's
+    edge right at the wedge/body join. Confirmed visually (a zoomed PNG
+    crop) and reproduced numerically here: this exact bend pulls the
+    tangent at `body_start` far enough off-axis that pixel (98, 104) is
+    inside the intended blade shape but was left unlit by the old
+    straight-axis wedge.
+    """
+    shape = (200, 400)
+    hilt, tip = (60.0, 100.0), (340.0, 100.0)
+    bend = (200.0, 40.0)  # strong enough bow to visibly rotate the tangent
+
+    curved = _capsule_mask(shape, hilt, tip, 16.0, 0.10, 0.12, 0.35, bend=bend)
+
+    assert curved[104, 98], "notch: a pixel inside the intended blade shape is unlit at the wedge/body seam"
+
+
 # ---------------------------------------------------------------------------
 # Test helper: a synthetic clip with an elongated, blade-shaped mask (the
 # shared synthetic_track_fixture's mask is a tiny near-square blob, fine for
