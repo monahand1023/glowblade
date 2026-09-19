@@ -4,6 +4,7 @@ import pytest
 from lightsaber_fx.pipeline.blade import (
     MIN_ELONGATION,
     BladeGeometry,
+    _cross_object_ious,
     _find_overlap_runs,
     _mask_iou,
     _smooth_interpolate_run,
@@ -1055,6 +1056,21 @@ def _write_fixed_mask(masks_dir, n_frames, canvas=(20, 20)):
         mask = np.zeros(canvas, dtype=bool)
         mask[0:4, 0:4] = True
         save_mask(str(masks_dir), i, mask)
+
+
+def test_cross_object_ious_matches_find_overlap_runs_own_computation(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    frame_indices = mask_frame_indices(str(masks_a))
+
+    ious = _cross_object_ious(str(masks_a), str(masks_b), frame_indices)
+
+    assert ious[0] == pytest.approx(0.0)
+    assert ious[1] == pytest.approx(1.0)
+    assert ious[2] == pytest.approx(1.0)
+    assert ious[3] == pytest.approx(0.0)
 
 
 def test_find_overlap_runs_reports_run_bounds_and_both_anchors(tmp_path):

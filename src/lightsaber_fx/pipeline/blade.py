@@ -1050,6 +1050,21 @@ class OverlapRun(NamedTuple):
     max_iou: float
 
 
+def _cross_object_ious(masks_dir_a, masks_dir_b, frame_indices):
+    """Per-frame cross-object mask IoU across `frame_indices`, in order --
+    the same computation `_find_overlap_runs` uses to detect a run in the
+    first place, extracted so `suppress_overlap_bleed`'s cross-object
+    contamination gate (see that function) can reuse it across the whole
+    clip without a second, possibly-inconsistent measurement of "are
+    these two objects' masks colliding right now?" and without changing
+    `_find_overlap_runs`'s own return type (which `reacquire.py` also
+    depends on)."""
+    return np.array([
+        _mask_iou(load_mask(masks_dir_a, frame_idx), load_mask(masks_dir_b, frame_idx))
+        for frame_idx in frame_indices
+    ])
+
+
 def _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b,
                         iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
                         anchor_iou_threshold=None):
@@ -1065,11 +1080,7 @@ def _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b,
         anchor_iou_threshold = iou_threshold * CROSS_OBJECT_ANCHOR_IOU_FRAC
     frame_indices = mask_frame_indices(masks_dir_a)
     n = len(frame_indices)
-
-    ious = np.array([
-        _mask_iou(load_mask(masks_dir_a, frame_idx), load_mask(masks_dir_b, frame_idx))
-        for frame_idx in frame_indices
-    ])
+    ious = _cross_object_ious(masks_dir_a, masks_dir_b, frame_indices)
     overlapping = ious > iou_threshold
     good = _good_frame_mask(motion_a, motion_b, ious, anchor_iou_threshold)
     good_indices = np.flatnonzero(good)
