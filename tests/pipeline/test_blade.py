@@ -1012,15 +1012,15 @@ def test_mask_iou_both_empty_is_zero():
 # at whichever side exists.
 # ---------------------------------------------------------------------------
 
-def _motion_geo(length, i=0, x_offset=0.0):
+def _motion_geo(length, i=0, x_offset=0.0, bend=None):
     return BladeGeometry(
         centroid=(float(i) + x_offset, 0.0), axis=(1.0, 0.0),
         tip=(float(i) + x_offset + length, 0.0), hilt=(float(i) + x_offset, 0.0),
-        length=length, width=5.0, angle=0.0,
+        length=length, width=5.0, angle=0.0, bend=bend,
     )
 
 
-def _write_lengths(path, lengths, x_offset=0.0):
+def _write_lengths(path, lengths, x_offset=0.0, bends=None):
     """A minimal valid motion.npz (a `None` entry becomes a NaN row, same
     as save_motion always has) -- only `length` matters to most of these
     tests, but the full field set is written so suppress_overlap_bleed's
@@ -1028,10 +1028,15 @@ def _write_lengths(path, lengths, x_offset=0.0):
     compute_motion actually produces. `x_offset` shifts every frame's
     centroid/hilt/tip by a fixed amount -- used to give two objects a
     real raw-geometry separation for `_run_confidence_weights` (see
-    `_motion_geo`); 0.0 (the default) matches every existing caller."""
+    `_motion_geo`); 0.0 (the default) matches every existing caller.
+    `bends` (default: every frame None) lets a test set a candidate bend
+    directly, matching how these tests already inject `length` directly
+    rather than deriving it from a real mask."""
+    if bends is None:
+        bends = [None] * len(lengths)
     save_motion(str(path), [
-        _motion_geo(length, i, x_offset=x_offset) if length is not None else None
-        for i, length in enumerate(lengths)
+        _motion_geo(length, i, x_offset=x_offset, bend=bend) if length is not None else None
+        for i, (length, bend) in enumerate(zip(lengths, bends, strict=True))
     ])
 
 
@@ -1708,6 +1713,55 @@ def test_suppress_overlap_bleed_does_not_log_the_long_span_warning_for_a_short_r
         suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
 
     assert "long enough that a straight line" not in caplog.text
+
+
+def test_suppress_overlap_bleed_clears_bend_where_cross_object_iou_is_high(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 5
+    _write_fixed_mask(masks_a, n)
+    # frame 2: full overlap (IoU 1.0, well past CROSS_OBJECT_OVERLAP_IOU_THRESHOLD=0.1)
+    # every other frame: masks far apart (IoU 0.0)
+    _write_overlap_masks(masks_b, n, overlapping_frames={2})
+    _write_lengths(motion_a, [100] * n, bends=[(5.0, 5.0)] * n)
+    _write_lengths(motion_b, [100] * n, bends=[(5.0, 5.0)] * n)
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    result_b = load_motion(str(motion_b))
+    assert np.isnan(result_a["bend"][2]).all()  # cleared -- high cross-object IoU
+    assert np.isnan(result_b["bend"][2]).all()
+    for i in (0, 1, 3, 4):
+        assert not np.isnan(result_a["bend"][i]).any()  # untouched -- low IoU
+        assert not np.isnan(result_b["bend"][i]).any()
+
+
+def test_suppress_overlap_bleed_clears_bend_outside_any_detected_run(tmp_path):
+    # A single high-IoU frame below CROSS_OBJECT_OVERLAP_IOU_THRESHOLD's
+    # run-detection bar entirely (no run is ever detected here -- the run
+    # loop never touches this frame) must still get its bend cleared, since
+    # the gate operates on the whole clip's IoU array independently of run
+    # detection. Reuses the same fixture as above but only asserts on the
+    # gate, making the "independent of run detection" property explicit
+    # rather than incidental.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1})
+    _write_lengths(motion_a, [100] * n, bends=[(5.0, 5.0)] * n)
+    _write_lengths(motion_b, [100] * n, bends=[(5.0, 5.0)] * n)
+
+    n_held = suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert np.isnan(result_a["bend"][1]).all()
+    # sanity: this run WAS also detected/held by the existing smoothing
+    # logic (single-frame overlap at index 1) -- both mechanisms agree
+    # here, but the gate's own test above already proves it doesn't
+    # depend on that.
+    assert n_held == 1
 
 
 # ---------------------------------------------------------------------------

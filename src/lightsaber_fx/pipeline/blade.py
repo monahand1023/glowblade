@@ -1248,6 +1248,17 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     frame's raw tip sits to its own object's hilt than to the other
     object's.
 
+    Any candidate `bend` (see `fit_blade`/`BEND_SIGNIFICANCE_PX`) on
+    either object is cleared to NaN wherever cross-object mask IoU
+    exceeds `iou_threshold`, across the *entire* clip -- not just frames
+    the run-detection loop above touches. Confirmed necessary on real
+    footage: a per-frame significance check on a single mask's own shape
+    cannot distinguish real bow from contamination (one object's mask
+    nearly fully containing the other's, deep in a sustained overlap
+    run) -- cross-object IoU can, and this reuses the same measurement
+    `_find_overlap_runs` already makes rather than a second, possibly
+    inconsistent one.
+
     A smoothed run longer than `LONG_INTERPOLATION_SPAN_FRAMES` gets a
     second, more detailed WARNING beyond the routine per-run one --
     confirmed on real footage, a run this long can still spend most of its
@@ -1353,7 +1364,20 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                     frame_indices[correct_start], frame_indices[correct_end], span,
                 )
 
-    if n_held:
+    # Cross-object contamination gate for `bend` -- see this function's
+    # docstring addendum below and the design spec's "Cross-object
+    # contamination gate" section. Operates on the whole clip's IoU
+    # array, independent of which frames the run-detection loop above
+    # touched: a frame's mask can be individually contaminated without
+    # being part of a formally detected overlap run.
+    had_bend_candidate = np.any(~np.isnan(motion_a["bend"][:, 0])) or np.any(~np.isnan(motion_b["bend"][:, 0]))
+    if had_bend_candidate:
+        ious_whole_clip = _cross_object_ious(masks_dir_a, masks_dir_b, frame_indices)
+        contaminated = ious_whole_clip > iou_threshold
+        motion_a["bend"][contaminated] = np.nan
+        motion_b["bend"][contaminated] = np.nan
+
+    if n_held or had_bend_candidate:
         np.savez(motion_path_a, **motion_a)
         np.savez(motion_path_b, **motion_b)
     return n_held
