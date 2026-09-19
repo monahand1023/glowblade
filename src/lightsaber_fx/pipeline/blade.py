@@ -119,6 +119,47 @@ def _median_perpendicular_extent(proj, perp, n_bins=20):
     return float(np.median(extents))
 
 
+# Threshold (px) above which fit_blade's own median midpoint-bin
+# perpendicular offset is treated as real blade bow rather than PCA-fit
+# noise. Calibrated against the entire real 506-frame job before this
+# was implemented (see the design spec's Constants section): gated
+# baseline noise ceiling was 3.2px (object 0) / 4.2px p99 (object 1),
+# real signal 21.4-28.0px -- 8px sits with comfortable margin on both
+# sides and produced zero false positives/negatives on that job's one
+# real contact run.
+BEND_SIGNIFICANCE_PX = 8
+
+
+def _bend_offset(proj, perp, n_bins=20):
+    """Median perpendicular offset of the points nearest the blade's
+    midpoint projection -- the raw single-object signal for a candidate
+    `bend` control point. Reuses `_median_perpendicular_extent`'s exact
+    bin edges so the two stay consistent, but reports the **median**
+    (not max-min extent) of a ~2-bin-wide window centered on the
+    midpoint -- this exact window is what `BEND_SIGNIFICANCE_PX` was
+    calibrated against; narrowing or widening it invalidates that
+    calibration.
+
+    Returns 0.0 if the axis span is degenerate or too few points fall in
+    the window to trust a median from (fewer than 3) -- callers compare
+    the *magnitude* of this value against `BEND_SIGNIFICANCE_PX`, and a
+    same-signed false near-zero here is always safe (never registers as
+    significant bow).
+    """
+    lo, hi = proj.min(), proj.max()
+    span = hi - lo
+    if span <= 0:
+        return 0.0
+    edges = np.linspace(lo, hi, n_bins + 1)
+    mid = n_bins // 2
+    lo_edge = edges[max(mid - 1, 0)]
+    hi_edge = edges[min(mid + 1, n_bins)]
+    window = perp[(proj >= lo_edge) & (proj <= hi_edge)]
+    if len(window) < 3:
+        return 0.0
+    return float(np.median(window))
+
+
 def _largest_component(mask, reference_point=None, max_jump_px=None):
     """`mask`, reduced to its most plausible 8-connected blob -- dropping
     any other, smaller-or-implausibly-located, disconnected ones.
@@ -279,6 +320,14 @@ def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20, reference_point=None):
     width = _median_perpendicular_extent(proj, perp, n_bins=width_bins)
     angle = float(np.arctan2(oriented_axis[1], oriented_axis[0]))
 
+    bend_offset = _bend_offset(proj, perp, n_bins=width_bins)
+    if abs(bend_offset) > BEND_SIGNIFICANCE_PX:
+        mid_proj = (min_proj + max_proj) / 2.0
+        bend_point = centroid + mid_proj * axis + bend_offset * perp_dir
+        bend = (float(bend_point[0]), float(bend_point[1]))
+    else:
+        bend = None
+
     return BladeGeometry(
         centroid=(float(centroid[0]), float(centroid[1])),
         axis=(float(oriented_axis[0]), float(oriented_axis[1])),
@@ -287,6 +336,7 @@ def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20, reference_point=None):
         length=length,
         width=float(width),
         angle=angle,
+        bend=bend,
     )
 
 

@@ -39,7 +39,7 @@ def test_fit_blade_returns_geometry_with_expected_fields():
     mask[10:16, 5:55] = True
     geo = fit_blade(mask)
     assert isinstance(geo, BladeGeometry)
-    for field in ("centroid", "axis", "tip", "hilt", "length", "width", "angle"):
+    for field in ("centroid", "axis", "tip", "hilt", "length", "width", "angle", "bend"):
         assert hasattr(geo, field)
 
 
@@ -747,6 +747,55 @@ def _bar_mask(x_end, canvas=(48, 400), x_start=50, y_start=20, y_end=26):
     mask = np.zeros(canvas, dtype=bool)
     mask[y_start:y_end, x_start:x_end] = True
     return mask
+
+
+def _bowed_bar_mask(peak_offset, canvas=(60, 400), x_start=50, x_end=350, y_center=30, thickness=6):
+    """A mask shaped like a real blade under bind pressure: a horizontal
+    bar whose vertical center sags by `peak_offset` px at its midpoint,
+    tapering to 0 at both ends (a parabola through (x_start, 0),
+    (mid, peak_offset), (x_end, 0)) -- mirrors the real, single-direction
+    sag measured on real footage (see the design spec's Problem section),
+    not an arbitrary bend shape."""
+    mask = np.zeros(canvas, dtype=bool)
+    xs = np.arange(x_start, x_end)
+    mid = (x_start + x_end) / 2.0
+    half_span = (x_end - x_start) / 2.0
+    # parabola: 0 at both ends, peak_offset at the midpoint
+    sag = peak_offset * (1.0 - ((xs - mid) / half_span) ** 2)
+    for x, dy in zip(xs, sag, strict=True):
+        y0 = int(round(y_center + dy - thickness / 2))
+        y1 = y0 + thickness
+        mask[max(0, y0):min(canvas[0], y1), x] = True
+    return mask
+
+
+def test_fit_blade_populates_bend_for_a_significantly_bowed_mask():
+    mask = _bowed_bar_mask(peak_offset=24.5)  # well past BEND_SIGNIFICANCE_PX=8
+    geo = fit_blade(mask)
+    assert geo.bend is not None
+
+
+def test_fit_blade_leaves_bend_none_for_a_straight_mask():
+    # Every existing fit_blade fixture in this file is a straight bar --
+    # spot-check the two already used above, both must still give bend=None.
+    mask = np.zeros((48, 64), dtype=bool)
+    mask[10:16, 5:55] = True
+    geo = fit_blade(mask)
+    assert geo.bend is None
+
+
+def test_fit_blade_bend_offset_is_robust_to_one_contaminated_bin():
+    # A straight mask with one small extra pixel cluster stuck onto a
+    # single bin (mimicking cross-object bleed at one point along the
+    # blade) must not move the median-per-bin bend fit past significance --
+    # the whole reason _bend_offset uses a median, not a mean, of a
+    # multi-point window, the same robustness _median_perpendicular_extent
+    # already relies on for width.
+    mask = np.zeros((48, 300), dtype=bool)
+    mask[20:26, 5:295] = True  # straight, 290px long
+    mask[35:45, 145:155] = True  # contamination blob near the midpoint, offset ~15-20px below
+    geo = fit_blade(mask)
+    assert geo.bend is None
 
 
 def test_compute_motion_uses_reference_point_continuity_to_reject_a_growing_secondary_component(tmp_path, caplog):
