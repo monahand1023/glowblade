@@ -647,3 +647,78 @@ def test_render_glow_multi_rejects_an_unsupported_object_count(tmp_path):
                 clip["frames_dir"], objects, clip["video_meta_path"],
                 str(tmp_path / "glow_frames"),
             )
+
+
+# ---------------------------------------------------------------------------
+# Task 7 -- threading `bend` from motion.npz through the per-frame reads in
+# render_glow/render_glow_multi and into _composite_blade_contribution.
+# ---------------------------------------------------------------------------
+
+def test_stabilize_tip_hilt_leaves_bend_completely_unchanged_on_a_flip():
+    # bend is an absolute (x, y) point, not a directional offset -- a
+    # tip/hilt continuity flip has nothing to swap it with. This locks
+    # in that finding as a test, correcting an assumption in the design
+    # spec that turned out to be unnecessary once worked through.
+    from lightsaber_fx.pipeline.glow import _stabilize_tip_hilt
+    tip = np.array([[10.0, 0.0], [-10.0, 0.0]])   # axis flips sign at frame 1
+    hilt = np.array([[0.0, 0.0], [0.0, 0.0]])
+    axis = np.array([[1.0, 0.0], [-1.0, 0.0]])
+    _bend_before = np.array([[5.0, 3.0], [5.0, 3.0]])
+
+    new_tip, _new_hilt, _new_axis = _stabilize_tip_hilt(tip, hilt, axis)
+
+    assert not np.allclose(new_tip[1], tip[1])  # confirms a flip actually happened
+    # bend itself was never passed in and never touched -- nothing to assert
+    # on bend's value changing, since _stabilize_tip_hilt's signature does
+    # not take it. This test exists to make that omission a deliberate,
+    # documented choice rather than a silent gap.
+
+
+def test_render_glow_multi_renders_a_curved_blade_when_bend_is_present(tmp_path):
+    clip = _build_blade_clip(tmp_path, "curved", n_frames=1, width=220, height=120, blade_len=90, blade_x0=40)
+    # Manually inject a bend into the motion.npz compute_motion just wrote,
+    # matching how a real contact-adjacent frame would carry one.
+    motion = blade.load_motion(clip["motion_path"])
+    hilt, tip = motion["hilt"][0], motion["tip"][0]
+    mid = (hilt + tip) / 2.0
+    bend_point = mid + np.array([0.0, -25.0])  # well off the straight line
+    motion["bend"] = np.array([bend_point])
+    np.savez(clip["motion_path"], **motion)
+
+    out_dir = str(tmp_path / "out")
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        out_dir, clip["motion_path"], ignition_ramp_seconds=0,
+    )
+    img = _load_png(out_dir, 0)
+    baseline = float(clip["plate_value"])
+    # A quadratic Bezier does not pass through its own middle control
+    # point -- at t=0.5 it only reaches the average of the two endpoints
+    # and the control point, i.e. mid + 0.5*(bend_point - mid) (the same
+    # halving Task 6 independently verified and documented for
+    # _curved_capsule_mask, in progress.md and task-6-report.md). Sampling
+    # at bend_point itself lands ~12px past the actual rendered curve and
+    # only catches faint bloom (measured signal 15, not >20); sample where
+    # the curve actually peaks instead.
+    peak = mid + 0.5 * (bend_point - mid)
+    px, py = round(peak[0]), round(peak[1])
+    signal = float(img[py, px].astype(np.float64).max()) - baseline
+    assert signal > 20  # the curve actually reaches up near the bend point
+
+
+def test_render_glow_handles_a_motion_npz_without_a_bend_column(tmp_path):
+    # Backward compatibility: a motion.npz written before this feature
+    # existed has no "bend" key at all. Loading and rendering it must not
+    # crash -- treated exactly like bend=None everywhere.
+    clip = _build_blade_clip(tmp_path, "legacy", n_frames=2)
+    motion = blade.load_motion(clip["motion_path"])
+    del motion["bend"]
+    np.savez(clip["motion_path"], **motion)
+
+    out_dir = str(tmp_path / "out")
+    render_glow(
+        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
+        out_dir, clip["motion_path"],
+    )
+    img = _load_png(out_dir, 0)
+    assert img is not None

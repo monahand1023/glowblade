@@ -436,6 +436,7 @@ def _composite_blade_contribution(
     core_erode_kernel, core_sigma, colour_sigma,
     color_lin, glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
     spill_strength, motion_blur_gain, motion_blur_max_len, bbox_margin,
+    bend=None,
 ):
     """One object's core/colour/wide-glow/motion-blur contribution for one
     frame, confined to a local bounding box. Returns full-frame-sized arrays
@@ -459,12 +460,15 @@ def _composite_blade_contribution(
         return full_fx, blade_u8
 
     effective_tip = tip
+    effective_bend = bend
     if blade_extend:
         effective_tip = _apply_ignition(tip, hilt, ignition_frac)
+        if bend is not None:
+            effective_bend = _apply_ignition(bend, hilt, ignition_frac)
 
     blade_u8 = _build_blade_shape(
         mask, frame_shape, effective_tip, hilt, canonical_width, blade_extend,
-        tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac,
+        tip_extend_frac, hilt_taper_frac, hilt_taper_min_frac, bend=effective_bend,
     )
     ys, xs = np.nonzero(blade_u8)
     if not len(xs):
@@ -575,6 +579,7 @@ def render_glow(
     axis_arr = np.asarray(motion.get("axis", np.zeros((0, 2))), dtype=np.float64)
     width_arr = np.asarray(motion.get("width", np.zeros(0)), dtype=np.float64)
     length_arr = np.asarray(motion.get("length", np.zeros(0)), dtype=np.float64)
+    bend_arr = np.asarray(motion.get("bend", np.full((len(tip_arr), 2), np.nan)), dtype=np.float64)
 
     # Sign-continuity fix (see _stabilize_tip_hilt) -- do this before
     # anything reads tip/hilt/axis, since both the capsule and the B1.7
@@ -641,6 +646,7 @@ def render_glow(
         tip_i = tip_arr[row] if row is not None else None
         hilt_i = hilt_arr[row] if row is not None else None
         vel_i = velocity[row] if row is not None else np.zeros(2)
+        bend_i = bend_arr[row] if row is not None else None
 
         frac = ignition_fraction(n, first_active, last_active, ignition_ramp_frames)
         full_fx, blade_u8 = _composite_blade_contribution(
@@ -650,6 +656,7 @@ def render_glow(
             core_erode_kernel, core_sigma, colour_sigma,
             color_lin, glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
             spill_strength, motion_blur_gain, motion_blur_max_len, bbox_margin,
+            bend=bend_i,
         )
 
         # B1.6 -- decay always runs (even on a no-mask frame), so a trail
@@ -752,6 +759,7 @@ def render_glow_multi(
         hilt_arr = np.asarray(motion.get("hilt", np.zeros((0, 2))), dtype=np.float64)
         axis_arr = np.asarray(motion.get("axis", np.zeros((0, 2))), dtype=np.float64)
         width_arr = np.asarray(motion.get("width", np.zeros(0)), dtype=np.float64)
+        bend_arr = np.asarray(motion.get("bend", np.full((len(tip_arr), 2), np.nan)), dtype=np.float64)
         tip_arr, hilt_arr, axis_arr = _stabilize_tip_hilt(tip_arr, hilt_arr, axis_arr)
         velocity = np.zeros_like(tip_arr)
         if len(tip_arr) > 1:
@@ -775,6 +783,7 @@ def render_glow_multi(
         prepared.append({
             "masks_dir": masks_dir,
             "tip_arr": tip_arr, "hilt_arr": hilt_arr, "velocity": velocity,
+            "bend_arr": bend_arr,
             "n_motion": len(tip_arr),
             "canonical_width": canonical_width,
             "first_active": active_indices[0] if active_indices else None,
@@ -815,6 +824,7 @@ def render_glow_multi(
             tip_i = obj_state["tip_arr"][row] if row is not None else None
             hilt_i = obj_state["hilt_arr"][row] if row is not None else None
             vel_i = obj_state["velocity"][row] if row is not None else np.zeros(2)
+            bend_i = obj_state["bend_arr"][row] if row is not None else None
             frac = ignition_fraction(
                 n, obj_state["first_active"], obj_state["last_active"], ignition_ramp_frames,
             )
@@ -826,6 +836,7 @@ def render_glow_multi(
                 obj_state["core_erode_kernel"], obj_state["core_sigma"], obj_state["colour_sigma"],
                 obj_state["color_lin"], glow_scales, glow_falloff_tau, glow_crush, chromatic_bloom_frac,
                 obj_state["spill_strength"], motion_blur_gain, motion_blur_max_len, bbox_margin,
+                bend=bend_i,
             )
             combined_fx += full_fx
             combined_blade_u8 = np.maximum(combined_blade_u8, blade_u8)
