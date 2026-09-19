@@ -962,6 +962,72 @@ def _tip_confidence_weights(motion_a, motion_b, run_start, run_end, frame_indice
 TIP_SMOOTHING_STRENGTH = 100000
 
 
+# Small local window (frames) for denoising a contiguous bend-active
+# stretch, and a small rise/fall ramp so bend eases in/out of existence
+# instead of popping. Calibrated against the real job: the only real
+# stretch found there (after Task 4's contamination gate) is 2 frames
+# (291-292) -- not enough on its own to pin an exact value the way
+# BEND_SIGNIFICANCE_PX's wide margin could, but it rules out anything
+# large. Revisit against a wider sample of contact runs if one turns up
+# in other real footage.
+BEND_TEMPORAL_SMOOTH_WINDOW = 3
+BEND_RAMP_FRAMES = 2
+
+
+def _edge_ramp_fraction(offset_into_stretch, stretch_length, ramp_frames):
+    """Rise 0->1 over the first `ramp_frames` frames of a stretch of
+    length `stretch_length`, hold at 1, fall 1->0 over the last
+    `ramp_frames` -- deliberately mirrors `glow.ignition_fraction`'s
+    shape (kept as a small local duplicate, not a shared import:
+    `blade.py` cannot import from `glow.py`, which already imports from
+    `blade.py`). On a stretch shorter than `2 * ramp_frames`, rise and
+    fall overlap and the peak never reaches 1.0, exactly like
+    `ignition_fraction`'s own short-window case.
+    """
+    if ramp_frames <= 0:
+        return 1.0
+    rise = (offset_into_stretch + 1) / ramp_frames
+    fall = (stretch_length - offset_into_stretch) / ramp_frames
+    return max(0.0, min(1.0, rise, fall))
+
+
+def _smooth_bend_field(motion, window=BEND_TEMPORAL_SMOOTH_WINDOW, ramp_frames=BEND_RAMP_FRAMES):
+    """Denoise and edge-ramp `motion['bend']` in place, within each
+    contiguous stretch of non-NaN frames independently. Purely
+    single-object -- no cross-object data, no confidence weights, just
+    "smooth this one object's own already-gated per-frame estimate."
+    Must run after the cross-object contamination gate has already
+    cleared untrustworthy candidates (see `suppress_overlap_bleed`), and
+    after that function's own `hilt`/`tip` smoothing/overrides, since
+    "ramping out" means lerping `bend` toward the *final* straight-line
+    midpoint of `hilt`/`tip` at that frame, not a pre-correction one.
+    """
+    bend = motion["bend"]
+    hilt, tip = motion["hilt"], motion["tip"]
+    valid = ~np.isnan(bend[:, 0])
+    n = len(bend)
+    half = window // 2
+    i = 0
+    while i < n:
+        if not valid[i]:
+            i += 1
+            continue
+        start = i
+        while i < n and valid[i]:
+            i += 1
+        end = i - 1
+        length = end - start + 1
+        raw_stretch = bend[start:end + 1].copy()
+        denoised = np.empty_like(raw_stretch)
+        for k in range(length):
+            lo, hi = max(0, k - half), min(length, k + half + 1)
+            denoised[k] = np.median(raw_stretch[lo:hi], axis=0)
+        for k in range(length):
+            frac = _edge_ramp_fraction(k, length, ramp_frames)
+            straight_mid = (hilt[start + k] + tip[start + k]) / 2.0
+            bend[start + k] = straight_mid + frac * (denoised[k] - straight_mid)
+
+
 def _smooth_interpolate_run(motion, run_start, run_end, before, after, frame_indices, weights,
                              smoothing_strength=RUN_SMOOTHING_STRENGTH, tip_weights=None,
                              tip_smoothing_strength=None):
@@ -1376,6 +1442,8 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
         contaminated = ious_whole_clip > iou_threshold
         motion_a["bend"][contaminated] = np.nan
         motion_b["bend"][contaminated] = np.nan
+        _smooth_bend_field(motion_a)
+        _smooth_bend_field(motion_b)
 
     if n_held or had_bend_candidate:
         np.savez(motion_path_a, **motion_a)

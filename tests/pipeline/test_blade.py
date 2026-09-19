@@ -5,8 +5,10 @@ from lightsaber_fx.pipeline.blade import (
     MIN_ELONGATION,
     BladeGeometry,
     _cross_object_ious,
+    _edge_ramp_fraction,
     _find_overlap_runs,
     _mask_iou,
+    _smooth_bend_field,
     _smooth_interpolate_run,
     _smooth_run_field,
     _tip_confidence_weights,
@@ -1959,6 +1961,65 @@ def test_elongation_stats_excludes_nan_and_zero_width_frames():
     mean_elongation, low_frac = elongation_stats(motion)
     assert mean_elongation == pytest.approx((10.0 + 11.0) / 2)
     assert low_frac == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _edge_ramp_fraction and _smooth_bend_field
+# ---------------------------------------------------------------------------
+
+
+def test_edge_ramp_fraction_matches_ignition_fractions_shape():
+    # Mirrors glow.ignition_fraction's own tests exactly, since this is a
+    # deliberate local duplicate of the same rise/fall shape.
+    assert _edge_ramp_fraction(0, 100, 4) == pytest.approx(0.25)
+    assert _edge_ramp_fraction(1, 100, 4) == pytest.approx(0.5)
+    assert _edge_ramp_fraction(3, 100, 4) == 1.0
+    assert _edge_ramp_fraction(50, 100, 4) == 1.0
+    assert _edge_ramp_fraction(99, 100, 4) == pytest.approx(0.25)
+
+
+def test_edge_ramp_fraction_tapers_on_a_short_stretch():
+    frac = _edge_ramp_fraction(2, 5, 4)
+    assert 0.0 < frac < 1.0
+
+
+def test_smooth_bend_field_ramps_in_and_out_of_a_stretch(tmp_path):
+    motion_path = tmp_path / "a.npz"
+    n = 6
+    # frames 1-4: a real bend stretch, constant offset (10, 10) --
+    # frames 0 and 5 have no candidate (None).
+    bends = [None, (10.0, 10.0), (10.0, 10.0), (10.0, 10.0), (10.0, 10.0), None]
+    _write_lengths(motion_path, [100] * n, bends=bends)
+    motion = load_motion(str(motion_path))
+
+    _smooth_bend_field(motion, window=1, ramp_frames=2)
+
+    # stretch is frames 1-4 (length 4): ramp_frames=2 means frame 1 is at
+    # ramp fraction 0.5, frame 2 reaches 1.0, frame 3 is still 1.0 (fall
+    # starts from the far end), frame 4 is back down to 0.5.
+    straight_mid_1 = (np.array(motion["hilt"][1]) + np.array(motion["tip"][1])) / 2.0
+    expected_1 = straight_mid_1 + 0.5 * (np.array([10.0, 10.0]) - straight_mid_1)
+    assert motion["bend"][1] == pytest.approx(expected_1)
+    assert motion["bend"][2] == pytest.approx([10.0, 10.0])
+    assert motion["bend"][3] == pytest.approx([10.0, 10.0])
+    straight_mid_4 = (np.array(motion["hilt"][4]) + np.array(motion["tip"][4])) / 2.0
+    expected_4 = straight_mid_4 + 0.5 * (np.array([10.0, 10.0]) - straight_mid_4)
+    assert motion["bend"][4] == pytest.approx(expected_4)
+
+
+def test_smooth_bend_field_denoises_a_jittery_stretch(tmp_path):
+    motion_path = tmp_path / "a.npz"
+    n = 5
+    # one outlier frame in the middle of an otherwise-constant stretch
+    bends = [(10.0, 10.0), (10.0, 10.0), (40.0, 40.0), (10.0, 10.0), (10.0, 10.0)]
+    _write_lengths(motion_path, [100] * n, bends=bends)
+    motion = load_motion(str(motion_path))
+
+    _smooth_bend_field(motion, window=3, ramp_frames=0)  # ramp_frames=0: isolate denoising
+
+    # a window-3 median centered on the outlier pulls it back toward its
+    # neighbors -- must move meaningfully off 40.0, not stay there.
+    assert motion["bend"][2][0] < 25.0
 
 
 def test_elongation_stats_returns_none_when_no_frame_has_a_usable_width():
