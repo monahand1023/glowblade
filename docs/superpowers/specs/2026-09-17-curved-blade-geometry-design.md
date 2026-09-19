@@ -3,6 +3,61 @@
 Status: approved (in chat; awaiting written-spec review)
 Date: 2026-09-17
 
+## Corrections after implementation
+
+Three claims in the body below did not survive contact with the
+implementation and the real job. The spec is left intact so the original
+reasoning stays readable; these are the corrections that actually shipped.
+
+1. **`bend` is a point the blade passes *through*, not a Bezier control
+   point.** The body below (and `BladeGeometry`'s original docstring)
+   describes `bend` as "a third control point". It is measured as a point
+   on the blade -- `_bend_offset_from_mask` reports how far the raw mask
+   actually sits off the straight hilt-tip line -- so feeding it in as a
+   Bezier *control* point renders only half of it, because a quadratic
+   Bezier reaches just half its control point's own offset at t=0.5.
+   `glow._curved_capsule_mask` now solves for the control point that makes
+   the curve pass through `bend` exactly:
+   `control = 2*bend - (body_start + tip) / 2`. Measured on the real job,
+   frame 292, object 1, 227.8px blade (see the fix-wave report in
+   `.superpowers/sdd/2026-09-18-curved-blade-geometry/`): the rendered
+   curve's own peak perpendicular deviation went from **4.63px (2.03% of
+   blade length)** to **18.51px (8.13%)** -- a 4x correction, because two
+   independent halvings stacked. The second was `BEND_RAMP_FRAMES = 2`,
+   which `_edge_ramp_fraction` turns into exactly 0.5 for every frame of
+   every bend-active stretch this job actually produces (lengths 1, 2, 2
+   for object 1 and 1 for object 0), pinning every real frame in the job
+   to half amplitude; it is now **1**, which reaches full amplitude on
+   all of those while still ramping a 3+-frame stretch. 18.51px is
+   exactly the bend point the renderer was handed, so the renderer itself
+   is now exact; the remaining gap to frame 292's own raw 22.45px
+   measurement is `BEND_TEMPORAL_SMOOTH_WINDOW = 3`'s median denoise
+   averaging it with frame 291's smaller bow, which is that constant
+   working as designed.
+
+2. **The feature is two-object-only in practice.** The Scope section below
+   says the mechanism "is not restricted to the two-object code path".
+   That is true of the *measurement* in isolation, but not of what ships:
+   `suppress_overlap_bleed` is the only producer of `bend` anywhere in the
+   pipeline, and `runner.run_pipeline_multi` calls it only under
+   `if len(object_ids) == 2`. A 1-, 3- or 4-object job therefore never
+   gets a curved blade. That is the right default (blade-on-blade contact
+   needs two blades, and the contamination gate needs a second object to
+   measure IoU against), but it is a real scope limit, not an incidental
+   one, and any future N-object extension has to add a producer, not just
+   relax a gate.
+
+3. **The Constants section's 21.4-28.0px figures were right; the first
+   implementation was not.** Task 8's real-data validation could not
+   reproduce them (it measured at most ~5.4px anywhere in the job) and
+   concluded the spec's numbers were suspect. That was backwards: the
+   original implementation measured bow against each frame's own fresh
+   single-frame PCA best-fit axis, which structurally absorbs most real
+   bow into the line's own rotation. Re-derived against the FINAL,
+   corrected hilt-tip line (`_bend_offset_from_mask`, as shipped in Task
+   9), the same job's frame 292 measures **22.45px** -- squarely inside
+   the range this spec cited. `BEND_SIGNIFICANCE_PX = 8` was never wrong.
+
 ## Problem
 
 Every fix made earlier in this session (confidence-weighted smoothing
@@ -78,6 +133,10 @@ close this gap.
   happens), but the mechanism itself is single-object -- it fits from one
   object's own mask, with no cross-object comparison. It's not restricted
   to the two-object code path.
+  **Correction (post-implementation): in practice it is.** See
+  "Corrections after implementation" #2 -- `suppress_overlap_bleed` ended
+  up as the only producer of `bend`, and `runner.py` gates it on
+  `len(object_ids) == 2`.
 
 ## Approach considered and rejected: N-point spline
 
@@ -269,6 +328,13 @@ fuzzy-decision constant in this codebase.
   21.4-28.0px -- 8px sits with comfortable margin on both sides and
   produces zero false positives and zero false negatives against this
   job's one real contact run.
+  **Confirmed post-implementation** (see "Corrections after
+  implementation" #3): these figures re-derive correctly against the
+  FINAL corrected hilt-tip line, which is what shipped. The metric named
+  here ("median midpoint-bin perpendicular offset") is right; what
+  changed is the *reference line* it is measured against -- see
+  `_bend_offset_from_mask` and `BEND_SIGNIFICANCE_PX`'s own comment for
+  the current, re-measured distribution.
 - **No new IoU constant** -- the contamination gate reuses the existing
   `CROSS_OBJECT_OVERLAP_IOU_THRESHOLD` (already governs
   `_find_overlap_runs`'s own `overlapping` decision) rather than
@@ -284,6 +350,17 @@ fuzzy-decision constant in this codebase.
   implementation against this stretch plus any additional contact runs
   found in other real footage, but the real data available now rules out
   anything large.
+  **Finalized post-implementation:** `BEND_TEMPORAL_SMOOTH_WINDOW = 3`,
+  `BEND_RAMP_FRAMES = 1` (not 2 -- see "Corrections after
+  implementation" #1). Under the shipped mask-based measurement the job's
+  bend-active stretches are 1, 2 and 2 frames (object 1) and 1 frame
+  (object 0), and `ramp_frames = 2` puts `_edge_ramp_fraction` at exactly
+  0.5 on every frame of every one of them. Note the residual tension
+  this leaves: on a 1- or 2-frame stretch `ramp_frames = 1` reaches full
+  amplitude but has no room left to ease, so `bend` still switches on and
+  off across a single frame boundary. No value of `ramp_frames` does both
+  on a stretch this short; easing these would need a different mechanism
+  (extending the stretch), not a different constant.
 
 ## Testing
 
