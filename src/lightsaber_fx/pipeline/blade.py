@@ -1575,6 +1575,23 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
 # one-off.
 POSITION_GLITCH_JUMP_PX = 50.0
 
+# A tracked object's fitted length changing this much, relative to the
+# previous valid frame's length, between two consecutive frames is worth a
+# look -- not auto-corrected (unlike POSITION_GLITCH_JUMP_PX above), just
+# logged, so a real run's WARNING-level log surfaces where the raw mask's
+# quality is degrading instead of that only being discoverable by scanning
+# rendered frames by eye. Confirmed on real footage: one tracked object's
+# raw SAM2 mask lost roughly half its own blade for a single frame (no
+# cross-object contact involved -- mask IoU between the two tracked objects
+# was ~0 throughout that stretch), and the resulting length swing was
+# invisible in the log because it never produced a large enough *centroid*
+# jump to trip `_suppress_position_glitches`. Calibrated against that same
+# clip's own frame-to-frame length-change distribution: ordinary fast
+# swinging motion stays under this threshold at its 95th percentile for
+# both tracked objects (15.7% and 9.8%); real degradation on that clip
+# reached 44-80%.
+LENGTH_JUMP_REL_THRESHOLD = 0.30
+
 
 def _centroid_dist(p, q):
     return float(np.hypot(p[0] - q[0], p[1] - q[1]))
@@ -1734,6 +1751,7 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
     n = len(frame_indices)
     geometries = []
     last_good_centroid = None
+    last_good_length = None
     for i, frame_idx in enumerate(frame_indices):
         mask = load_mask(masks_dir, frame_idx)
         geo = fit_blade(mask, taper_frac=taper_frac, width_bins=width_bins, reference_point=last_good_centroid)
@@ -1742,7 +1760,16 @@ def compute_motion(masks_dir, motion_out_path, taper_frac=1.0 / 3.0, width_bins=
                 "frame %d: length=%.1f width=%.1f centroid=(%.1f, %.1f) angle=%.2f",
                 frame_idx, geo.length, geo.width, geo.centroid[0], geo.centroid[1], geo.angle,
             )
+            if last_good_length is not None and last_good_length > 0:
+                rel_change = abs(geo.length - last_good_length) / last_good_length
+                if rel_change > LENGTH_JUMP_REL_THRESHOLD:
+                    logger.warning(
+                        "%s frame %d: fitted length jumped %.1f%% frame-to-frame (%.1fpx -> %.1fpx) "
+                        "-- possible raw mask degradation, worth a visual check",
+                        masks_dir, frame_idx, rel_change * 100, last_good_length, geo.length,
+                    )
             last_good_centroid = geo.centroid
+            last_good_length = geo.length
         geometries.append(geo)
         report((i + 1) / n * 100, f"frame {i + 1}/{n}")
 

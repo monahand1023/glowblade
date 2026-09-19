@@ -980,6 +980,58 @@ def test_compute_motion_logs_a_warning_for_an_unresolved_multi_frame_jump(tmp_pa
 
 
 # ---------------------------------------------------------------------------
+# compute_motion -- length-jump logging
+#
+# A fourth, distinct real-footage failure mode: a tracked object's raw
+# SAM2 mask loses a large chunk of the real blade for a frame or two (no
+# cross-object contact involved) without its *centroid* moving far enough
+# to trip _suppress_position_glitches -- e.g. a mask that shrinks toward
+# one end rather than sliding sideways. Confirmed on real footage this
+# session: one tracked object's fitted length swung by 50-113px (on a
+# ~230px blade) across many frames with zero corresponding WARNING output,
+# discoverable only by rendering the clip and comparing frames by eye. See
+# LENGTH_JUMP_REL_THRESHOLD's docstring for the calibration.
+# ---------------------------------------------------------------------------
+
+def test_compute_motion_logs_a_warning_for_a_length_jump(tmp_path, caplog):
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = [
+        _bar_mask(250, x_start=50),   # length=200, centroid x=150
+        _bar_mask(175, x_start=125),  # length=50, centroid x=150 (same centroid, 75% shorter)
+        _bar_mask(250, x_start=50),   # back to length=200
+    ]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        compute_motion(str(masks_dir), str(motion_path))
+
+    assert "fitted length jumped" in caplog.text
+    assert "199.0px -> 49.0px" in caplog.text
+
+
+def test_compute_motion_does_not_warn_for_an_ordinary_length_change(tmp_path, caplog):
+    # A real, gradual length change (well under the threshold) must not
+    # trip the warning -- only a jump sized like real mask degradation
+    # should.
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    masks = [
+        _bar_mask(250, x_start=50),   # length=200
+        _bar_mask(260, x_start=50),   # length=210 (5% change)
+        _bar_mask(240, x_start=50),   # length=190 (~9.5% change)
+    ]
+    _write_masks(masks_dir, masks)
+    motion_path = tmp_path / "motion.npz"
+
+    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+        compute_motion(str(masks_dir), str(motion_path))
+
+    assert "fitted length jumped" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # _mask_iou
 # ---------------------------------------------------------------------------
 
