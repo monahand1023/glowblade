@@ -49,11 +49,24 @@ def test_capsule_mask_with_bend_none_matches_straight_capsule_exactly():
 def test_capsule_mask_with_bend_follows_the_curve_not_the_straight_line():
     shape = (120, 220)
     hilt, tip = (40.0, 60.0), (180.0, 60.0)
-    bend = (110.0, -20.0)  # well above the straight hilt-tip line (y=60)
+    # `bend` is a point the blade PASSES THROUGH, not a raw Bezier control
+    # point -- _curved_capsule_mask solves for the control point that makes
+    # B(0.5) land exactly on it. This test originally used bend=(110, -20),
+    # which under the old (uncompensated) renderer drew a curve peaking at
+    # y=40 -- half the requested offset -- and therefore had to sample a
+    # window the curve reached rather than the bend point itself. Now that
+    # the curve genuinely reaches `bend`, (110, -20) would put the curve's
+    # peak 20px off the top of a 120-row canvas (verified by running:
+    # nothing is lit anywhere in the old window). Moved the bend on-canvas
+    # so the assertion can be the stronger, more direct one: the pixel AT
+    # the bend point is lit. Verified this exact assertion fails under the
+    # old uncompensated renderer (which peaks at y=40 here, 20px away).
+    bend = (110.0, 20.0)  # well above the straight hilt-tip line (y=60)
     straight = _capsule_mask(shape, hilt, tip, 8.0, 0.10, 0.12, 0.35, bend=None)
     curved = _capsule_mask(shape, hilt, tip, 8.0, 0.10, 0.12, 0.35, bend=bend)
-    # the curved capsule must light up pixels near the bend point that the
-    # straight one (a horizontal bar at y=60) never touches
+    # the curved capsule must light up the bend point itself, and pixels
+    # around it that the straight one (a horizontal bar at y=60) never touches
+    assert curved[round(bend[1]), round(bend[0])]
     assert curved[15:30, 100:120].any()
     assert not straight[15:30, 100:120].any()
 
@@ -65,6 +78,75 @@ def test_capsule_mask_bend_nan_falls_back_to_straight():
     straight = _capsule_mask(*args, bend=None)
     with_nan = _capsule_mask(*args, bend=(float("nan"), float("nan")))
     assert np.array_equal(straight, with_nan)
+
+
+def _bowed_bar_mask(peak_offset, canvas=(100, 400), x_start=50, x_end=350, y_center=50, thickness=6):
+    """A bowed blade mask, same shape as test_blade.py's helper of the
+    same name (a horizontal bar sagging by `peak_offset` px at its
+    midpoint, tapering to 0 at both ends). Duplicated here rather than
+    cross-imported between test modules: this test needs the *whole*
+    chain (mask -> measured bow -> rendered curve) in one place to be
+    readable as the end-to-end magnitude guard it is."""
+    mask = np.zeros(canvas, dtype=bool)
+    xs = np.arange(x_start, x_end)
+    mid = (x_start + x_end) / 2.0
+    half_span = (x_end - x_start) / 2.0
+    sag = peak_offset * (1.0 - ((xs - mid) / half_span) ** 2)
+    for x, dy in zip(xs, sag, strict=True):
+        y0 = round(y_center + dy - thickness / 2)
+        mask[max(0, y0):min(canvas[0], y0 + thickness), x] = True
+    return mask
+
+
+def test_rendered_curve_magnitude_matches_the_masks_own_measured_bow():
+    """The design spec's acceptance criterion, as a number: the RENDERED
+    curve's own perpendicular deviation from the straight hilt-tip line
+    must match the bow `_bend_offset_from_mask` measured off the raw mask
+    -- not merely "bend is non-NaN" or "some off-axis pixel is lit",
+    which is all the other tests here check.
+
+    This is the regression guard for the halving bug this test was
+    written to close: `_curved_capsule_mask` used to feed `bend` straight
+    in as the quadratic Bezier's control point, and a quadratic Bezier
+    only reaches HALF its control point's own offset at t=0.5, so the
+    rendered curve showed half the measured bow. Verified by computing it
+    both ways: with the control-point solve, the rendered centerline sits
+    24.0px off the straight line against a measured 24.0px; feeding
+    `bend` in directly (the old behavior) gives 12.0px -- exactly half,
+    and comfortably outside this test's 1.5px tolerance. On the real job
+    this feature exists for, the same halving (compounded with the old
+    BEND_RAMP_FRAMES=2 halving every real frame a second time) left
+    frame 292's rendered curve peaking at 4.63px against an 18.51px bend
+    point on a 227.8px blade; it now peaks at 18.51px.
+    """
+    canvas = (100, 400)
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    mask = _bowed_bar_mask(peak_offset=24.5, canvas=canvas, y_center=50)
+
+    # Exactly what suppress_overlap_bleed does: measure the raw mask
+    # against the straight hilt-tip line, then place `bend` that far off
+    # the line's midpoint along its perpendicular.
+    offset = blade._bend_offset_from_mask(mask, hilt, tip)
+    assert abs(offset) > blade.BEND_SIGNIFICANCE_PX  # a real, significant bow
+    seg = np.asarray(tip) - np.asarray(hilt)
+    axis = seg / np.linalg.norm(seg)
+    perp_dir = np.array([-axis[1], axis[0]])
+    bend = (np.asarray(hilt) + np.asarray(tip)) / 2.0 + offset * perp_dir
+
+    curved = _capsule_mask(canvas, hilt, tip, 10.0, 0.10, 0.12, 0.35, bend=bend)
+
+    # The rendered capsule is a band of `width` around its centerline, so
+    # read the centerline back as the midpoint of the lit rows in the
+    # bend point's own column -- then compare that to the measured bow.
+    col = curved[:, round(bend[0])]
+    lit_rows = np.nonzero(col)[0]
+    assert len(lit_rows) > 0, "nothing rendered at the bend point's column"
+    rendered_centerline_y = (lit_rows.min() + lit_rows.max()) / 2.0
+    rendered_deviation = rendered_centerline_y - hilt[1]  # straight line is y=50
+
+    assert rendered_deviation == pytest.approx(offset, abs=1.5)
+    # ...and the pixel at the bend point is genuinely inside the blade.
+    assert curved[round(bend[1]), round(bend[0])]
 
 
 # ---------------------------------------------------------------------------
@@ -686,24 +768,35 @@ def test_render_glow_multi_renders_a_curved_blade_when_bend_is_present(tmp_path)
     np.savez(clip["motion_path"], **motion)
 
     out_dir = str(tmp_path / "out")
-    render_glow(
-        clip["frames_dir"], clip["masks_dir"], clip["video_meta_path"],
-        out_dir, clip["motion_path"], ignition_ramp_seconds=0,
+    # Deliberately render via render_glow_multi, not render_glow, despite
+    # the single object: `suppress_overlap_bleed` is the only producer of
+    # `bend` and only ever runs for a 2-object job (runner.py gates it on
+    # `len(object_ids) == 2`), and every 2-object job renders through
+    # render_glow_multi. So render_glow_multi's own bend-threading is the
+    # path that actually ships, and this test previously called
+    # render_glow instead -- leaving that path with no end-to-end
+    # coverage. N=1 object list, matching
+    # test_render_glow_multi_with_one_object_matches_render_glow.
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+    render_glow_multi(
+        clip["frames_dir"],
+        [{"masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"],
+          "color": (40, 40, 255), "intensity": 0.35}],
+        clip["video_meta_path"], out_dir,
+        ignition_ramp_seconds=0,
     )
     img = _load_png(out_dir, 0)
     baseline = float(clip["plate_value"])
-    # A quadratic Bezier does not pass through its own middle control
-    # point -- at t=0.5 it only reaches the average of the two endpoints
-    # and the control point, i.e. mid + 0.5*(bend_point - mid) (the same
-    # halving Task 6 independently verified and documented for
-    # _curved_capsule_mask, in progress.md and task-6-report.md). Sampling
-    # at bend_point itself lands ~12px past the actual rendered curve and
-    # only catches faint bloom (measured signal 15, not >20); sample where
-    # the curve actually peaks instead.
-    peak = mid + 0.5 * (bend_point - mid)
-    px, py = round(peak[0]), round(peak[1])
+    # `bend` is the point the blade passes through, and
+    # _curved_capsule_mask now solves for the Bezier control point that
+    # makes B(0.5) land exactly on it. This test used to sample
+    # `mid + 0.5*(bend_point - mid)` instead, because the old renderer
+    # fed `bend` straight in as the control point and so only ever
+    # reached half the requested offset. With that halving corrected,
+    # sample the bend point itself -- that is the whole claim.
+    px, py = round(bend_point[0]), round(bend_point[1])
     signal = float(img[py, px].astype(np.float64).max()) - baseline
-    assert signal > 20  # the curve actually reaches up near the bend point
+    assert signal > 20  # the curve actually reaches the bend point
 
 
 def test_render_glow_handles_a_motion_npz_without_a_bend_column(tmp_path):

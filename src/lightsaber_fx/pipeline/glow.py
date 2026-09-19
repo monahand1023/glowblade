@@ -146,8 +146,10 @@ def _quadratic_bezier_points(p0, p1, p2, n_points):
 def _curved_capsule_mask(shape, hilt, tip, bend, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac):
     """Same tapered-hilt/rounded-tip capsule shape as
     `_straight_capsule_mask`, but walking a sampled quadratic-Bezier
-    polyline (hilt -> bend -> tip) instead of one straight segment. Only
-    called when `bend` is a real, finite point -- see `_capsule_mask`.
+    polyline that actually passes *through* `bend` (hilt -> bend -> tip)
+    instead of one straight segment -- see the control-point solve
+    below. Only called when `bend` is a real, finite point -- see
+    `_capsule_mask`.
     """
     h, w = shape[:2]
     out = np.zeros((h, w), dtype=np.uint8)
@@ -167,7 +169,26 @@ def _curved_capsule_mask(shape, hilt, tip, bend, width, extend_frac, hilt_taper_
     taper_len = min(length * hilt_taper_frac, length * 0.9)
     body_start = hilt + axis * taper_len
 
-    centerline = _quadratic_bezier_points(body_start, bend, tip, BEND_POLYLINE_POINTS)
+    # `bend` is the point the blade actually passes through (see
+    # BladeGeometry.bend / _bend_offset_from_mask) -- not a Bezier
+    # control point itself. A quadratic Bezier only reaches half its
+    # control point's own offset at t=0.5, so the actual control point
+    # must be solved for, or the rendered curve shows only half the
+    # measured bow.
+    #
+    # Measured on the real job this feature exists for (frame 292,
+    # object 1, 227.8px blade, bend point 18.51px off the straight
+    # hilt-tip line): feeding `bend` straight in as the control point
+    # peaked the rendered centerline at 9.25px -- exactly half -- and,
+    # compounded with the old BEND_RAMP_FRAMES=2 halving every real
+    # frame in that job a second time, at 4.63px, i.e. 2.03% of blade
+    # length, inside the band of ordinary baseline noise the design spec
+    # itself calls invisible. Solving B(0.5) = bend for the control point
+    # of a quadratic Bezier through (body_start, control, tip) gives
+    # control = 2*bend - (body_start + tip) / 2; the rendered curve then
+    # peaks at 18.51px -- exactly the bend point it was handed.
+    control_point = 2 * bend - (body_start + tip) / 2.0
+    centerline = _quadratic_bezier_points(body_start, control_point, tip, BEND_POLYLINE_POINTS)
     tip_tangent = centerline[-1] - centerline[-2]
     tip_tangent_norm = np.linalg.norm(tip_tangent)
     tip_dir = tip_tangent / tip_tangent_norm if tip_tangent_norm > 0 else axis
