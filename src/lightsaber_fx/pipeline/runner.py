@@ -14,7 +14,7 @@ from .blade import (
 )
 from .frames import extract_frames
 from .glow import parse_color, render_glow, render_glow_multi
-from .hilt_track import compute_hilt_overrides
+from .hilt_track import compute_direction_overrides, compute_hilt_overrides
 from .mux import encode
 from .reacquire import reconcile_pair, retrack_overlap_runs
 from .track import track_object, track_objects
@@ -380,6 +380,20 @@ def run_pipeline_multi(
             exclude_frame_ranges=resolved_ranges,
         )
 
+        # An accurate hilt fixes the *base* of a run's interpolated tip
+        # path, but not its *angle* -- a real, confirmed gap (job
+        # 58a8f662, frame 320): both objects' raw per-frame tip had bled
+        # onto the *other* object's hilt during that run, leaving the
+        # smoother nothing but a straight line between anchors to
+        # interpolate, which visibly missed the real blade's angle. Same
+        # optical-flow technique as compute_hilt_overrides, tracking a
+        # point further out along the blade instead of the hilt itself.
+        direction_overrides_0, direction_overrides_1 = compute_direction_overrides(
+            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
+            paths["motion_paths"][0], paths["motion_paths"][1],
+            exclude_frame_ranges=resolved_ranges,
+        )
+
         # Runs after both objects' motion.npz exist (it patches, not
         # produces, so it needs their finished output) and before the
         # usability check below, so a stretch of frames this corrects
@@ -393,6 +407,7 @@ def run_pipeline_multi(
             paths["motion_paths"][1], paths["masks_dirs"][1],
             exclude_frame_ranges=resolved_ranges,
             hilt_overrides_a=hilt_overrides_0, hilt_overrides_b=hilt_overrides_1,
+            direction_overrides_a=direction_overrides_0, direction_overrides_b=direction_overrides_1,
         )
     else:
         # The 2-object case gets this same correction from inside

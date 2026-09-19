@@ -1230,7 +1230,8 @@ def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp
     calls = []
 
     def fake_suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
-                                     exclude_frame_ranges=(), hilt_overrides_a=None, hilt_overrides_b=None):
+                                     exclude_frame_ranges=(), hilt_overrides_a=None, hilt_overrides_b=None,
+                                     direction_overrides_a=None, direction_overrides_b=None):
         # Must run after both objects' compute_motion, since it patches
         # already-written motion.npz rather than producing it.
         assert os.path.exists(motion_path_a)

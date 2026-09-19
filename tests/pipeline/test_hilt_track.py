@@ -5,10 +5,12 @@ import numpy as np
 
 from lightsaber_fx.pipeline.blade import BladeGeometry, save_mask, save_motion
 from lightsaber_fx.pipeline.hilt_track import (
+    BLADE_DIRECTION_SEED_FRAC,
     MIN_SEED_FEATURES,
     _seed_features,
     _track_direction,
     _track_points_sequential,
+    compute_direction_overrides,
     compute_hilt_overrides,
     track_hilt_through_run,
 )
@@ -298,3 +300,79 @@ def test_compute_hilt_overrides_covers_marginal_frames_around_the_run_too(tmp_pa
     # narrower detected run (4-6).
     assert set(overrides_a.keys()) == set(range(3, 8))
     assert set(overrides_b.keys()) == set(range(3, 8))
+
+
+# ---------------------------------------------------------------------------
+# compute_direction_overrides
+#
+# An accurate hilt override fixes the *base* of a run's interpolated tip
+# path, but not its *angle* -- see BLADE_DIRECTION_SEED_FRAC's docstring
+# for the real-footage gap this closes. Reuses track_hilt_through_run
+# directly (no hilt-specific behavior in it, only naming), seeded at a
+# point along the blade axis instead of the hilt itself.
+# ---------------------------------------------------------------------------
+
+def _write_overlap_run_fixture_for_direction(tmp_path, true_positions, overlap_start=5, overlap_end=15, n=21,
+                                              length=125.0):
+    """Like `_write_overlap_run_fixture`, but hilt/tip are placed so that
+    `hilt + BLADE_DIRECTION_SEED_FRAC * (tip - hilt)` lands exactly on
+    `true_positions[i]` -- the point compute_direction_overrides actually
+    seeds tracking from, not the hilt itself."""
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    for i in range(n):
+        mask_a = np.zeros((20, 20), dtype=bool)
+        mask_a[0:4, 0:4] = True
+        save_mask(str(masks_a), i, mask_a)
+        mask_b = np.zeros((20, 20), dtype=bool)
+        if overlap_start <= i <= overlap_end:
+            mask_b[0:4, 0:4] = True
+        else:
+            mask_b[15:17, 15:17] = True
+        save_mask(str(masks_b), i, mask_b)
+
+    def geo(i):
+        x, y = true_positions[i]
+        hilt = (x - BLADE_DIRECTION_SEED_FRAC * length, y)
+        tip = (hilt[0] + length, y)
+        return BladeGeometry(centroid=hilt, axis=(1.0, 0.0), tip=tip, hilt=hilt,
+                              length=length, width=5.0, angle=0.0)
+
+    save_motion(str(motion_a), [geo(i) for i in range(n)])
+    save_motion(str(motion_b), [geo(i) for i in range(n)])
+    return masks_a, masks_b, motion_a, motion_b
+
+
+def test_compute_direction_overrides_returns_tracked_positions_for_an_unresolved_run(tmp_path):
+    frames_dir = tmp_path / "frames"
+    true_positions = _write_translating_checker_sequence(
+        frames_dir, start_frame=0, end_frame=20, start_center=(80, 80), dx=1, dy=0.5,
+    )
+    masks_a, masks_b, motion_a, motion_b = _write_overlap_run_fixture_for_direction(tmp_path, true_positions)
+
+    overrides_a, overrides_b = compute_direction_overrides(
+        str(frames_dir), str(masks_a), str(masks_b), str(motion_a), str(motion_b),
+    )
+
+    assert set(overrides_a.keys()) == set(range(5, 16))
+    assert set(overrides_b.keys()) == set(range(5, 16))
+    for frame_idx, (x, y) in overrides_a.items():
+        true_x, true_y = true_positions[frame_idx]
+        assert abs(x - true_x) < 3.0
+        assert abs(y - true_y) < 3.0
+
+
+def test_compute_direction_overrides_skips_excluded_ranges(tmp_path):
+    frames_dir = tmp_path / "frames"
+    true_positions = _write_translating_checker_sequence(
+        frames_dir, start_frame=0, end_frame=20, start_center=(80, 80), dx=1, dy=0.5,
+    )
+    masks_a, masks_b, motion_a, motion_b = _write_overlap_run_fixture_for_direction(tmp_path, true_positions)
+
+    overrides_a, overrides_b = compute_direction_overrides(
+        str(frames_dir), str(masks_a), str(masks_b), str(motion_a), str(motion_b),
+        exclude_frame_ranges=[(5, 15)],
+    )
+
+    assert overrides_a == {}
+    assert overrides_b == {}

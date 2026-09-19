@@ -1305,6 +1305,38 @@ def _apply_hilt_overrides(motion, run_start, run_end, frame_indices, hilt_overri
         _rederive_from_tip_hilt(motion, j)
 
 
+def _apply_direction_overrides(motion, run_start, run_end, frame_indices, direction_overrides):
+    """For every frame in [run_start, run_end] with a validated entry in
+    `direction_overrides` ({frame number: (x, y)}, a point along the blade
+    axis from `hilt_track.compute_direction_overrides` -- not the tip
+    itself), rotate `motion`'s `tip` to lie along the direction from
+    `hilt` to that point, preserving whatever length the run's smoother
+    (and any `_apply_hilt_overrides` applied first) already produced.
+    `axis`/`length`/`angle` are re-derived from the result; `length` comes
+    out unchanged by construction (only the direction changes).
+
+    This fixes what `_apply_hilt_overrides` alone does not: an accurate
+    hilt pins the *base* of the run's interpolated tip path, but not its
+    *angle* -- see `hilt_track.BLADE_DIRECTION_SEED_FRAC`'s docstring for
+    the real-footage gap (a rendered blade pointing measurably away from
+    the real one, despite an accurate hilt) this closes.
+    """
+    for j in range(run_start, run_end + 1):
+        frame_num = frame_indices[j]
+        if frame_num not in direction_overrides:
+            continue
+        hilt = motion["hilt"][j]
+        length = motion["length"][j]
+        if not np.isfinite(length) or length <= 0:
+            continue
+        direction_vec = np.asarray(direction_overrides[frame_num]) - hilt
+        norm = np.linalg.norm(direction_vec)
+        if norm < 1e-6:
+            continue
+        motion["tip"][j] = hilt + (direction_vec / norm) * length
+        _rederive_from_tip_hilt(motion, j)
+
+
 # A tracked object's raw SAM2 mask can genuinely undersegment the blade for
 # several consecutive frames (not just a single isolated one -- see
 # POSITION_GLITCH_JUMP_PX's docstring for why that corrector is deliberately
@@ -1335,7 +1367,20 @@ def _apply_hilt_overrides(motion, run_start, run_end, frame_indices, hilt_overri
 # down by its own low outliers in a way the median resists.
 LENGTH_STABILIZE_WINDOW = 15
 LENGTH_STABILIZE_MAD_PX = 8.0
-LENGTH_STABILIZE_REL_THRESHOLD = 0.20
+# 0.20 initially; lowered to 0.15 after finding a real, visible one-frame
+# flicker (job 58a8f662 frame 364, a 19.7% shortfall -- just under the old
+# 20% bar) that a noisy window's own MAD correctly flagged but the relative
+# threshold missed by a hair. This function processes frames in order and
+# mutates length in place, so an earlier frame's own correction can shift
+# a later frame's window median -- confirmed directly that 364 needed
+# 0.15, not the 0.18 its own (recomputed-from-final-data) window stats
+# suggested, because at the point 364 is actually processed mid-run fewer
+# nearby frames have been corrected yet, giving a lower median to compare
+# against. Re-verified at 0.15 against the same real clip this constant
+# was calibrated against: still zero false positives on the smooth
+# 30-frame decline test above (using the real sequential function, not a
+# recomputed-from-scratch simulation of it).
+LENGTH_STABILIZE_REL_THRESHOLD = 0.15
 LENGTH_STABILIZE_MIN_SAMPLES = 10
 
 
@@ -1414,7 +1459,8 @@ def stabilize_blade_length(motion_path):
 def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
                             iou_threshold=CROSS_OBJECT_OVERLAP_IOU_THRESHOLD,
                             anchor_iou_threshold=None, exclude_frame_ranges=(),
-                            hilt_overrides_a=None, hilt_overrides_b=None):
+                            hilt_overrides_a=None, hilt_overrides_b=None,
+                            direction_overrides_a=None, direction_overrides_b=None):
     """Patch two already-written motion.npz files in place: for every run of
     consecutive frames where the two tracked objects' raw masks overlap
     past `iou_threshold` (see `_find_overlap_runs`), replace *both*
@@ -1583,6 +1629,13 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                 _apply_hilt_overrides(motion_a, correct_start, correct_end, frame_indices, hilt_overrides_a)
             if hilt_overrides_b:
                 _apply_hilt_overrides(motion_b, correct_start, correct_end, frame_indices, hilt_overrides_b)
+            # After hilt (the base of the line), fix its angle -- see
+            # _apply_direction_overrides' docstring for why an accurate
+            # hilt alone leaves the smoother's tip angle uncorrected.
+            if direction_overrides_a:
+                _apply_direction_overrides(motion_a, correct_start, correct_end, frame_indices, direction_overrides_a)
+            if direction_overrides_b:
+                _apply_direction_overrides(motion_b, correct_start, correct_end, frame_indices, direction_overrides_b)
         else:
             for j in range(correct_start, correct_end + 1):
                 if before is not None:

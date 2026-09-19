@@ -1453,6 +1453,69 @@ def test_suppress_overlap_bleed_default_hilt_overrides_behave_exactly_as_before(
     assert 100.0 < result_a["length"][1] < result_a["length"][2] < 150.0
 
 
+# ---------------------------------------------------------------------------
+# suppress_overlap_bleed -- direction overrides
+#
+# An accurate hilt override fixes the *base* of a run's interpolated tip
+# path, but not its *angle*: confirmed on real footage (job 58a8f662, frame
+# 320, a real 291-328 contact run) where both objects' raw per-frame `tip`
+# had bled onto the *other* object's hilt, leaving _tip_confidence_weights
+# at 0.0 for both and the smoother with nothing but a straight line between
+# anchors -- which visibly missed the real blade's angle even with an
+# accurate hilt in hand. hilt_track.compute_direction_overrides tracks a
+# point further out along the blade (not the tip itself, which is exactly
+# where contact/occlusion happens) to recover that angle independently.
+# ---------------------------------------------------------------------------
+
+def test_suppress_overlap_bleed_uses_a_direction_override_when_provided(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 7
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2, 3, 4, 5})
+    _write_lengths(motion_a, [100] * n)
+    _write_lengths(motion_b, [100, 120, 150, 500, 150, 120, 100])
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+    baseline = load_motion(str(motion_b))
+    baseline_angle = baseline["angle"][3]
+    baseline_hilt = baseline["hilt"][3]
+
+    _write_lengths(motion_b, [100, 120, 150, 500, 150, 120, 100])  # reset (patches in place)
+    # A point straight up from the baseline's own hilt -- a direction far
+    # from whatever near-horizontal angle the plain interpolation produced.
+    far_up = (baseline_hilt[0], baseline_hilt[1] - 9000.0)
+    suppress_overlap_bleed(
+        str(motion_a), str(masks_a), str(motion_b), str(masks_b),
+        direction_overrides_b={3: far_up},
+    )
+    overridden = load_motion(str(motion_b))
+
+    assert abs(overridden["angle"][3] - baseline_angle) > 1.0  # radians -- a large angle change
+    assert overridden["length"][3] == pytest.approx(baseline["length"][3], abs=1.0)
+    assert overridden["hilt"][3] == pytest.approx(baseline_hilt)  # untouched by a direction override
+
+
+def test_suppress_overlap_bleed_default_direction_overrides_behave_exactly_as_before(tmp_path):
+    # Regression guard, mirroring the hilt-override version above: omitting
+    # direction_overrides_a/b entirely must produce the same output as
+    # every pre-existing suppress_overlap_bleed test.
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 4
+    _write_fixed_mask(masks_a, n)
+    _write_overlap_masks(masks_b, n, overlapping_frames={1, 2})
+    _write_lengths(motion_a, [100, 500, 600, 150])
+    _write_lengths(motion_b, [200, 500, 600, 250])
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+    result_a = load_motion(str(motion_a))
+
+    assert result_a["length"][0] == pytest.approx(100.0)
+    assert result_a["length"][3] == pytest.approx(150.0)
+    assert 100.0 < result_a["length"][1] < result_a["length"][2] < 150.0
+
+
 def _geo_with_tip(hilt, tip):
     axis_vec = np.array(tip) - np.array(hilt)
     length = float(np.linalg.norm(axis_vec))

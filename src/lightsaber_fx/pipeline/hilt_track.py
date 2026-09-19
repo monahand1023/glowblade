@@ -267,3 +267,77 @@ def compute_hilt_overrides(
         ))
 
     return overrides_a, overrides_b
+
+
+# Where along the hilt-tip line (0 = hilt, 1 = tip) to seed blade-direction
+# tracking. A tracked hilt fixes the *base* of a run's interpolated tip
+# path, but not its *angle* -- confirmed on real footage (job 58a8f662,
+# frame 320, the real 291-328 contact run): with an accurate hilt in hand,
+# suppress_overlap_bleed's confidence-weighted tip smoother still produced
+# a rendered blade pointing measurably away from the real, visible épée --
+# both objects' raw per-frame `tip` had bled onto the *other* object's
+# hilt during this run (measured: each raw tip landed closer to the
+# opponent's hilt than its own, confidence 0.0 for both under
+# `_tip_confidence_weights`), leaving the smoother with only the anchors
+# and a straight-line prior to interpolate between, which cannot capture
+# real intermediate motion (a parry/riposte swinging out and back) any
+# better than it could for position alone.
+#
+# 0.4 is a real-footage-validated compromise: far enough from the hilt
+# that small pixel-tracking noise doesn't amplify into a large angular
+# error when extended out to the tip, but close enough to the hilt
+# (forte/middle of the blade) to still be clear of the opposing blade
+# during contact, which typically crosses further out toward both tips.
+# Confirmed by direct comparison across t in {0.25...0.7} on the real
+# 291-328 run: t=0.4 gave the tightest validated landing drift for one
+# object (1.2px forward) while the other validated backward at 14.1px --
+# both comfortably inside `HILT_TRACK_MAX_DRIFT_FRAC`'s existing bound,
+# reused as-is (not a new, unvalidated threshold).
+BLADE_DIRECTION_SEED_FRAC = 0.4
+
+
+def compute_direction_overrides(
+    frames_dir, masks_dir_a, masks_dir_b, motion_path_a, motion_path_b,
+    exclude_frame_ranges=(),
+):
+    """Like `compute_hilt_overrides`, but recovers a point along each
+    object's blade axis (`BLADE_DIRECTION_SEED_FRAC` of the way from hilt
+    to tip) instead of the hilt itself -- fixing the *angle* a contact
+    run's tip gets smoothed to, which an accurate hilt alone does not (see
+    `BLADE_DIRECTION_SEED_FRAC`'s docstring for the real-footage gap this
+    closes). Reuses `track_hilt_through_run` directly: its tracking and
+    validation logic has no hilt-specific behavior, only hilt-specific
+    naming -- any seed point works.
+
+    Returns (direction_overrides_a, direction_overrides_b): two
+    {frame_number: (x, y)} dicts, one per object, each a point along that
+    object's blade axis (not the tip itself) for `blade._apply_direction_
+    overrides` to derive a corrected tip direction from.
+    """
+    motion_a = load_motion(motion_path_a)
+    motion_b = load_motion(motion_path_b)
+    frame_indices = mask_frame_indices(masks_dir_a)
+    runs = _find_overlap_runs(masks_dir_a, masks_dir_b, motion_a, motion_b)
+
+    overrides_a = {}
+    overrides_b = {}
+    for run_start, run_end, before, after, _max_iou in runs:
+        if before is None or after is None:
+            continue
+        start_frame, end_frame = frame_indices[before + 1], frame_indices[after - 1]
+        if any(start_frame <= ex_end and end_frame >= ex_start for ex_start, ex_end in exclude_frame_ranges):
+            continue
+        before_frame, after_frame = frame_indices[before], frame_indices[after]
+
+        for overrides, motion in ((overrides_a, motion_a), (overrides_b, motion_b)):
+            hilt_before, tip_before = motion["hilt"][before], motion["tip"][before]
+            hilt_after, tip_after = motion["hilt"][after], motion["tip"][after]
+            pt_before = hilt_before + BLADE_DIRECTION_SEED_FRAC * (tip_before - hilt_before)
+            pt_after = hilt_after + BLADE_DIRECTION_SEED_FRAC * (tip_after - hilt_after)
+            overrides.update(track_hilt_through_run(
+                frames_dir, frame_indices, start_frame, end_frame,
+                before_frame, tuple(pt_before), float(motion["length"][before]),
+                after_frame, tuple(pt_after), float(motion["length"][after]),
+            ))
+
+    return overrides_a, overrides_b
