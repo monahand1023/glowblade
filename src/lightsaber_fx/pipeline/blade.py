@@ -29,10 +29,16 @@ class BladeGeometry(NamedTuple):
     All coordinates are (x, y) in pixel space; ``axis`` is a unit vector
     oriented from ``hilt`` to ``tip``; ``angle`` is ``atan2(axis[1],
     axis[0])`` of that oriented axis, in radians. ``bend``, when not
-    ``None``, is a third control point (hilt, bend, tip form a quadratic
-    Bezier) capturing real, measured bow during blade-on-blade contact --
-    see ``_bend_offset`` and ``fit_blade``. Absent (``None``) on every
-    ordinary frame; a default so every existing positional/keyword
+    ``None``, is a point the blade actually *passes through* -- the real,
+    measured bow during blade-on-blade contact -- and specifically NOT a
+    Bezier control point: ``glow._curved_capsule_mask`` solves for the
+    control point that makes its rendered curve reach this point at
+    t=0.5, since a quadratic Bezier otherwise only travels half its
+    control point's own offset. Computed in ``suppress_overlap_bleed``
+    via ``_bend_offset_from_mask`` (measuring each object's raw mask
+    against its FINAL, already-corrected hilt-tip line), never in
+    ``fit_blade`` -- see ``BEND_SIGNIFICANCE_PX``. Absent (``None``) on
+    every ordinary frame; a default so every existing positional/keyword
     construction of this NamedTuple keeps working unchanged.
     """
 
@@ -119,14 +125,45 @@ def _median_perpendicular_extent(proj, perp, n_bins=20):
     return float(np.median(extents))
 
 
-# Threshold (px) above which fit_blade's own median midpoint-bin
-# perpendicular offset is treated as real blade bow rather than PCA-fit
-# noise. Calibrated against the entire real 506-frame job before this
-# was implemented (see the design spec's Constants section): gated
-# baseline noise ceiling was 3.2px (object 0) / 4.2px p99 (object 1),
-# real signal 21.4-28.0px -- 8px sits with comfortable margin on both
-# sides and produced zero false positives/negatives on that job's one
-# real contact run.
+# Threshold (px) above which a frame's median midpoint-bin perpendicular
+# offset is treated as real blade bow rather than measurement noise.
+#
+# What this is measured against, in the shipped code: `suppress_overlap_bleed`
+# runs `_bend_offset_from_mask` over each object's own raw per-frame mask
+# (every foreground pixel, not just the largest connected component)
+# relative to that frame's FINAL, already-corrected hilt-tip line. It is
+# NOT `fit_blade`'s fresh single-frame PCA best-fit axis -- an earlier
+# version of this feature measured against that, and the residual
+# relative to a line already rotated to fit the bowed point cloud never
+# exceeded ~5.4px anywhere in the real job, so nothing ever crossed this
+# threshold at all. That mechanism is gone; do not re-derive this
+# constant against it.
+#
+# Re-measured under the CURRENT methodology across the entire real
+# 506-frame job (`58a8f662`), both tracked objects, with the cross-object
+# IoU gate applied (it removes 33 contaminated frames):
+#   noise floor (clean frames at or below threshold)
+#     object 0: n=472  median 0.41px  p95 2.07  p99 3.84  MAX 6.98 (frame 327)
+#     object 1: n=468  median 0.00px  p95 0.03  p99 2.75  MAX 5.98 (frame 328)
+#   real signal (clean frames above threshold), 6 frames total
+#     object 0: frame 326 = -8.21px
+#     object 1: frames 287/291/292/326/327 = -9.35/+15.74/+22.45/+19.01/+10.66px
+#   median blade length over the job: ~251px, so 8px is ~3.2% of a blade.
+# Every one of those six sits at an edge of the 291-328 corrected-line
+# smoothing span -- exactly where the raw mask and the smoothed line
+# genuinely diverge -- which is what this feature exists to render.
+#
+# Honest note on the margin: it is ~1px on each side (6.98px highest
+# noise, 8 threshold, 8.21px weakest signal), NOT the wide separation the
+# previous, now-deleted methodology's comment claimed. 8 is still the
+# right value -- it admits all six real-divergence frames and no noise
+# frame, and the frames closest to the line on both sides (326/327) are
+# the same physical event at its tail -- but a future reader moving this
+# by more than a pixel or two in either direction should re-measure
+# rather than assume slack. Contamination is NOT this threshold's job:
+# gated-out frames reach 42.1px of apparent "bow", and it is the
+# cross-object IoU gate in `suppress_overlap_bleed`, not this number,
+# that rejects them.
 BEND_SIGNIFICANCE_PX = 8
 
 
@@ -987,15 +1024,33 @@ TIP_SMOOTHING_STRENGTH = 100000
 
 
 # Small local window (frames) for denoising a contiguous bend-active
-# stretch, and a small rise/fall ramp so bend eases in/out of existence
-# instead of popping. Calibrated against the real job: the only real
-# stretch found there (after Task 4's contamination gate) is 2 frames
-# (291-292) -- not enough on its own to pin an exact value the way
-# BEND_SIGNIFICANCE_PX's wide margin could, but it rules out anything
-# large. Revisit against a wider sample of contact runs if one turns up
-# in other real footage.
+# stretch. Calibrated against the real job: the real stretches found
+# there (after Task 4's contamination gate) are 1-2 frames long -- not
+# enough on their own to pin an exact value the way
+# BEND_SIGNIFICANCE_PX's wide margin could, but enough to rule out
+# anything large. Revisit against a wider sample of contact runs if one
+# turns up in other real footage. (The rise/fall ramp is a separate
+# constant -- see BEND_RAMP_FRAMES below, which has its own, stricter
+# real-data calibration.)
 BEND_TEMPORAL_SMOOTH_WINDOW = 3
-BEND_RAMP_FRAMES = 2
+
+# The ramp length specifically, re-calibrated against the real stretch
+# lengths the shipped (Task 9) mask-based bend computation actually
+# produces on the real job -- which is what the earlier value of 2 was
+# never checked against. Measured there: object 1 has three bend-active
+# stretches, of 1, 2 and 2 frames; object 0 has one, of 1 frame. At
+# ramp_frames=2, `_edge_ramp_fraction` returns exactly 0.5 at EVERY
+# frame of EVERY one of those stretches (rise and fall overlap on
+# anything shorter than 2*ramp_frames), i.e. every real frame in the
+# job was permanently pinned to half amplitude -- attenuation with no
+# frame anywhere ever reaching full strength, which is not what a ramp
+# is for. At ramp_frames=1 each of those stretches reaches 1.0 at every
+# frame (`_edge_ramp_fraction(0, 1, 1) == 1.0`;
+# `_edge_ramp_fraction(0, 2, 1) == _edge_ramp_fraction(1, 2, 1) == 1.0`)
+# while still giving a genuine 1-frame rise and fall -- and therefore a
+# real ease in/out rather than a pop -- on any stretch of 3+ frames, if
+# other footage ever turns one up.
+BEND_RAMP_FRAMES = 1
 
 
 def _edge_ramp_fraction(offset_into_stretch, stretch_length, ramp_frames):

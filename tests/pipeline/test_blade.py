@@ -1790,33 +1790,16 @@ def test_suppress_overlap_bleed_clears_bend_where_cross_object_iou_is_high(tmp_p
     for i in (0, 1, 3, 4):
         assert not np.isnan(result_a["bend"][i]).any()  # untouched -- low IoU
         assert not np.isnan(result_b["bend"][i]).any()
-
-
-def test_suppress_overlap_bleed_clears_bend_outside_any_detected_run(tmp_path):
-    # A single high-IoU frame below CROSS_OBJECT_OVERLAP_IOU_THRESHOLD's
-    # run-detection bar entirely (no run is ever detected here -- the run
-    # loop never touches this frame) must still get its bend cleared, since
-    # the gate operates on the whole clip's IoU array independently of run
-    # detection. Reuses the same fixture as above but only asserts on the
-    # gate, making the "independent of run detection" property explicit
-    # rather than incidental.
-    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
-    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
-    n = 3
-    _write_fixed_mask(masks_a, n)
-    _write_overlap_masks(masks_b, n, overlapping_frames={1})
-    _write_lengths(motion_a, [100] * n, bends=[(5.0, 5.0)] * n)
-    _write_lengths(motion_b, [100] * n, bends=[(5.0, 5.0)] * n)
-
-    n_held = suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
-
-    result_a = load_motion(str(motion_a))
-    assert np.isnan(result_a["bend"][1]).all()
-    # sanity: this run WAS also detected/held by the existing smoothing
-    # logic (single-frame overlap at index 1) -- both mechanisms agree
-    # here, but the gate's own test above already proves it doesn't
-    # depend on that.
-    assert n_held == 1
+    # This is the only test of the IoU gate, deliberately. A sibling test
+    # here once claimed to cover "bend cleared at a frame outside any
+    # detected run" separately, but that is not a constructible scenario:
+    # `_find_overlap_runs` groups EVERY over-threshold-IoU frame into some
+    # run, so a frame the gate clears is always inside one. (That test also
+    # passed for the wrong reason -- its tiny 4x4-block fixture masks never
+    # exceed BEND_SIGNIFICANCE_PX under the current mask-based computation,
+    # so `had_bend_candidate` was False and the gate block it named never
+    # executed at all. Verified by instrumenting it: every computed offset
+    # was exactly 0.0.) Removed rather than kept as a false positive.
 
 
 def test_suppress_overlap_bleed_computes_bend_from_the_final_line_for_a_bowed_mask(tmp_path):
