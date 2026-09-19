@@ -35,7 +35,7 @@
 - [ ] **Step 1: Write the failing test**
 
 ```python
-def test_save_and_load_motion_round_trips_bend_including_none():
+def test_save_and_load_motion_round_trips_bend_including_none(tmp_path):
     geo_with_bend = BladeGeometry(
         centroid=(10.0, 0.0), axis=(1.0, 0.0), tip=(20.0, 0.0), hilt=(0.0, 0.0),
         length=20.0, width=5.0, angle=0.0, bend=(10.0, 3.0),
@@ -44,10 +44,9 @@ def test_save_and_load_motion_round_trips_bend_including_none():
         centroid=(10.0, 0.0), axis=(1.0, 0.0), tip=(20.0, 0.0), hilt=(0.0, 0.0),
         length=20.0, width=5.0, angle=0.0, bend=None,
     )
-    path = "test_bend_roundtrip.npz"
+    path = str(tmp_path / "motion.npz")
     save_motion(path, [geo_with_bend, geo_without_bend, None])
     motion = load_motion(path)
-    os.remove(path)
 
     assert motion["bend"][0] == pytest.approx([10.0, 3.0])
     assert np.isnan(motion["bend"][1]).all()   # bend=None on a real frame
@@ -62,7 +61,7 @@ def test_blade_geometry_defaults_bend_to_none():
     assert geo.bend is None
 ```
 
-Add `import os` at the top of `tests/pipeline/test_blade.py` if not already present (check first — likely already imported given `tmp_path` fixture usage elsewhere, but this test uses a bare relative path with manual cleanup, matching no existing convention in the file; prefer `tmp_path` instead for consistency — rewrite as: `path = str(tmp_path / "motion.npz")`, drop the `os.remove` line, and add a `tmp_path` fixture parameter to both test functions).
+Both tests use the file's existing `tmp_path`-based convention (no manual cleanup, no bare relative paths) -- write them exactly as shown above, no further changes needed.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
