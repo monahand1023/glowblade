@@ -741,16 +741,23 @@ def render_glow_multi(
     into one composited PNG sequence. See `_composite_blade_contribution`'s
     docstring for how a single object's contribution is computed; this
     function's job is purely to do that once per object per frame, sum the
-    results, and run the shared (object-count-agnostic) trail/knoll-darken/
+    results, and run the shared (object-count-agnostic) knoll-darken/
     tonemap steps exactly once per frame -- the same steps `render_glow`
     already runs on its own single contribution.
 
-    Light wrap is the one exception: it is computed per object, from that
-    object's own blade shape in that object's own color. Wrapping the
-    union of every blade in every color would tint each blade's halo with
-    every other saber's color -- a red-vs-blue duel would give both blades
-    a magenta-ish halo -- and it is what makes the N=1 case identical to
-    `render_glow` rather than merely close to it.
+    Light wrap and the temporal trail are both the exception: each is
+    computed per object rather than on the combined result. Light wrap
+    uses that object's own blade shape in that object's own color --
+    wrapping the union of every blade in every color would tint each
+    blade's halo with every other saber's color, a red-vs-blue duel
+    giving both blades a magenta-ish halo. The trail needs its own
+    per-object state for a different reason: it must be able to reset
+    just one object's trail on a bend transition (see `bend_transition`
+    below) without disturbing another object's still-legitimately-
+    decaying one -- a single combined trail (this function's original
+    design) can't distinguish "object A just changed shape" from "object
+    B is still fading normally." Both choices are also what make the N=1
+    case identical to `render_glow` rather than merely close to it.
     """
     if not 1 <= len(objects) <= 4:
         raise ValueError("render_glow_multi supports 1-4 objects")
@@ -801,10 +808,23 @@ def render_glow_multi(
 
         color_lin = (np.asarray(obj["color"], dtype=np.float32) / 255.0) ** _GAMMA
         core_erode_px = max(1, round(canonical_width * core_erode_frac))
+        # Per-frame flag: did this object's bend state (curved vs straight)
+        # just change from the previous frame? See the trail loop below for
+        # why this matters -- confirmed on real footage, the ordinary
+        # frame-to-frame trail carries a fading ghost of whatever shape the
+        # blade had last frame, which looks like real motion when only the
+        # *position* changed (its designed purpose) but looks like a
+        # rendering glitch when the *shape* changed (a straight ghost
+        # jagging against a newly-curved blade, or vice versa) -- something
+        # that could never happen before bend existed.
+        bend_active = ~np.isnan(bend_arr[:, 0])
+        bend_transition = np.zeros(len(bend_arr), dtype=bool)
+        bend_transition[1:] = bend_active[1:] != bend_active[:-1]
         prepared.append({
             "masks_dir": masks_dir,
             "tip_arr": tip_arr, "hilt_arr": hilt_arr, "velocity": velocity,
             "bend_arr": bend_arr,
+            "bend_transition": bend_transition,
             "n_motion": len(tip_arr),
             "canonical_width": canonical_width,
             "first_active": active_indices[0] if active_indices else None,
@@ -828,18 +848,26 @@ def render_glow_multi(
     bbox_margin = blur_reach + motion_blur_max_len + 5
 
     rng = np.random.default_rng(rng_seed)
-    trail = np.zeros((h, w, 3), dtype=np.float32)
+    # One trail per object, not one shared trail -- needed so a bend
+    # transition (see `bend_transition` above) can reset just the
+    # transitioning object's own trail without disturbing another
+    # object's legitimate, still-decaying one. For N=1 this is exactly
+    # `render_glow`'s own single trail; for N>1 it also means each
+    # object's trail now decays independently of how bright the other
+    # object happens to be that frame, which is what "each blade has its
+    # own trail" should mean regardless of the bend feature.
+    per_object_trail = [np.zeros((h, w, 3), dtype=np.float32) for _ in prepared]
 
     for n, fname in enumerate(frame_files):
         idx = int(os.path.splitext(fname)[0])
         frame = cv2.imread(os.path.join(frames_dir, fname))
         plate_lin = _srgb_to_linear(frame)
 
-        combined_fx = np.zeros((h, w, 3), dtype=np.float32)
         combined_blade_u8 = np.zeros((h, w), dtype=np.uint8)
         per_object_blade_u8 = []
+        trail = np.zeros((h, w, 3), dtype=np.float32)
 
-        for obj_state in prepared:
+        for obj_idx, obj_state in enumerate(prepared):
             mask = load_mask_optional(obj_state["masks_dir"], idx)
             row = n if n < obj_state["n_motion"] else None
             tip_i = obj_state["tip_arr"][row] if row is not None else None
@@ -859,11 +887,18 @@ def render_glow_multi(
                 obj_state["spill_strength"], motion_blur_gain, motion_blur_max_len, bbox_margin,
                 bend=bend_i,
             )
-            combined_fx += full_fx
+            is_transition = row is not None and obj_state["bend_transition"][row]
+            if is_transition:
+                # This object's rendered shape just changed (straight<->
+                # curved) -- start its trail over at the current frame's
+                # own contribution rather than blending in a decayed
+                # ghost of the previous, differently-shaped frame.
+                per_object_trail[obj_idx] = full_fx
+            else:
+                per_object_trail[obj_idx] = np.maximum(per_object_trail[obj_idx] * trail_decay, full_fx)
+            trail += per_object_trail[obj_idx]
             combined_blade_u8 = np.maximum(combined_blade_u8, blade_u8)
             per_object_blade_u8.append(blade_u8)
-
-        trail = np.maximum(trail * trail_decay, combined_fx)
         darkened_plate, _ = knoll_darken(
             plate_lin, combined_blade_u8, knoll_dilate_px, knoll_darken_factor, knoll_feather_sigma,
             dilate_kernel=knoll_dilate_kernel,

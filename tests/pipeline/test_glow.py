@@ -815,3 +815,47 @@ def test_render_glow_handles_a_motion_npz_without_a_bend_column(tmp_path):
     )
     img = _load_png(out_dir, 0)
     assert img is not None
+
+
+# ---------------------------------------------------------------------------
+# Trail must not ghost a stale shape across a bend transition. Found on real
+# footage after the final-review magnitude fix made the curve strong enough
+# to matter: a frame that just switched from straight to curved (or back)
+# rendered a visible jagged "zigzag" -- the ordinary trail effect (designed
+# for a blade that *moves* between frames, not one whose *shape* changes)
+# was blending a fading ghost of the previous, differently-shaped frame
+# underneath the new one. Confirmed directly: the same synthetic scenario
+# below measured signal=45.0 at the ghost location against the pre-fix
+# per-object-trail code, and signal=9.0 (background-level) after.
+# ---------------------------------------------------------------------------
+
+def test_render_glow_multi_does_not_ghost_the_previous_frames_straight_shape_into_a_newly_curved_frame(tmp_path):
+    clip = _build_blade_clip(tmp_path, "transition", n_frames=4, dx=4, blade_len=90)
+    motion = blade.load_motion(clip["motion_path"])
+    # frame 0: straight (no bend). frame 1: a strong bend, injected directly
+    # -- an isolated one-frame bend-active stretch, transitioning in at
+    # frame 1 and back out at frame 2.
+    hilt1, tip1 = motion["hilt"][1], motion["tip"][1]
+    mid1 = (hilt1 + tip1) / 2.0
+    bend_point = mid1 + np.array([0.0, -20.0])  # bow well off the straight line
+    motion["bend"][1] = bend_point
+    np.savez(clip["motion_path"], **motion)
+
+    out_dir = str(tmp_path / "out")
+    from lightsaber_fx.pipeline.glow import render_glow_multi
+    render_glow_multi(
+        clip["frames_dir"],
+        [{"masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"], "color": (255, 90, 60), "intensity": 0.4}],
+        clip["video_meta_path"], out_dir, ignition_ramp_seconds=0, trail_decay=0.75,
+    )
+
+    # A point on frame 0's straight line, well off frame 1's curved path
+    # (the curve bows away from it) -- this is exactly where a stale trail
+    # ghost of frame 0's shape would show up in frame 1's render.
+    straight_mid_frame0 = (motion["hilt"][0] + motion["tip"][0]) / 2.0
+    px, py = round(straight_mid_frame0[0]), round(straight_mid_frame0[1])
+    img1 = _load_png(out_dir, 1).astype(np.float64)
+    baseline = float(clip["plate_value"])
+    ghost_signal = img1[py, px].max() - baseline
+
+    assert ghost_signal < 20  # no meaningful ghost of the old straight shape
