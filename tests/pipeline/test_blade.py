@@ -2,8 +2,10 @@ import numpy as np
 import pytest
 
 from lightsaber_fx.pipeline.blade import (
+    BEND_SIGNIFICANCE_PX,
     MIN_ELONGATION,
     BladeGeometry,
+    _bend_offset_from_mask,
     _cross_object_ious,
     _edge_ramp_fraction,
     _find_overlap_runs,
@@ -772,31 +774,47 @@ def _bowed_bar_mask(peak_offset, canvas=(60, 400), x_start=50, x_end=350, y_cent
     return mask
 
 
-def test_fit_blade_populates_bend_for_a_significantly_bowed_mask():
-    mask = _bowed_bar_mask(peak_offset=24.5)  # well past BEND_SIGNIFICANCE_PX=8
-    geo = fit_blade(mask)
-    assert geo.bend is not None
+def test_bend_offset_from_mask_measures_against_a_given_line_not_a_fresh_fit(tmp_path):
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    mask = _bowed_bar_mask(peak_offset=24.5, canvas=(100, 400), y_center=50)
+    offset = _bend_offset_from_mask(mask, hilt, tip)
+    assert offset == pytest.approx(24.0, abs=0.5)
 
 
-def test_fit_blade_leaves_bend_none_for_a_straight_mask():
-    # Every existing fit_blade fixture in this file is a straight bar --
-    # spot-check the two already used above, both must still give bend=None.
-    mask = np.zeros((48, 64), dtype=bool)
-    mask[10:16, 5:55] = True
-    geo = fit_blade(mask)
-    assert geo.bend is None
+def test_bend_offset_from_mask_uses_every_foreground_pixel_not_just_the_largest_component(tmp_path):
+    # Reproduces the real-footage finding: a mask fragmented into two
+    # disconnected pieces of the SAME bowed blade must not lose the far
+    # piece's contribution the way fit_blade's _largest_component would.
+    #
+    # NOTE on the gap size: the brief's own draft of this test dropped the
+    # whole [150, 250) middle span (a 100px gap out of the mask's 300px
+    # extent). Verified by running it: that gap is wide enough to fully
+    # empty _bend_offset's own mid-projection measurement window (~2 bins
+    # out of 20, i.e. ~15% of the *current* point set's own projected
+    # span -- here also centered on the same removed region), so the
+    # window sees zero points and _bend_offset's `len(window) < 3` guard
+    # returns exactly 0.0 -- not a signal-loss failure, just an empty
+    # sample. A much narrower gap (10px) still fragments the mask into
+    # two disconnected 8-connected components astride the point of
+    # highest curvature (confirmed: 870px and 864px, a near-equal split)
+    # while leaving the measurement window populated; offset then comes
+    # out to ~23.5px, comfortably past BEND_SIGNIFICANCE_PX.
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    bowed = _bowed_bar_mask(peak_offset=24.5, canvas=(100, 400), y_center=50)
+    ys, xs = np.nonzero(bowed)
+    fragmented = np.zeros_like(bowed)
+    # drop a narrow band at the peak -- two disconnected pieces
+    keep = (xs < 195) | (xs > 205)
+    fragmented[ys[keep], xs[keep]] = True
+    offset = _bend_offset_from_mask(fragmented, hilt, tip)
+    assert abs(offset) > BEND_SIGNIFICANCE_PX
 
 
-def test_fit_blade_bend_offset_is_robust_to_one_contaminated_bin():
-    # A straight mask with one small extra pixel cluster stuck onto a
-    # single bin (mimicking cross-object bleed at one point along the
-    # blade) must not move the median-per-bin bend fit past significance --
-    # the whole reason _bend_offset uses a median, not a mean, of a
-    # multi-point window, the same robustness _median_perpendicular_extent
-    # already relies on for width.
-    mask = np.zeros((48, 300), dtype=bool)
-    mask[20:26, 5:295] = True  # straight, 290px long
-    mask[35:45, 145:155] = True  # contamination blob near the midpoint, offset ~15-20px below
+def test_fit_blade_never_populates_bend_now(tmp_path):
+    # Regression guard for this task's removal: even a strongly bowed
+    # mask must not produce a fit_blade-level bend anymore -- that
+    # computation moved to suppress_overlap_bleed.
+    mask = _bowed_bar_mask(peak_offset=24.5)
     geo = fit_blade(mask)
     assert geo.bend is None
 
@@ -1039,6 +1057,19 @@ def _write_lengths(path, lengths, x_offset=0.0, bends=None):
     save_motion(str(path), [
         _motion_geo(length, i, x_offset=x_offset, bend=bend) if length is not None else None
         for i, (length, bend) in enumerate(zip(lengths, bends, strict=True))
+    ])
+
+
+def _fixed_hilt_tip_motion(path, hilt, tip, n_frames):
+    """A motion.npz where every frame has the identical, exact hilt/tip
+    given -- for tests that need to know precisely what straight line a
+    mask is being measured against, rather than `_motion_geo`'s
+    per-frame-offset convention."""
+    mid = ((hilt[0] + tip[0]) / 2.0, (hilt[1] + tip[1]) / 2.0)
+    length = float(np.hypot(tip[0] - hilt[0], tip[1] - hilt[1]))
+    save_motion(str(path), [
+        BladeGeometry(centroid=mid, axis=(1.0, 0.0), tip=tip, hilt=hilt, length=length, width=5.0, angle=0.0)
+        for _ in range(n_frames)
     ])
 
 
@@ -1718,15 +1749,37 @@ def test_suppress_overlap_bleed_does_not_log_the_long_span_warning_for_a_short_r
 
 
 def test_suppress_overlap_bleed_clears_bend_where_cross_object_iou_is_high(tmp_path):
+    # This test predates this task (Task 4) and originally injected a
+    # bend value directly via _write_lengths(..., bends=...) against
+    # _write_fixed_mask/_write_overlap_masks' tiny, unbowed mask blocks.
+    # Verified by running it: this task's suppress_overlap_bleed now
+    # computes bend itself from each object's own raw mask before the
+    # gate runs, overwriting any injected value -- and those tiny blocks
+    # never exceed BEND_SIGNIFICANCE_PX, so the fresh computation gave
+    # NaN even at the "untouched -- low IoU" frames below, which this
+    # test's own assertions require to be a real, non-NaN value (unlike
+    # the sibling test below, which never makes that assertion and so
+    # was unaffected). Given both objects a real, independently-bowed
+    # mask instead -- positioned far enough apart (different y_center)
+    # to keep cross-object IoU at 0 except at the one frame deliberately
+    # set to full overlap -- so the gate is exercised against a genuine
+    # freshly-computed candidate on both sides, following this task's own
+    # new suppress_overlap_bleed-level tests as the pattern.
     masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
     motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
     n = 5
-    _write_fixed_mask(masks_a, n)
-    # frame 2: full overlap (IoU 1.0, well past CROSS_OBJECT_OVERLAP_IOU_THRESHOLD=0.1)
-    # every other frame: masks far apart (IoU 0.0)
-    _write_overlap_masks(masks_b, n, overlapping_frames={2})
-    _write_lengths(motion_a, [100] * n, bends=[(5.0, 5.0)] * n)
-    _write_lengths(motion_b, [100] * n, bends=[(5.0, 5.0)] * n)
+    canvas = (150, 400)
+    hilt_a, tip_a = (50.0, 30.0), (350.0, 30.0)
+    hilt_b, tip_b = (50.0, 100.0), (350.0, 100.0)
+    bowed_a = _bowed_bar_mask(peak_offset=24.5, canvas=canvas, y_center=30)
+    bowed_b = _bowed_bar_mask(peak_offset=24.5, canvas=canvas, y_center=100)
+    for i in range(n):
+        save_mask(str(masks_a), i, bowed_a)
+        # frame 2: full overlap with A (IoU 1.0, contamination);
+        # every other frame: B's own, spatially separate bow (IoU 0.0)
+        save_mask(str(masks_b), i, bowed_a if i == 2 else bowed_b)
+    _fixed_hilt_tip_motion(motion_a, hilt_a, tip_a, n)
+    _fixed_hilt_tip_motion(motion_b, hilt_b, tip_b, n)
 
     suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
 
@@ -1764,6 +1817,53 @@ def test_suppress_overlap_bleed_clears_bend_outside_any_detected_run(tmp_path):
     # here, but the gate's own test above already proves it doesn't
     # depend on that.
     assert n_held == 1
+
+
+def test_suppress_overlap_bleed_computes_bend_from_the_final_line_for_a_bowed_mask(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    canvas = (100, 400)
+    bowed = _bowed_bar_mask(peak_offset=24.5, canvas=canvas, y_center=50)
+    empty = np.zeros(canvas, dtype=bool)
+    for i in range(n):
+        save_mask(str(masks_a), i, bowed)
+        save_mask(str(masks_b), i, empty)
+    _fixed_hilt_tip_motion(motion_a, hilt, tip, n)
+    _fixed_hilt_tip_motion(motion_b, hilt, tip, n)
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert not np.isnan(result_a["bend"]).any()  # every frame gets a real candidate
+
+
+def test_suppress_overlap_bleed_clears_freshly_computed_bend_on_high_cross_object_iou(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    canvas = (100, 400)
+    bowed = _bowed_bar_mask(peak_offset=24.5, canvas=canvas, y_center=50)
+    far = np.zeros(canvas, dtype=bool)
+    far[90:96, 10:20] = True
+    for i in range(n):
+        save_mask(str(masks_a), i, bowed)
+    # frame 1: object B's mask is identical to A's (IoU 1.0, contamination);
+    # frames 0 and 2: object B's mask sits far away (IoU 0.0, clean)
+    save_mask(str(masks_b), 0, far)
+    save_mask(str(masks_b), 1, bowed)
+    save_mask(str(masks_b), 2, far)
+    _fixed_hilt_tip_motion(motion_a, hilt, tip, n)
+    _fixed_hilt_tip_motion(motion_b, hilt, tip, n)
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert np.isnan(result_a["bend"][1]).all()      # cleared -- high cross-object IoU
+    assert not np.isnan(result_a["bend"][0]).any()  # kept -- low IoU
+    assert not np.isnan(result_a["bend"][2]).any()  # kept -- low IoU
 
 
 # ---------------------------------------------------------------------------

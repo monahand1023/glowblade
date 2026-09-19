@@ -160,6 +160,39 @@ def _bend_offset(proj, perp, n_bins=20):
     return float(np.median(window))
 
 
+def _bend_offset_from_mask(mask, hilt, tip, n_bins=20):
+    """`_bend_offset`'s median-window measurement, but relative to a
+    given straight hilt-tip line rather than a fresh PCA best-fit axis --
+    and over every one of the mask's foreground pixels, not just its
+    largest connected component (see `suppress_overlap_bleed`'s docstring
+    for why: confirmed on real footage that SAM2 can fragment a genuinely
+    bowed blade into multiple disconnected pieces right at its point of
+    highest curvature, and `_largest_component`, built to reject
+    contamination, discards real bow signal along with it in that case --
+    safe to skip here specifically because this function's reference line
+    comes from outside the mask being measured, not from a fresh fit to
+    it, so a stray contamination blob can't swing the axis itself the way
+    it could inside `fit_blade`'s own PCA fit).
+
+    Returns 0.0 if the mask is empty or the hilt-tip line is degenerate.
+    """
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 3:
+        return 0.0
+    hilt = np.asarray(hilt, dtype=np.float64)
+    tip = np.asarray(tip, dtype=np.float64)
+    seg = tip - hilt
+    length = np.linalg.norm(seg)
+    if length < 1e-6:
+        return 0.0
+    axis = seg / length
+    perp_dir = np.array([-axis[1], axis[0]])
+    points = np.stack([xs, ys], axis=1).astype(np.float64) - hilt
+    proj = points @ axis
+    perp = points @ perp_dir
+    return _bend_offset(proj, perp, n_bins=n_bins)
+
+
 def _largest_component(mask, reference_point=None, max_jump_px=None):
     """`mask`, reduced to its most plausible 8-connected blob -- dropping
     any other, smaller-or-implausibly-located, disconnected ones.
@@ -320,14 +353,6 @@ def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20, reference_point=None):
     width = _median_perpendicular_extent(proj, perp, n_bins=width_bins)
     angle = float(np.arctan2(oriented_axis[1], oriented_axis[0]))
 
-    bend_offset = _bend_offset(proj, perp, n_bins=width_bins)
-    if abs(bend_offset) > BEND_SIGNIFICANCE_PX:
-        mid_proj = (min_proj + max_proj) / 2.0
-        bend_point = centroid + mid_proj * axis + bend_offset * perp_dir
-        bend = (float(bend_point[0]), float(bend_point[1]))
-    else:
-        bend = None
-
     return BladeGeometry(
         centroid=(float(centroid[0]), float(centroid[1])),
         axis=(float(oriented_axis[0]), float(oriented_axis[1])),
@@ -336,7 +361,6 @@ def fit_blade(mask, taper_frac=1.0 / 3.0, width_bins=20, reference_point=None):
         length=length,
         width=float(width),
         angle=angle,
-        bend=bend,
     )
 
 
@@ -1314,10 +1338,17 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     frame's raw tip sits to its own object's hilt than to the other
     object's.
 
-    Any candidate `bend` (see `fit_blade`/`BEND_SIGNIFICANCE_PX`) on
-    either object is cleared to NaN wherever cross-object mask IoU
-    exceeds `iou_threshold`, across the *entire* clip -- not just frames
-    the run-detection loop above touches. Confirmed necessary on real
+    `bend` for both objects is computed here, from each object's own raw
+    per-frame mask measured against the FINAL, already-corrected hilt-tip
+    line established above (see `_bend_offset_from_mask`) -- not a
+    precomputed candidate carried over from `fit_blade`'s fresh
+    single-frame PCA fit, which real-data validation found structurally
+    absorbs most real bow into its own rotation and so never reliably
+    registers it (see `_bend_offset_from_mask`'s docstring for the
+    real-footage finding this was built against). The candidate is then
+    cleared to NaN wherever cross-object mask IoU exceeds
+    `iou_threshold`, across the *entire* clip -- not just frames the
+    run-detection loop above touches. Confirmed necessary on real
     footage: a per-frame significance check on a single mask's own shape
     cannot distinguish real bow from contamination (one object's mask
     nearly fully containing the other's, deep in a sustained overlap
@@ -1430,12 +1461,36 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
                     frame_indices[correct_start], frame_indices[correct_end], span,
                 )
 
-    # Cross-object contamination gate for `bend` -- see this function's
-    # docstring addendum below and the design spec's "Cross-object
-    # contamination gate" section. Operates on the whole clip's IoU
-    # array, independent of which frames the run-detection loop above
-    # touched: a frame's mask can be individually contaminated without
-    # being part of a formally detected overlap run.
+    # Compute each object's bend candidate directly from its own raw
+    # mask (every foreground pixel, not just the largest connected
+    # component -- see _bend_offset_from_mask) against the FINAL,
+    # already-corrected hilt-tip line established above -- not a fresh
+    # single-frame PCA best-fit, which an earlier version of this
+    # feature computed inside fit_blade. Confirmed on real footage: a
+    # PCA best-fit line structurally absorbs most real bow into its own
+    # rotation, so that residual never exceeded ~5.4px anywhere in a
+    # 506-frame job with a confirmed, visible divergence at frame 292 --
+    # while the same raw mask measured against the FINAL corrected line
+    # there gives ~21px, matching the real-footage calibration this
+    # feature was originally designed against.
+    for motion, masks_dir in ((motion_a, masks_dir_a), (motion_b, masks_dir_b)):
+        bend = np.full((len(frame_indices), 2), np.nan)
+        for j, frame_num in enumerate(frame_indices):
+            hilt_j, tip_j = motion["hilt"][j], motion["tip"][j]
+            if np.isnan(hilt_j).any() or np.isnan(tip_j).any():
+                continue
+            mask = load_mask_optional(masks_dir, frame_num)
+            if mask is None or not mask.any():
+                continue
+            offset = _bend_offset_from_mask(mask, hilt_j, tip_j)
+            if abs(offset) > BEND_SIGNIFICANCE_PX:
+                seg = np.asarray(tip_j) - np.asarray(hilt_j)
+                seg_len = np.linalg.norm(seg)
+                axis = seg / seg_len
+                perp_dir = np.array([-axis[1], axis[0]])
+                bend[j] = (np.asarray(hilt_j) + np.asarray(tip_j)) / 2.0 + offset * perp_dir
+        motion["bend"] = bend
+
     had_bend_candidate = np.any(~np.isnan(motion_a["bend"][:, 0])) or np.any(~np.isnan(motion_b["bend"][:, 0]))
     if had_bend_candidate:
         ious_whole_clip = _cross_object_ious(masks_dir_a, masks_dir_b, frame_indices)
