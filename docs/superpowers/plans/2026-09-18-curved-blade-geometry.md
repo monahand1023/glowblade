@@ -1260,3 +1260,307 @@ Following this session's established end-of-fix pattern: copy the final validate
 - [ ] **Step 7: Report back**
 
 Report honestly what frame 292 (and any other frame that turned out to have a real, gate-surviving bend) looks like now versus before, and explicitly call out any remaining known limitation -- consistent with this session's established practice of never claiming a fix works on plausibility alone.
+
+---
+
+## Addendum: Tasks 9-10 (added after Task 8's real-data validation)
+
+Task 8 found that the plan's central acceptance criterion did not hold: on
+the real job, `bend` is `None` at frame 292 (and everywhere else in the
+506-frame clip, both objects) even with all of Tasks 1-7 correctly
+implemented and reviewed. Root-caused, independently confirmed by the
+controller against the real job's actual final motion.npz:
+
+`_bend_offset` (Task 2) measures how far the raw mask deviates from
+`fit_blade`'s own **fresh, single-frame PCA best-fit line**. A best-fit
+line, by construction, minimizes exactly this residual -- confirmed on the
+real job, that residual never exceeds ~5.4px anywhere in 506 frames for
+either object, even at frame 292 where the render visibly diverges from
+the real blade. The design spec's original calibration (21.4-28.0px,
+38.7px) measured a categorically different quantity: deviation of the raw
+mask from the **FINAL, already-corrected** hilt-tip line (the one
+`suppress_overlap_bleed` actually produces and the renderer actually
+draws) -- a much less locally-adaptive reference that a real bind's bow
+diverges from far more visibly. Verified directly against the real job's
+actual final `motion_1.npz`: raw mask (every foreground pixel, not just
+the largest connected component) vs. that final line at frame 292 gives
+**21.0px** median-window offset and 34.97px max deviation -- reproducing
+the spec's original numbers almost exactly. `BEND_SIGNIFICANCE_PX=8`
+itself remains correctly calibrated against this corrected methodology; it
+was only ever mis-applied.
+
+A second, compounding real-data effect: SAM2 fragments object 1's mask at
+frame 292 into 4 disconnected components (1238px main body + 839px --
+genuinely the far half of the same bowed blade, split at its point of
+highest curvature -- plus two tiny specks). `_largest_component` (built to
+reject *contamination*, e.g. a scoring cable) discards the 839px piece
+along with the noise, losing real signal it was never designed to protect.
+The fix below measures against every foreground pixel, not just the
+largest component -- justified because this computation now runs on the
+raw mask compared against an *externally-supplied, already-corrected*
+line rather than fitting its own axis from the mask alone, so it isn't
+vulnerable to a stray disconnected contamination blob swinging a fresh PCA
+fit's axis the way `fit_blade`'s own component-selection guards against;
+the existing cross-object IoU gate (Task 4) remains the defense against
+genuine cross-object mask contamination specifically.
+
+### Task 9: Compute bend from the raw mask against the final corrected line, not fit_blade's fresh PCA fit
+
+**Files:**
+- Modify: `src/lightsaber_fx/pipeline/blade.py` (`fit_blade`, new `_bend_offset_from_mask`, `suppress_overlap_bleed`)
+- Test: `tests/pipeline/test_blade.py`
+
+**Interfaces:**
+- Consumes: `_bend_offset` (Task 2, unchanged -- still a pure array function, now called with different inputs), `_cross_object_ious` (Task 3), `_smooth_bend_field` (Task 5, unchanged).
+- Produces: `fit_blade` never populates `bend` (always `None`, exactly like every field this plan didn't touch). `suppress_overlap_bleed` now computes each object's `bend` candidate itself, from that object's own raw mask files, before gating/smoothing.
+
+- [ ] **Step 1: Write the failing tests**
+
+First, **delete** these three tests from `tests/pipeline/test_blade.py` (Task 2 added them; they test behavior this task removes -- `fit_blade` will no longer ever produce a `bend`, so asserting it does is now testing removed behavior, not a regression):
+- `test_fit_blade_populates_bend_for_a_significantly_bowed_mask`
+- `test_fit_blade_leaves_bend_none_for_a_straight_mask`
+- `test_fit_blade_bend_offset_is_robust_to_one_contaminated_bin`
+
+Keep `_bowed_bar_mask` (the helper those tests used) and `test_fit_blade_returns_geometry_with_expected_fields`'s `"bend"` field check exactly as they are -- `bend` is still a real field, just never populated by `fit_blade` now.
+
+Add a small helper next to the existing `_motion_geo`/`_write_lengths` (around line 973) for tests that need an exact, fixed hilt/tip line rather than the `_motion_geo` convention's per-frame offset:
+
+```python
+def _fixed_hilt_tip_motion(path, hilt, tip, n_frames):
+    """A motion.npz where every frame has the identical, exact hilt/tip
+    given -- for tests that need to know precisely what straight line a
+    mask is being measured against, rather than `_motion_geo`'s
+    per-frame-offset convention."""
+    mid = ((hilt[0] + tip[0]) / 2.0, (hilt[1] + tip[1]) / 2.0)
+    length = float(np.hypot(tip[0] - hilt[0], tip[1] - hilt[1]))
+    save_motion(str(path), [
+        BladeGeometry(centroid=mid, axis=(1.0, 0.0), tip=tip, hilt=hilt, length=length, width=5.0, angle=0.0)
+        for _ in range(n_frames)
+    ])
+```
+
+Add these new tests:
+
+```python
+def test_bend_offset_from_mask_measures_against_a_given_line_not_a_fresh_fit(tmp_path):
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    mask = _bowed_bar_mask(peak_offset=24.5, canvas=(100, 400), y_center=50)
+    offset = _bend_offset_from_mask(mask, hilt, tip)
+    assert offset == pytest.approx(24.0, abs=0.5)
+
+
+def test_bend_offset_from_mask_uses_every_foreground_pixel_not_just_the_largest_component(tmp_path):
+    # Reproduces the real-footage finding: a mask fragmented into two
+    # disconnected pieces of the SAME bowed blade must not lose the far
+    # piece's contribution the way fit_blade's _largest_component would.
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    bowed = _bowed_bar_mask(peak_offset=24.5, canvas=(100, 400), y_center=50)
+    ys, xs = np.nonzero(bowed)
+    fragmented = np.zeros_like(bowed)
+    # keep only the two ends, drop a chunk in the middle -- two disconnected pieces
+    keep = (xs < 150) | (xs > 250)
+    fragmented[ys[keep], xs[keep]] = True
+    offset = _bend_offset_from_mask(fragmented, hilt, tip)
+    assert abs(offset) > BEND_SIGNIFICANCE_PX
+
+
+def test_fit_blade_never_populates_bend_now(tmp_path):
+    # Regression guard for this task's removal: even a strongly bowed
+    # mask must not produce a fit_blade-level bend anymore -- that
+    # computation moved to suppress_overlap_bleed.
+    mask = _bowed_bar_mask(peak_offset=24.5)
+    geo = fit_blade(mask)
+    assert geo.bend is None
+
+
+def test_suppress_overlap_bleed_computes_bend_from_the_final_line_for_a_bowed_mask(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    canvas = (100, 400)
+    bowed = _bowed_bar_mask(peak_offset=24.5, canvas=canvas, y_center=50)
+    empty = np.zeros(canvas, dtype=bool)
+    for i in range(n):
+        save_mask(str(masks_a), i, bowed)
+        save_mask(str(masks_b), i, empty)
+    _fixed_hilt_tip_motion(motion_a, hilt, tip, n)
+    _fixed_hilt_tip_motion(motion_b, hilt, tip, n)
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert not np.isnan(result_a["bend"]).any()  # every frame gets a real candidate
+
+
+def test_suppress_overlap_bleed_clears_freshly_computed_bend_on_high_cross_object_iou(tmp_path):
+    masks_a, masks_b = tmp_path / "masks_a", tmp_path / "masks_b"
+    motion_a, motion_b = tmp_path / "a.npz", tmp_path / "b.npz"
+    n = 3
+    hilt, tip = (50.0, 50.0), (350.0, 50.0)
+    canvas = (100, 400)
+    bowed = _bowed_bar_mask(peak_offset=24.5, canvas=canvas, y_center=50)
+    far = np.zeros(canvas, dtype=bool)
+    far[90:96, 10:20] = True
+    for i in range(n):
+        save_mask(str(masks_a), i, bowed)
+    # frame 1: object B's mask is identical to A's (IoU 1.0, contamination);
+    # frames 0 and 2: object B's mask sits far away (IoU 0.0, clean)
+    save_mask(str(masks_b), 0, far)
+    save_mask(str(masks_b), 1, bowed)
+    save_mask(str(masks_b), 2, far)
+    _fixed_hilt_tip_motion(motion_a, hilt, tip, n)
+    _fixed_hilt_tip_motion(motion_b, hilt, tip, n)
+
+    suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
+
+    result_a = load_motion(str(motion_a))
+    assert np.isnan(result_a["bend"][1]).all()      # cleared -- high cross-object IoU
+    assert not np.isnan(result_a["bend"][0]).any()  # kept -- low IoU
+    assert not np.isnan(result_a["bend"][2]).any()  # kept -- low IoU
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `PYTHONPATH=/Users/danm/Development/lightsaber_fx/.claude/worktrees/curved-blade-geometry/src /Users/danm/Development/lightsaber_fx/.venv/bin/python -m pytest tests/pipeline/test_blade.py -k "bend_offset_from_mask or never_populates_bend_now or computes_bend_from_the_final_line or clears_freshly_computed_bend" -v`
+Expected: FAIL -- `_bend_offset_from_mask`/`_fixed_hilt_tip_motion` don't exist yet, `fit_blade` still populates bend, `suppress_overlap_bleed` doesn't compute bend from masks yet.
+
+- [ ] **Step 3: Implement**
+
+In `fit_blade`, **remove** the bend-computation block entirely (currently between the `width`/`angle` computation and the `return BladeGeometry(...)` call):
+
+```python
+    bend_offset = _bend_offset(proj, perp, n_bins=width_bins)
+    if abs(bend_offset) > BEND_SIGNIFICANCE_PX:
+        mid_proj = (min_proj + max_proj) / 2.0
+        bend_point = centroid + mid_proj * axis + bend_offset * perp_dir
+        bend = (float(bend_point[0]), float(bend_point[1]))
+    else:
+        bend = None
+```
+
+And remove `bend=bend` from the `BladeGeometry(...)` return call immediately after (its docstring's mention of `bend` can stay -- the field itself is untouched, only what populates it moves).
+
+Add a new function near `_bend_offset` (which stays exactly as-is -- it's a pure array function, still reused):
+
+```python
+def _bend_offset_from_mask(mask, hilt, tip, n_bins=20):
+    """`_bend_offset`'s median-window measurement, but relative to a
+    given straight hilt-tip line rather than a fresh PCA best-fit axis --
+    and over every one of the mask's foreground pixels, not just its
+    largest connected component (see `suppress_overlap_bleed`'s docstring
+    for why: confirmed on real footage that SAM2 can fragment a genuinely
+    bowed blade into multiple disconnected pieces right at its point of
+    highest curvature, and `_largest_component`, built to reject
+    contamination, discards real bow signal along with it in that case --
+    safe to skip here specifically because this function's reference line
+    comes from outside the mask being measured, not from a fresh fit to
+    it, so a stray contamination blob can't swing the axis itself the way
+    it could inside `fit_blade`'s own PCA fit).
+
+    Returns 0.0 if the mask is empty or the hilt-tip line is degenerate.
+    """
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 3:
+        return 0.0
+    hilt = np.asarray(hilt, dtype=np.float64)
+    tip = np.asarray(tip, dtype=np.float64)
+    seg = tip - hilt
+    length = np.linalg.norm(seg)
+    if length < 1e-6:
+        return 0.0
+    axis = seg / length
+    perp_dir = np.array([-axis[1], axis[0]])
+    points = np.stack([xs, ys], axis=1).astype(np.float64) - hilt
+    proj = points @ axis
+    perp = points @ perp_dir
+    return _bend_offset(proj, perp, n_bins=n_bins)
+```
+
+In `suppress_overlap_bleed`, **replace** the existing bend section (the `# Cross-object contamination gate for bend` comment through the `_smooth_bend_field(motion_b)` line, i.e. everything currently between the end of the `for run_start, ... in runs:` loop and the final `if n_held or had_bend_candidate:` block) with:
+
+```python
+    # Compute each object's bend candidate directly from its own raw
+    # mask (every foreground pixel, not just the largest connected
+    # component -- see _bend_offset_from_mask) against the FINAL,
+    # already-corrected hilt-tip line established above -- not a fresh
+    # single-frame PCA best-fit, which an earlier version of this
+    # feature computed inside fit_blade. Confirmed on real footage: a
+    # PCA best-fit line structurally absorbs most real bow into its own
+    # rotation, so that residual never exceeded ~5.4px anywhere in a
+    # 506-frame job with a confirmed, visible divergence at frame 292 --
+    # while the same raw mask measured against the FINAL corrected line
+    # there gives ~21px, matching the real-footage calibration this
+    # feature was originally designed against.
+    for motion, masks_dir in ((motion_a, masks_dir_a), (motion_b, masks_dir_b)):
+        bend = np.full((len(frame_indices), 2), np.nan)
+        for j, frame_num in enumerate(frame_indices):
+            hilt_j, tip_j = motion["hilt"][j], motion["tip"][j]
+            if np.isnan(hilt_j).any() or np.isnan(tip_j).any():
+                continue
+            mask = load_mask_optional(masks_dir, frame_num)
+            if mask is None or not mask.any():
+                continue
+            offset = _bend_offset_from_mask(mask, hilt_j, tip_j)
+            if abs(offset) > BEND_SIGNIFICANCE_PX:
+                seg = np.asarray(tip_j) - np.asarray(hilt_j)
+                seg_len = np.linalg.norm(seg)
+                axis = seg / seg_len
+                perp_dir = np.array([-axis[1], axis[0]])
+                bend[j] = (np.asarray(hilt_j) + np.asarray(tip_j)) / 2.0 + offset * perp_dir
+        motion["bend"] = bend
+
+    had_bend_candidate = np.any(~np.isnan(motion_a["bend"][:, 0])) or np.any(~np.isnan(motion_b["bend"][:, 0]))
+    if had_bend_candidate:
+        ious_whole_clip = _cross_object_ious(masks_dir_a, masks_dir_b, frame_indices)
+        contaminated = ious_whole_clip > iou_threshold
+        motion_a["bend"][contaminated] = np.nan
+        motion_b["bend"][contaminated] = np.nan
+        _smooth_bend_field(motion_a)
+        _smooth_bend_field(motion_b)
+```
+
+(The following `if n_held or had_bend_candidate:` save block is unchanged.) Update the docstring addendum this function already has for `bend` (added in Task 4) to describe the new source of the candidate instead of "any candidate bend" being pre-existing.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `PYTHONPATH=/Users/danm/Development/lightsaber_fx/.claude/worktrees/curved-blade-geometry/src /Users/danm/Development/lightsaber_fx/.venv/bin/python -m pytest tests/pipeline/test_blade.py -q`
+Expected: PASS, all tests -- including every pre-existing Task 4/5 test (Task 5's `_smooth_bend_field` tests call it directly with hand-constructed `bend` arrays via `_write_lengths(..., bends=...)` and are unaffected by this task; Task 4's own two `suppress_overlap_bleed`-level gate tests, which directly injected a `bend` value via `_write_lengths(..., bends=...)`, now have that injected value **overwritten** by the fresh per-mask computation before the gate runs -- their masks (`_write_fixed_mask`/`_write_overlap_masks`, tiny unbowed blocks) never exceed `BEND_SIGNIFICANCE_PX`, so both objects' `bend` end up `None` throughout, and both tests' assertions (`np.isnan(...).all()`) still pass, now for a different, still-correct reason. Confirm this rather than assuming it -- if either fails, the masks in those two fixtures need a real bow added, following this task's new tests as a template).
+
+- [ ] **Step 5: Run full suite + ruff, then commit**
+
+```bash
+PYTHONPATH=/Users/danm/Development/lightsaber_fx/.claude/worktrees/curved-blade-geometry/src /Users/danm/Development/lightsaber_fx/.venv/bin/python -m pytest -q
+ruff check src/lightsaber_fx/pipeline/blade.py
+git add src/lightsaber_fx/pipeline/blade.py tests/pipeline/test_blade.py
+git commit -m "$(cat <<'EOF'
+Compute bend from the raw mask against the final corrected line
+
+Real-data validation (Task 8) found fit_blade's own fresh per-frame
+PCA best-fit line structurally absorbs most real bow into its own
+rotation -- that residual never exceeded ~5.4px anywhere in the real
+506-frame job, even at the frame that motivated this whole feature.
+Measuring the same raw mask against the FINAL, already-corrected
+hilt-tip line instead reproduces the original real-footage calibration
+almost exactly (~21px at frame 292, vs. 21.4-28.0px originally
+claimed). Moves bend-candidate computation from fit_blade into
+suppress_overlap_bleed, where the final corrected line is available for
+both objects; also measures every foreground pixel rather than just
+the largest connected component, since SAM2 was found to fragment a
+genuinely bowed blade at its point of highest curvature and
+_largest_component (built to reject contamination) discarded real
+signal along with it.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: <copy current session's Claude-Session URL>
+EOF
+)"
+```
+
+---
+
+### Task 10: Re-validate against the real job
+
+**Files:** none (validation only).
+
+Repeat Task 8's Steps 1-7 exactly, against the worktree's new HEAD (after Task 9). This time, Step 3's assertion (`bend` is real and non-NaN at frame 292 for object 1) is expected to **pass** -- if it still doesn't, stop and investigate with the same rigor Task 8 used (do not weaken the assertion or declare success without it holding). If it passes, continue through visual inspection (frame 292 should now show a visibly curved blue capsule, not a straight one), the full regression sweep (must still show zero regressions elsewhere -- Task 9 only changed *where* bend is computed from, not the significance threshold or the cross-object gate, so every frame that correctly had no bend before should still have none), full suite + ruff, and only then push to `origin/master` and complete Task 8's original Steps 6-7 (Desktop copy, reveal, honest report).
