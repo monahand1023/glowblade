@@ -1701,6 +1701,32 @@ def test_save_motion_all_none_produces_all_nan_rows(tmp_path):
     assert np.all(np.isnan(motion["angle"]))
 
 
+def test_save_and_load_motion_round_trips_bend_including_none(tmp_path):
+    geo_with_bend = BladeGeometry(
+        centroid=(10.0, 0.0), axis=(1.0, 0.0), tip=(20.0, 0.0), hilt=(0.0, 0.0),
+        length=20.0, width=5.0, angle=0.0, bend=(10.0, 3.0),
+    )
+    geo_without_bend = BladeGeometry(
+        centroid=(10.0, 0.0), axis=(1.0, 0.0), tip=(20.0, 0.0), hilt=(0.0, 0.0),
+        length=20.0, width=5.0, angle=0.0, bend=None,
+    )
+    path = str(tmp_path / "motion.npz")
+    save_motion(path, [geo_with_bend, geo_without_bend, None])
+    motion = load_motion(path)
+
+    assert motion["bend"][0] == pytest.approx([10.0, 3.0])
+    assert np.isnan(motion["bend"][1]).all()   # bend=None on a real frame
+    assert np.isnan(motion["bend"][2]).all()   # geo=None entirely
+
+
+def test_blade_geometry_defaults_bend_to_none():
+    geo = BladeGeometry(
+        centroid=(0.0, 0.0), axis=(1.0, 0.0), tip=(1.0, 0.0), hilt=(0.0, 0.0),
+        length=1.0, width=1.0, angle=0.0,
+    )
+    assert geo.bend is None
+
+
 # ---------------------------------------------------------------------------
 # tip_speed
 # ---------------------------------------------------------------------------

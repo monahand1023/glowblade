@@ -28,7 +28,12 @@ class BladeGeometry(NamedTuple):
 
     All coordinates are (x, y) in pixel space; ``axis`` is a unit vector
     oriented from ``hilt`` to ``tip``; ``angle`` is ``atan2(axis[1],
-    axis[0])`` of that oriented axis, in radians.
+    axis[0])`` of that oriented axis, in radians. ``bend``, when not
+    ``None``, is a third control point (hilt, bend, tip form a quadratic
+    Bezier) capturing real, measured bow during blade-on-blade contact --
+    see ``_bend_offset`` and ``fit_blade``. Absent (``None``) on every
+    ordinary frame; a default so every existing positional/keyword
+    construction of this NamedTuple keeps working unchanged.
     """
 
     centroid: tuple
@@ -38,6 +43,7 @@ class BladeGeometry(NamedTuple):
     length: float
     width: float
     angle: float
+    bend: tuple | None = None
 
 
 def _axis_endpoint_extent(proj, perp, near_min, frac):
@@ -549,8 +555,8 @@ def mask_frame_indices(masks_dir):
     return sorted(indices)
 
 
-_FIELDS = ("centroid", "tip", "hilt", "axis", "length", "width", "angle")
-_VECTOR_FIELDS = ("centroid", "tip", "hilt", "axis")
+_FIELDS = ("centroid", "tip", "hilt", "axis", "length", "width", "angle", "bend")
+_VECTOR_FIELDS = ("centroid", "tip", "hilt", "axis", "bend")
 
 
 def save_motion(path, geometries):
@@ -570,7 +576,12 @@ def save_motion(path, geometries):
         if geo is None:
             continue
         for field in _FIELDS:
-            arrays[field][i] = getattr(geo, field)
+            value = getattr(geo, field)
+            if value is None:
+                continue  # bend can be None on a real frame; every
+                          # other field is always populated when geo is
+                          # not None, so this only ever fires for bend
+            arrays[field][i] = value
 
     np.savez(path, **arrays)
 
