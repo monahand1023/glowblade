@@ -86,7 +86,7 @@ def _soft_tonemap(x, knee=0.85):
 # taper straight through ("the glowing bat" this phase exists to fix).
 # `--no-blade-extend` (`blade_extend=False`) falls back to the raw mask.
 
-def _capsule_mask(shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac):
+def _straight_capsule_mask(shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac):
     h, w = shape[:2]
     out = np.zeros((h, w), dtype=np.uint8)
     hilt = np.asarray(hilt, dtype=np.float64)
@@ -131,15 +131,96 @@ def _capsule_mask(shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_ta
     return out
 
 
+BEND_POLYLINE_POINTS = 14  # per the design spec's "~12-16 points" guidance
+
+
+def _quadratic_bezier_points(p0, p1, p2, n_points):
+    """`n_points` points along the quadratic Bezier from `p0` through
+    control point `p1` to `p2`, inclusive of both endpoints, evenly
+    spaced in the curve parameter t (not arc length -- close enough at
+    real blade lengths/curvatures for a rendering polyline)."""
+    t = np.linspace(0.0, 1.0, n_points)[:, None]
+    return (1 - t) ** 2 * p0 + 2 * (1 - t) * t * p1 + t ** 2 * p2
+
+
+def _curved_capsule_mask(shape, hilt, tip, bend, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac):
+    """Same tapered-hilt/rounded-tip capsule shape as
+    `_straight_capsule_mask`, but walking a sampled quadratic-Bezier
+    polyline (hilt -> bend -> tip) instead of one straight segment. Only
+    called when `bend` is a real, finite point -- see `_capsule_mask`.
+    """
+    h, w = shape[:2]
+    out = np.zeros((h, w), dtype=np.uint8)
+    hilt = np.asarray(hilt, dtype=np.float64)
+    tip = np.asarray(tip, dtype=np.float64)
+    bend = np.asarray(bend, dtype=np.float64)
+    half_w = max(0.5, width / 2.0)
+
+    seg = tip - hilt
+    length = float(np.linalg.norm(seg))
+    if length < 1e-6:
+        cv2.circle(out, (round(hilt[0]), round(hilt[1])), max(1, round(half_w)), 255, -1)
+        return out
+
+    axis = seg / length
+    perp = np.array([-axis[1], axis[0]])
+    taper_len = min(length * hilt_taper_frac, length * 0.9)
+    body_start = hilt + axis * taper_len
+
+    centerline = _quadratic_bezier_points(body_start, bend, tip, BEND_POLYLINE_POINTS)
+    tip_tangent = centerline[-1] - centerline[-2]
+    tip_tangent_norm = np.linalg.norm(tip_tangent)
+    tip_dir = tip_tangent / tip_tangent_norm if tip_tangent_norm > 0 else axis
+    centerline[-1] = tip + tip_dir * (length * extend_frac)
+
+    for i in range(len(centerline) - 1):
+        p0, p1 = centerline[i], centerline[i + 1]
+        seg_vec = p1 - p0
+        seg_len = np.linalg.norm(seg_vec)
+        if seg_len < 1e-9:
+            continue
+        seg_perp = np.array([-seg_vec[1], seg_vec[0]]) / seg_len
+        quad = np.array([
+            p0 + seg_perp * half_w, p1 + seg_perp * half_w,
+            p1 - seg_perp * half_w, p0 - seg_perp * half_w,
+        ])
+        cv2.fillConvexPoly(out, np.round(quad).astype(np.int32), 255)
+
+    tip_pt = (round(centerline[-1][0]), round(centerline[-1][1]))
+    cv2.circle(out, tip_pt, max(1, round(half_w)), 255, -1)
+
+    hilt_half_w = half_w * hilt_taper_min_frac
+    wedge = np.array([
+        hilt + perp * hilt_half_w,
+        body_start + perp * half_w,
+        body_start - perp * half_w,
+        hilt - perp * hilt_half_w,
+    ])
+    cv2.fillConvexPoly(out, np.round(wedge).astype(np.int32), 255)
+
+    return out
+
+
+def _capsule_mask(shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac, bend=None):
+    """Dispatches to `_straight_capsule_mask` (today's exact, unmodified
+    code path -- byte-identical output is a hard requirement for every
+    frame outside real blade-on-blade contact) or `_curved_capsule_mask`,
+    depending on whether a real, finite `bend` point is given."""
+    have_bend = bend is not None and not np.any(np.isnan(bend))
+    if not have_bend:
+        return _straight_capsule_mask(shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac)
+    return _curved_capsule_mask(shape, hilt, tip, bend, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac)
+
+
 def _build_blade_shape(mask, frame_shape, tip, hilt, width, blade_extend,
-                        extend_frac, hilt_taper_frac, hilt_taper_min_frac):
+                        extend_frac, hilt_taper_frac, hilt_taper_min_frac, bend=None):
     have_geometry = (
         blade_extend
         and tip is not None and hilt is not None
         and not (np.any(np.isnan(tip)) or np.any(np.isnan(hilt)))
     )
     if have_geometry:
-        return _capsule_mask(frame_shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac)
+        return _capsule_mask(frame_shape, hilt, tip, width, extend_frac, hilt_taper_frac, hilt_taper_min_frac, bend=bend)
 
     mask_u8 = mask.astype(np.uint8) * 255
     if mask_u8.shape[:2] != tuple(frame_shape[:2]):

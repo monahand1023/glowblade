@@ -6,6 +6,7 @@ import pytest
 
 from lightsaber_fx.pipeline import blade
 from lightsaber_fx.pipeline.glow import (
+    _capsule_mask,
     ignition_fraction,
     knoll_darken,
     parse_color,
@@ -30,6 +31,40 @@ def test_parse_color_hex():
 def test_parse_color_rejects_unknown():
     with pytest.raises(ValueError):
         parse_color("not-a-color")
+
+
+# ---------------------------------------------------------------------------
+# B1.2 -- capsule mask with optional curved bend point
+# ---------------------------------------------------------------------------
+
+def test_capsule_mask_with_bend_none_matches_straight_capsule_exactly():
+    shape = (90, 220)
+    hilt, tip = (40.0, 45.0), (130.0, 45.0)
+    args = (shape, hilt, tip, 8.0, 0.10, 0.12, 0.35)
+    with_none = _capsule_mask(*args, bend=None)
+    without_param = _capsule_mask(*args)
+    assert np.array_equal(with_none, without_param)
+
+
+def test_capsule_mask_with_bend_follows_the_curve_not_the_straight_line():
+    shape = (120, 220)
+    hilt, tip = (40.0, 60.0), (180.0, 60.0)
+    bend = (110.0, -20.0)  # well above the straight hilt-tip line (y=60)
+    straight = _capsule_mask(shape, hilt, tip, 8.0, 0.10, 0.12, 0.35, bend=None)
+    curved = _capsule_mask(shape, hilt, tip, 8.0, 0.10, 0.12, 0.35, bend=bend)
+    # the curved capsule must light up pixels near the bend point that the
+    # straight one (a horizontal bar at y=60) never touches
+    assert curved[15:30, 100:120].any()
+    assert not straight[15:30, 100:120].any()
+
+
+def test_capsule_mask_bend_nan_falls_back_to_straight():
+    shape = (90, 220)
+    hilt, tip = (40.0, 45.0), (130.0, 45.0)
+    args = (shape, hilt, tip, 8.0, 0.10, 0.12, 0.35)
+    straight = _capsule_mask(*args, bend=None)
+    with_nan = _capsule_mask(*args, bend=(float("nan"), float("nan")))
+    assert np.array_equal(straight, with_nan)
 
 
 # ---------------------------------------------------------------------------
