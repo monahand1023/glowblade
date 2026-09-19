@@ -614,7 +614,13 @@ def render_glow(
     axis_arr = np.asarray(motion.get("axis", np.zeros((0, 2))), dtype=np.float64)
     width_arr = np.asarray(motion.get("width", np.zeros(0)), dtype=np.float64)
     length_arr = np.asarray(motion.get("length", np.zeros(0)), dtype=np.float64)
-    bend_arr = np.asarray(motion.get("bend", np.full((len(tip_arr), 2), np.nan)), dtype=np.float64)
+    # Rendering never bows the blade, however real the measured contact bend
+    # is -- lightsabers are rigid, unlike the tracked prop swords. Force this
+    # to all-NaN right after loading (rather than only at the _capsule_mask
+    # call site) so every reader downstream, including any future one, sees
+    # "no bend" consistently -- suppress_overlap_bleed's own bend detection
+    # and its motion.npz output are untouched, only ignored here.
+    bend_arr = np.full((len(tip_arr), 2), np.nan)
 
     # Sign-continuity fix (see _stabilize_tip_hilt) -- do this before
     # anything reads tip/hilt/axis, since both the capsule and the B1.7
@@ -801,7 +807,10 @@ def render_glow_multi(
         hilt_arr = np.asarray(motion.get("hilt", np.zeros((0, 2))), dtype=np.float64)
         axis_arr = np.asarray(motion.get("axis", np.zeros((0, 2))), dtype=np.float64)
         width_arr = np.asarray(motion.get("width", np.zeros(0)), dtype=np.float64)
-        bend_arr = np.asarray(motion.get("bend", np.full((len(tip_arr), 2), np.nan)), dtype=np.float64)
+        # Rendering never bows the blade -- see render_glow's identical
+        # comment for why this is forced to all-NaN right after loading
+        # rather than only at the _capsule_mask call site.
+        bend_arr = np.full((len(tip_arr), 2), np.nan)
         tip_arr, hilt_arr, axis_arr = _stabilize_tip_hilt(tip_arr, hilt_arr, axis_arr)
         velocity = np.zeros_like(tip_arr)
         if len(tip_arr) > 1:

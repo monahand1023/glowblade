@@ -779,10 +779,15 @@ def test_stabilize_tip_hilt_leaves_bend_completely_unchanged_on_a_flip():
     # documented choice rather than a silent gap.
 
 
-def test_render_glow_multi_renders_a_curved_blade_when_bend_is_present(tmp_path):
+def test_render_glow_multi_never_renders_a_curved_blade_even_when_bend_is_present(tmp_path):
+    # Lightsabers are rigid -- unlike the tracked prop swords, they never
+    # bow, however real the measured contact bend is. render_glow_multi
+    # (and render_glow) force bend to NaN right after loading motion.npz,
+    # so a real bend value present in the data must have zero effect on
+    # the render: this is the disable's own regression guard, replacing a
+    # prior test with the opposite assertion (that bend USED to visibly
+    # curve the render) now that the product decision is "never bend".
     clip = _build_blade_clip(tmp_path, "curved", n_frames=1, width=220, height=120, blade_len=90, blade_x0=40)
-    # Manually inject a bend into the motion.npz compute_motion just wrote,
-    # matching how a real contact-adjacent frame would carry one.
     motion = blade.load_motion(clip["motion_path"])
     hilt, tip = motion["hilt"][0], motion["tip"][0]
     mid = (hilt + tip) / 2.0
@@ -791,15 +796,6 @@ def test_render_glow_multi_renders_a_curved_blade_when_bend_is_present(tmp_path)
     np.savez(clip["motion_path"], **motion)
 
     out_dir = str(tmp_path / "out")
-    # Deliberately render via render_glow_multi, not render_glow, despite
-    # the single object: `suppress_overlap_bleed` is the only producer of
-    # `bend` and only ever runs for a 2-object job (runner.py gates it on
-    # `len(object_ids) == 2`), and every 2-object job renders through
-    # render_glow_multi. So render_glow_multi's own bend-threading is the
-    # path that actually ships, and this test previously called
-    # render_glow instead -- leaving that path with no end-to-end
-    # coverage. N=1 object list, matching
-    # test_render_glow_multi_with_one_object_matches_render_glow.
     from lightsaber_fx.pipeline.glow import render_glow_multi
     render_glow_multi(
         clip["frames_dir"],
@@ -810,16 +806,12 @@ def test_render_glow_multi_renders_a_curved_blade_when_bend_is_present(tmp_path)
     )
     img = _load_png(out_dir, 0)
     baseline = float(clip["plate_value"])
-    # `bend` is the point the blade passes through, and
-    # _curved_capsule_mask now solves for the Bezier control point that
-    # makes B(0.5) land exactly on it. This test used to sample
-    # `mid + 0.5*(bend_point - mid)` instead, because the old renderer
-    # fed `bend` straight in as the control point and so only ever
-    # reached half the requested offset. With that halving corrected,
-    # sample the bend point itself -- that is the whole claim.
+    # Nothing is lit at the bend point -- were the blade curving toward
+    # it, this pixel would show a strong signal (matching the old test's
+    # own >20 threshold for "the curve reaches here").
     px, py = round(bend_point[0]), round(bend_point[1])
     signal = float(img[py, px].astype(np.float64).max()) - baseline
-    assert signal > 20  # the curve actually reaches the bend point
+    assert signal < 20
 
 
 def test_render_glow_handles_a_motion_npz_without_a_bend_column(tmp_path):
@@ -838,47 +830,3 @@ def test_render_glow_handles_a_motion_npz_without_a_bend_column(tmp_path):
     )
     img = _load_png(out_dir, 0)
     assert img is not None
-
-
-# ---------------------------------------------------------------------------
-# Trail must not ghost a stale shape across a bend transition. Found on real
-# footage after the final-review magnitude fix made the curve strong enough
-# to matter: a frame that just switched from straight to curved (or back)
-# rendered a visible jagged "zigzag" -- the ordinary trail effect (designed
-# for a blade that *moves* between frames, not one whose *shape* changes)
-# was blending a fading ghost of the previous, differently-shaped frame
-# underneath the new one. Confirmed directly: the same synthetic scenario
-# below measured signal=45.0 at the ghost location against the pre-fix
-# per-object-trail code, and signal=9.0 (background-level) after.
-# ---------------------------------------------------------------------------
-
-def test_render_glow_multi_does_not_ghost_the_previous_frames_straight_shape_into_a_newly_curved_frame(tmp_path):
-    clip = _build_blade_clip(tmp_path, "transition", n_frames=4, dx=4, blade_len=90)
-    motion = blade.load_motion(clip["motion_path"])
-    # frame 0: straight (no bend). frame 1: a strong bend, injected directly
-    # -- an isolated one-frame bend-active stretch, transitioning in at
-    # frame 1 and back out at frame 2.
-    hilt1, tip1 = motion["hilt"][1], motion["tip"][1]
-    mid1 = (hilt1 + tip1) / 2.0
-    bend_point = mid1 + np.array([0.0, -20.0])  # bow well off the straight line
-    motion["bend"][1] = bend_point
-    np.savez(clip["motion_path"], **motion)
-
-    out_dir = str(tmp_path / "out")
-    from lightsaber_fx.pipeline.glow import render_glow_multi
-    render_glow_multi(
-        clip["frames_dir"],
-        [{"masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"], "color": (255, 90, 60), "intensity": 0.4}],
-        clip["video_meta_path"], out_dir, ignition_ramp_seconds=0, trail_decay=0.75,
-    )
-
-    # A point on frame 0's straight line, well off frame 1's curved path
-    # (the curve bows away from it) -- this is exactly where a stale trail
-    # ghost of frame 0's shape would show up in frame 1's render.
-    straight_mid_frame0 = (motion["hilt"][0] + motion["tip"][0]) / 2.0
-    px, py = round(straight_mid_frame0[0]), round(straight_mid_frame0[1])
-    img1 = _load_png(out_dir, 1).astype(np.float64)
-    baseline = float(clip["plate_value"])
-    ghost_signal = img1[py, px].max() - baseline
-
-    assert ghost_signal < 20  # no meaningful ghost of the old straight shape
