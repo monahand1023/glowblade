@@ -404,7 +404,19 @@ def _points_on_axis(mask, fractions=(0.3, 0.5, 0.7)):
     nearest each target fraction means every returned point is a real
     foreground pixel, and they are spread along the object rather than
     clustered at one end.
+
+    Raises `ValueError` for an empty mask rather than reaching `np.linalg.svd`
+    with zero points, which raises `IndexError: index 0 is out of bounds for
+    axis 0 with size 0` -- confirmed as a real, reachable crash on real
+    footage (an empty anchor mask in `reacquire._retrack_one_object`, only
+    survived because an unrelated outer `try/except Exception` happened to
+    catch it). Every current caller already filters out an empty mask before
+    calling this (see `_candidate_masks`, `_validate_box_mask`), so this
+    exists to turn a *future* caller's equivalent mistake into a clear,
+    immediate error instead of the same cryptic crash three lines down.
     """
+    if not mask.any():
+        raise ValueError("_points_on_axis: mask has no foreground pixels")
     ys, xs = np.nonzero(mask)
     coords = np.stack([xs, ys], axis=1).astype(np.float64)
     centered = coords - coords.mean(axis=0)

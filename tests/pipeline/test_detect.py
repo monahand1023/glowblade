@@ -328,6 +328,20 @@ def test_points_on_axis_spreads_points_along_a_diagonal_object():
     assert spread >= 20
 
 
+def test_points_on_axis_raises_a_clear_error_for_an_empty_mask():
+    # Confirmed as a real, reachable crash on real footage: an empty mask
+    # reaching np.linalg.svd's PCA raised an uncaught IndexError three
+    # lines down (index 0 is out of bounds for axis 0 with size 0), only
+    # survived because an unrelated outer try/except happened to catch it
+    # (see reacquire._retrack_one_object). Every current caller already
+    # filters out an empty mask before calling this; this guards a future
+    # caller's equivalent mistake with a clear, immediate error instead.
+    mask = np.zeros((80, 80), dtype=bool)
+
+    with pytest.raises(ValueError, match="no foreground pixels"):
+        _points_on_axis(mask)
+
+
 def test_motion_seed_and_proposal_reprs_are_readable():
     # These get printed in CLI output and agent reports; a default repr
     # there is useless.
