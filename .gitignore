@@ -6,6 +6,11 @@ __pycache__/
 build/
 dist/
 
+# Local secrets (GEMINI_API_KEY / GOOGLE_API_KEY are read from the
+# environment, never from a file -- this is a guard against ever adding one).
+.env
+.env.*
+
 # Default CLI output path (src/lightsaber_fx/cli.py --output default);
 # dropped into the working tree when `lightsaber-fx run` is invoked from repo root.
 final.mp4
