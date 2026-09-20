@@ -1582,6 +1582,112 @@ def test_run_pipeline_multi_recovers_from_a_simulated_crossing_end_to_end(tmp_pa
     assert 15 < motion_0["centroid"][-1][0] < 25
 
 
+def test_run_pipeline_multi_recovers_from_two_separate_crossings_in_a_three_saber_job(
+    tmp_path, monkeypatch
+):
+    """Extends the 2-object crossing-recovery test above to 3 objects, with
+    two temporally-separate crossings against two different pairs: object 0
+    merges into object 1 early, object 2 merges into object 1 later. This
+    exercises the real (unmocked) reconcile_pair for every one of a
+    3-object job's three pairs -- a genuine merge on (0, 1), no merge at
+    all on (0, 2) (they never actually coincide), and a genuine merge on
+    (1, 2) -- which is the exact feature commit 371933d shipped. The
+    2-object test above only ever calls reconcile_pair once, for a single
+    hardcoded pair, so it can't catch a regression in the multi-pair loop
+    itself: an earlier, 2-object-only version of this pipeline skipped
+    this whole correction block for any 3+ object job (see that commit).
+    """
+    video_path = tmp_path / "longer.mp4"
+    _write_longer_video(video_path, n_frames=60, width=90)
+
+    def fake_track_objects(frames_dir, prompts, checkpoint_path, config_name, device, n_frames, progress_cb=None):
+        for prompt in prompts:
+            os.makedirs(prompt["masks_dir"], exist_ok=True)
+            obj_id = prompt["obj_id"]
+            for i in range(n_frames):
+                if obj_id == 0:
+                    x = 10 if i < 10 else 40  # merges into object 1 from frame 10 on
+                elif obj_id == 1:
+                    x = 40  # stable throughout -- both crossings merge into this one
+                else:
+                    x = 70 if i < 35 else 40  # merges into object 1 from frame 35 on
+                mask = np.zeros((48, 90), dtype=bool)
+                mask[10:34, x:x + 6] = True
+                save_mask(prompt["masks_dir"], i, mask)
+
+    def fake_reacquire_pair(frames_dir, search_start_frame, checkpoint_path, config_name, device,
+                             client=None, **kwargs):
+        reacquire_frame = search_start_frame + 3
+        if search_start_frame < 30:
+            # The (0, 1) crossing: object 0 near x=10, object 1 at x=40.
+            return reacquire_frame, [
+                {"centroid": (10.0, 22.0), "points": [[10, 20], [10, 22], [10, 24]]},
+                {"centroid": (40.0, 22.0), "points": [[40, 20], [40, 22], [40, 24]]},
+            ]
+        # The (1, 2) crossing: object 1 at x=40, object 2 near x=70.
+        return reacquire_frame, [
+            {"centroid": (40.0, 22.0), "points": [[40, 20], [40, 22], [40, 24]]},
+            {"centroid": (70.0, 22.0), "points": [[70, 20], [70, 22], [70, 24]]},
+        ]
+
+    def fake_track_object_for_reacquire(frames_dir, out_masks_dir, points, labels, checkpoint_path, config_name,
+                                         device, n_frames, prompt_frame=0, progress_cb=None):
+        seed_x = points[0][0]
+        # Each lost object's real recovered position -- distinguishable
+        # from every x already in play (10, 40, 70).
+        recovered_x = 16 if seed_x < 30 else 76
+        for i in range(prompt_frame, n_frames):
+            mask = np.zeros((48, 90), dtype=bool)
+            mask[10:34, recovered_x:recovered_x + 6] = True
+            save_mask(out_masks_dir, i, mask)
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object_for_reacquire)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    output_path = tmp_path / "final.mp4"
+
+    run_pipeline_multi(
+        input_video=str(video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[40, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[70, 15]], "labels": [1], "color": "green", "intensity": 0.35, "voice": "neutral"},
+        ],
+        output_path=str(output_path),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert output_path.exists() and output_path.stat().st_size > 0
+
+    motion_0 = load_motion(str(job_dir / "motion" / "0.npz"))
+    motion_1 = load_motion(str(job_dir / "motion" / "1.npz"))
+    motion_2 = load_motion(str(job_dir / "motion" / "2.npz"))
+
+    # Object 0: its own track before the (0, 1) crossing, then freshly
+    # re-tracked at its real recovered position (x=16) after
+    # reconciliation -- never left frozen at the merged x=40.
+    assert motion_0["centroid"][0][0] < 20
+    assert 15 < motion_0["centroid"][-1][0] < 25
+
+    # Object 1: never itself lost in a merge -- it's the one both other
+    # objects cross into -- so its own track is untouched by either
+    # reconciliation, start to end.
+    assert 35 < motion_1["centroid"][0][0] < 45
+    assert 35 < motion_1["centroid"][-1][0] < 45
+
+    # Object 2: its own track before the (1, 2) crossing, then freshly
+    # re-tracked at its real recovered position (x=76) after
+    # reconciliation -- proving the pairwise loop reached the *second*
+    # pair's crossing too, not just the first.
+    assert 65 < motion_2["centroid"][0][0] < 75
+    assert 75 < motion_2["centroid"][-1][0] < 85
+
+
 # ---------------------------------------------------------------------------
 # rerender_pipeline_multi
 # ---------------------------------------------------------------------------
