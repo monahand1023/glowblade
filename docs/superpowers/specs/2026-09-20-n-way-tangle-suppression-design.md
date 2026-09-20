@@ -1,6 +1,9 @@
 # N-way tangle suppression — design spec
 
-**Status:** approved for planning
+**Status:** designed and reviewed, deliberately deferred (2026-09-20) --
+left as a known, documented limitation rather than built now. Not queued
+for implementation; pick this up by reading this spec fresh rather than
+re-deriving it, if it becomes worth doing later.
 **Follows:** `docs/findings/2026-09-19-multi-saber-tracking-investigation.md`
 (background, the real-footage evidence this design is built from, and the
 "known gap, not urgent" note this spec now resolves)

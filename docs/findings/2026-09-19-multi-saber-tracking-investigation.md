@@ -196,3 +196,11 @@ one larger item is a known gap worth tracking but not urgent.
    all three objects at once, only three independent pairwise
    reconciliations. Worth a real design pass if this recurs on a future
    job; not worth building speculatively now.
+
+   **Update (2026-09-20):** got that design pass —
+   `docs/superpowers/specs/2026-09-20-n-way-tangle-suppression-design.md`.
+   Validated the core detection rule against this job's real data (clean
+   34-frame tangle detection, frames 43-76, zero false positives) and
+   wrote a full spec for a fade-out-when-untrustworthy fix. Deliberately
+   left unbuilt for now — read that spec fresh rather than re-deriving it
+   if this becomes worth doing later.
