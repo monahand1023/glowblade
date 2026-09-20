@@ -1,4 +1,4 @@
-import lightsaber_fx.device as device_module
+import glowblade.device as device_module
 
 
 def test_prefers_mps_when_available(monkeypatch):

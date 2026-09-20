@@ -6,7 +6,7 @@ render that "looks awful" can be diagnosed by reading a handful of files
 and numbers instead of re-deriving them by hand -- extracting frames with
 ffmpeg, loading masks.npz, computing bounding boxes -- every single time.
 
-Not part of the render pipeline itself; only `lightsaber_fx.cli`'s
+Not part of the render pipeline itself; only `glowblade.cli`'s
 `inspect` command calls this.
 """
 

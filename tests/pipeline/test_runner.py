@@ -7,10 +7,10 @@ import cv2
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline import job_meta
-from lightsaber_fx.pipeline.blade import compute_motion, load_motion, save_mask
-from lightsaber_fx.pipeline.job_meta import JobNotRerenderableError
-from lightsaber_fx.pipeline.runner import (
+from glowblade.pipeline import job_meta
+from glowblade.pipeline.blade import compute_motion, load_motion, save_mask
+from glowblade.pipeline.job_meta import JobNotRerenderableError
+from glowblade.pipeline.runner import (
     rerender_pipeline,
     rerender_pipeline_multi,
     run_pipeline,
@@ -42,7 +42,7 @@ def test_run_pipeline_validates_color_before_extracting_frames(tmp_path, monkeyp
     def fail_if_called(*a, **k):
         raise AssertionError("extract_frames should not run before color is validated")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.extract_frames", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.extract_frames", fail_if_called)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -74,7 +74,7 @@ def test_run_pipeline_end_to_end_with_stubbed_tracking(tmp_path, monkeypatch, ti
             if progress_cb:
                 progress_cb((i + 1) / n_frames * 100, f"frame {i + 1}")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", fake_track_object)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", fake_track_object)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -134,10 +134,10 @@ def test_run_pipeline_threads_blade_extend_and_voice_through(tmp_path, monkeypat
             mask[10:20, 10:20] = True
             np.save(os.path.join(masks_dir, f"{i:05d}.npy"), mask)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", fake_track_object)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", fake_track_object)
 
-    from lightsaber_fx.pipeline.audio import synthesize_audio as real_synthesize_audio
-    from lightsaber_fx.pipeline.glow import render_glow as real_render_glow
+    from glowblade.pipeline.audio import synthesize_audio as real_synthesize_audio
+    from glowblade.pipeline.glow import render_glow as real_render_glow
 
     captured = {}
 
@@ -149,8 +149,8 @@ def test_run_pipeline_threads_blade_extend_and_voice_through(tmp_path, monkeypat
         captured["voice"] = kwargs.get("voice")
         return real_synthesize_audio(*args, **kwargs)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.render_glow", spy_render_glow)
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.synthesize_audio", spy_synthesize_audio)
+    monkeypatch.setattr("glowblade.pipeline.runner.render_glow", spy_render_glow)
+    monkeypatch.setattr("glowblade.pipeline.runner.synthesize_audio", spy_synthesize_audio)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -166,11 +166,11 @@ def test_run_pipeline_threads_blade_extend_and_voice_through(tmp_path, monkeypat
         config_name="unused",
         device="cpu",
         blade_extend=False,
-        voice="sith",
+        voice="deep",
     )
 
     assert captured["blade_extend"] is False
-    assert captured["voice"] == "sith"
+    assert captured["voice"] == "deep"
 
 
 @requires_ffmpeg
@@ -184,7 +184,7 @@ def test_run_pipeline_writes_job_meta_so_the_job_is_later_rerenderable(tmp_path,
             mask[10:20, 10:20] = True
             np.save(os.path.join(masks_dir, f"{i:05d}.npy"), mask)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", fake_track_object)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", fake_track_object)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -242,7 +242,7 @@ def test_rerender_pipeline_never_calls_track_object(monkeypatch, tmp_path, reren
     def fail_if_called(*a, **k):
         raise AssertionError("track_object should never run on the rerender path")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", fail_if_called)
 
     output_path = tmp_path / "rerendered.mp4"
     result = rerender_pipeline(job_dir=str(rerenderable_job_fixture), output_path=str(output_path))
@@ -259,7 +259,7 @@ def test_rerender_pipeline_never_calls_compute_motion(monkeypatch, tmp_path, rer
     def fail_if_called(*a, **k):
         raise AssertionError("compute_motion should never run on the rerender path")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.compute_motion", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.compute_motion", fail_if_called)
 
     output_path = tmp_path / "rerendered.mp4"
     result = rerender_pipeline(job_dir=str(rerenderable_job_fixture), output_path=str(output_path))
@@ -296,7 +296,7 @@ def test_rerender_pipeline_validates_color_before_extracting_frames(monkeypatch,
     def fail_if_called(*a, **k):
         raise AssertionError("extract_frames should not run before color is validated")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.extract_frames", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.extract_frames", fail_if_called)
 
     with pytest.raises(ValueError):
         rerender_pipeline(
@@ -334,7 +334,7 @@ def test_rerender_pipeline_rejects_a_multi_object_job_with_a_clear_message(tmp_p
 
 @requires_ffmpeg
 def test_rerender_pipeline_works_with_legacy_npy_masks(tmp_path, tiny_video_path):
-    from lightsaber_fx.pipeline.blade import compute_motion
+    from glowblade.pipeline.blade import compute_motion
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -359,8 +359,8 @@ def test_rerender_pipeline_works_with_legacy_npy_masks(tmp_path, tiny_video_path
 def test_rerender_pipeline_threads_color_intensity_voice_blade_extend_through(
     monkeypatch, tmp_path, rerenderable_job_fixture
 ):
-    from lightsaber_fx.pipeline.audio import synthesize_audio as real_synthesize_audio
-    from lightsaber_fx.pipeline.glow import render_glow as real_render_glow
+    from glowblade.pipeline.audio import synthesize_audio as real_synthesize_audio
+    from glowblade.pipeline.glow import render_glow as real_render_glow
 
     captured = {}
 
@@ -374,8 +374,8 @@ def test_rerender_pipeline_threads_color_intensity_voice_blade_extend_through(
         captured["voice"] = kwargs.get("voice")
         return real_synthesize_audio(*args, **kwargs)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.render_glow", spy_render_glow)
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.synthesize_audio", spy_synthesize_audio)
+    monkeypatch.setattr("glowblade.pipeline.runner.render_glow", spy_render_glow)
+    monkeypatch.setattr("glowblade.pipeline.runner.synthesize_audio", spy_synthesize_audio)
 
     rerender_pipeline(
         job_dir=str(rerenderable_job_fixture),
@@ -383,13 +383,13 @@ def test_rerender_pipeline_threads_color_intensity_voice_blade_extend_through(
         color="blue",
         intensity=0.7,
         blade_extend=False,
-        voice="sith",
+        voice="deep",
     )
 
     assert captured["color"] == (255, 90, 60)  # NAMED_COLORS["blue"], BGR
     assert captured["spill_strength"] == 0.7
     assert captured["blade_extend"] is False
-    assert captured["voice"] == "sith"
+    assert captured["voice"] == "deep"
 
 
 def _fake_track_writing(mask_factory):
@@ -438,8 +438,8 @@ def test_run_pipeline_raises_before_glow_when_tracking_found_nothing(
     def fail_if_called(*args, **kwargs):
         raise AssertionError("render_glow ran despite the track finding no blade")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blank))
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.render_glow", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", _fake_track_writing(_blank))
+    monkeypatch.setattr("glowblade.pipeline.runner.render_glow", fail_if_called)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -463,7 +463,7 @@ def test_run_pipeline_error_for_an_empty_track_names_the_click_points(
     # than left to `match=`: a bare count would leave the user with no idea
     # what to change. Empty masks nearly always mean an include point that
     # missed the object or an exclude point that landed on it.
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blank))
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", _fake_track_writing(_blank))
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -492,7 +492,7 @@ def test_run_pipeline_warns_but_renders_when_the_blade_is_found_in_few_frames(
     # -- so this must NOT raise. It reports through the normal progress channel
     # so both front ends surface it, and still produces a file.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_object",
+        "glowblade.pipeline.runner.track_object",
         _fake_track_writing(lambda i: _blade(i) if i == 0 else _blank(i)),
     )
 
@@ -526,7 +526,7 @@ def test_run_pipeline_warns_but_renders_for_a_consistently_blob_shaped_track(
     # the coverage guard above since nothing here is missing or empty. Same
     # "warn and render anyway" contract as low coverage: degraded quality,
     # not doomed, and the render is still the user's fastest way to look.
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blob))
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", _fake_track_writing(_blob))
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -555,7 +555,7 @@ def test_run_pipeline_warns_but_renders_for_a_consistently_blob_shaped_track(
 def test_run_pipeline_does_not_warn_about_elongation_for_a_properly_elongated_track(
     tmp_path, monkeypatch, tiny_video_path
 ):
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_object", _fake_track_writing(_blade))
+    monkeypatch.setattr("glowblade.pipeline.runner.track_object", _fake_track_writing(_blade))
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -579,7 +579,7 @@ def test_run_pipeline_does_not_warn_about_elongation_for_a_properly_elongated_tr
 
 
 def test_compute_motion_reports_how_many_frames_produced_a_blade(tmp_path):
-    from lightsaber_fx.pipeline.blade import compute_motion, save_mask
+    from glowblade.pipeline.blade import compute_motion, save_mask
 
     masks_dir = tmp_path / "masks"
     masks_dir.mkdir()
@@ -609,7 +609,7 @@ def test_run_pipeline_multi_end_to_end_with_stubbed_tracking(tmp_path, monkeypat
             if progress_cb:
                 progress_cb(100, "done")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_objects", fake_track_objects)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -619,7 +619,7 @@ def test_run_pipeline_multi_end_to_end_with_stubbed_tracking(tmp_path, monkeypat
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(output_path),
         job_dir=str(job_dir),
@@ -641,7 +641,7 @@ def test_run_pipeline_multi_validates_every_saber_color_before_tracking(tmp_path
     def fail_if_called(*a, **k):
         raise AssertionError("extract_frames should not run before every color is validated")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.extract_frames", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.extract_frames", fail_if_called)
     job_dir = tmp_path / "job"
     job_dir.mkdir()
 
@@ -683,10 +683,10 @@ def test_run_pipeline_multi_error_for_a_dead_saber_names_which_saber(
         raise AssertionError("render_glow_multi ran despite a track finding no blade")
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blank}),
     )
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.render_glow_multi", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.render_glow_multi", fail_if_called)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -718,7 +718,7 @@ def test_run_pipeline_multi_warns_for_the_specific_saber_that_is_blob_shaped(
     # as single-object) -- what matters is that the warning names saber 1,
     # not saber 0, and there's exactly one of it.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blob}),
     )
 
@@ -751,7 +751,7 @@ def test_run_pipeline_multi_rejects_an_unsupported_saber_count(tmp_path, monkeyp
     def fail_if_called(*a, **k):
         raise AssertionError("extract_frames should not run for an invalid saber count")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.extract_frames", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.extract_frames", fail_if_called)
     job_dir = tmp_path / "job"
     job_dir.mkdir()
     one = {"points": [[1, 1]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"}
@@ -781,7 +781,7 @@ def test_run_pipeline_multi_threads_each_sabers_prompt_frame_to_the_tracker(
         captured["prompts"] = [dict(p) for p in prompts]
         raise RuntimeError("stop here -- only the prompts matter")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_objects", fake_track_objects)
     job_dir = tmp_path / "job"
     job_dir.mkdir()
 
@@ -808,7 +808,7 @@ def test_run_pipeline_multi_records_each_sabers_source_in_job_meta(
     tmp_path, monkeypatch, tiny_video_path
 ):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
     job_dir = tmp_path / "job"
@@ -834,7 +834,7 @@ def test_run_pipeline_multi_records_each_sabers_source_in_job_meta(
 
 def test_run_pipeline_multi_calls_reconcile_pair_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
     calls = []
@@ -844,7 +844,7 @@ def test_run_pipeline_multi_calls_reconcile_pair_for_a_two_saber_job(tmp_path, m
         calls.append((masks_dir_0, masks_dir_1, n_frames))
         return False
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fake_reconcile_pair)
+    monkeypatch.setattr("glowblade.pipeline.runner.reconcile_pair", fake_reconcile_pair)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -853,7 +853,7 @@ def test_run_pipeline_multi_calls_reconcile_pair_for_a_two_saber_job(tmp_path, m
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(tmp_path / "final.mp4"),
         job_dir=str(job_dir),
@@ -869,14 +869,14 @@ def test_run_pipeline_multi_calls_reconcile_pair_for_a_two_saber_job(tmp_path, m
 
 def test_run_pipeline_multi_skips_reconcile_pair_for_a_single_saber_job(tmp_path, monkeypatch, tiny_video_path):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade}),
     )
 
     def fail_if_called(*a, **k):
         raise AssertionError("reconcile_pair should not run for a single-saber job")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.reconcile_pair", fail_if_called)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -901,7 +901,7 @@ def test_run_pipeline_multi_calls_reconcile_pair_for_every_pair_in_a_four_saber_
     # blade) go completely uncorrected. A 4-saber job has comb(4, 2) = 6
     # distinct pairs; every one of them must get its own call.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
     )
     calls = []
@@ -911,7 +911,7 @@ def test_run_pipeline_multi_calls_reconcile_pair_for_every_pair_in_a_four_saber_
         calls.append((masks_dir_0, masks_dir_1))
         return False
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fake_reconcile_pair)
+    monkeypatch.setattr("glowblade.pipeline.runner.reconcile_pair", fake_reconcile_pair)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -940,7 +940,7 @@ def test_run_pipeline_multi_calls_reconcile_pair_for_every_pair_in_a_four_saber_
 
 def test_run_pipeline_multi_calls_retrack_overlap_runs_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
     calls = []
@@ -956,7 +956,7 @@ def test_run_pipeline_multi_calls_retrack_overlap_runs_for_a_two_saber_job(tmp_p
         return set(), []
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs
+        "glowblade.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs
     )
 
     job_dir = tmp_path / "job"
@@ -966,7 +966,7 @@ def test_run_pipeline_multi_calls_retrack_overlap_runs_for_a_two_saber_job(tmp_p
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(tmp_path / "final.mp4"),
         job_dir=str(job_dir),
@@ -984,14 +984,14 @@ def test_run_pipeline_multi_skips_retrack_overlap_runs_for_a_single_saber_job(
     tmp_path, monkeypatch, tiny_video_path
 ):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade}),
     )
 
     def fail_if_called(*a, **k):
         raise AssertionError("retrack_overlap_runs should not run for a single-saber job")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.retrack_overlap_runs", fail_if_called)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1014,7 +1014,7 @@ def test_run_pipeline_multi_calls_retrack_overlap_runs_for_every_pair_in_a_four_
     # retrack_overlap_runs, not skip it the way an earlier, 2-object-only
     # version of this branch did.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
     )
     calls = []
@@ -1027,7 +1027,7 @@ def test_run_pipeline_multi_calls_retrack_overlap_runs_for_every_pair_in_a_four_
         return set(), []
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs
+        "glowblade.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs
     )
 
     job_dir = tmp_path / "job"
@@ -1057,11 +1057,11 @@ def test_run_pipeline_multi_calls_retrack_overlap_runs_for_every_pair_in_a_four_
 
 def test_run_pipeline_multi_calls_compute_hilt_overrides_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.retrack_overlap_runs",
+        "glowblade.pipeline.runner.retrack_overlap_runs",
         lambda *a, **k: (set(), [(3, 5)]),
     )
     calls = []
@@ -1076,12 +1076,12 @@ def test_run_pipeline_multi_calls_compute_hilt_overrides_for_a_two_saber_job(tmp
         return {7: (1.0, 2.0)}, {}
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.compute_hilt_overrides", fake_compute_hilt_overrides
+        "glowblade.pipeline.runner.compute_hilt_overrides", fake_compute_hilt_overrides
     )
 
     overload_calls = []
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed",
+        "glowblade.pipeline.runner.suppress_overlap_bleed",
         lambda *a, hilt_overrides_a=None, hilt_overrides_b=None, **k: overload_calls.append(
             (hilt_overrides_a, hilt_overrides_b)
         ) or 0,
@@ -1094,7 +1094,7 @@ def test_run_pipeline_multi_calls_compute_hilt_overrides_for_a_two_saber_job(tmp
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(tmp_path / "final.mp4"),
         job_dir=str(job_dir),
@@ -1110,14 +1110,14 @@ def test_run_pipeline_multi_skips_compute_hilt_overrides_for_a_single_saber_job(
     tmp_path, monkeypatch, tiny_video_path
 ):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade}),
     )
 
     def fail_if_called(*a, **k):
         raise AssertionError("compute_hilt_overrides should not run for a single-saber job")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.compute_hilt_overrides", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.compute_hilt_overrides", fail_if_called)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1136,7 +1136,7 @@ def test_run_pipeline_multi_reruns_compute_motion_for_objects_retrack_overlap_ru
     tmp_path, monkeypatch, tiny_video_path
 ):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
 
@@ -1147,10 +1147,10 @@ def test_run_pipeline_multi_reruns_compute_motion_for_objects_retrack_overlap_ru
         calls.append(masks_dir)
         return real_compute_motion(masks_dir, motion_out_path, progress_cb=progress_cb)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.compute_motion", counting_compute_motion)
+    monkeypatch.setattr("glowblade.pipeline.runner.compute_motion", counting_compute_motion)
     # Object 0 only: simulates a validated re-track that patched its masks.
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", lambda *a, **k: ({0}, []))
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", lambda *a, **k: 0)
+    monkeypatch.setattr("glowblade.pipeline.runner.retrack_overlap_runs", lambda *a, **k: ({0}, []))
+    monkeypatch.setattr("glowblade.pipeline.runner.suppress_overlap_bleed", lambda *a, **k: 0)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1159,7 +1159,7 @@ def test_run_pipeline_multi_reruns_compute_motion_for_objects_retrack_overlap_ru
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(tmp_path / "final.mp4"),
         job_dir=str(job_dir),
@@ -1188,7 +1188,7 @@ def test_run_pipeline_multi_translates_retrack_overlap_runs_positional_indices_f
     # compute_motion re-run for object 1 instead, leaving object 2's own
     # patched masks un-recomputed.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade}),
     )
 
@@ -1199,7 +1199,7 @@ def test_run_pipeline_multi_translates_retrack_overlap_runs_positional_indices_f
         calls.append(masks_dir)
         return real_compute_motion(masks_dir, motion_out_path, progress_cb=progress_cb)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.compute_motion", counting_compute_motion)
+    monkeypatch.setattr("glowblade.pipeline.runner.compute_motion", counting_compute_motion)
 
     def fake_retrack_overlap_runs(frames_dir, masks_dir_0, masks_dir_1, motion_path_0, motion_path_1,
                                    n_frames, checkpoint_path, config_name, device):
@@ -1211,8 +1211,8 @@ def test_run_pipeline_multi_translates_retrack_overlap_runs_positional_indices_f
             return {1}, []
         return set(), []
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs)
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", lambda *a, **k: 0)
+    monkeypatch.setattr("glowblade.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs)
+    monkeypatch.setattr("glowblade.pipeline.runner.suppress_overlap_bleed", lambda *a, **k: 0)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1247,16 +1247,16 @@ def test_run_pipeline_multi_passes_resolved_ranges_as_exclude_frame_ranges(
     # blade.suppress_overlap_bleed's docstring for why genuine contact
     # still reads as high mask IoU.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.retrack_overlap_runs",
+        "glowblade.pipeline.runner.retrack_overlap_runs",
         lambda *a, **k: ({0, 1}, [(12, 34)]),
     )
     calls = []
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed",
+        "glowblade.pipeline.runner.suppress_overlap_bleed",
         lambda *a, exclude_frame_ranges=(), **k: calls.append(exclude_frame_ranges) or 0,
     )
 
@@ -1267,7 +1267,7 @@ def test_run_pipeline_multi_passes_resolved_ranges_as_exclude_frame_ranges(
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(tmp_path / "final.mp4"),
         job_dir=str(job_dir),
@@ -1290,17 +1290,17 @@ def test_run_pipeline_multi_does_not_exclude_reconcile_pairs_own_output(
     # frames). Only retrack_overlap_runs' resolved_ranges -- which carries
     # an actual accuracy check -- may exclude anything.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", lambda *a, **k: True)
+    monkeypatch.setattr("glowblade.pipeline.runner.reconcile_pair", lambda *a, **k: True)
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.retrack_overlap_runs",
+        "glowblade.pipeline.runner.retrack_overlap_runs",
         lambda *a, **k: (set(), [(12, 34)]),
     )
     calls = []
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed",
+        "glowblade.pipeline.runner.suppress_overlap_bleed",
         lambda *a, exclude_frame_ranges=(), **k: calls.append(list(exclude_frame_ranges)) or 0,
     )
 
@@ -1311,7 +1311,7 @@ def test_run_pipeline_multi_does_not_exclude_reconcile_pairs_own_output(
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(tmp_path / "final.mp4"),
         job_dir=str(job_dir),
@@ -1324,7 +1324,7 @@ def test_run_pipeline_multi_does_not_exclude_reconcile_pairs_own_output(
 
 def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade}),
     )
     calls = []
@@ -1340,7 +1340,7 @@ def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp
         return 0
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
+        "glowblade.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
     )
 
     job_dir = tmp_path / "job"
@@ -1350,7 +1350,7 @@ def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_a_two_saber_job(tmp
         input_video=str(tiny_video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(tmp_path / "final.mp4"),
         job_dir=str(job_dir),
@@ -1368,14 +1368,14 @@ def test_run_pipeline_multi_skips_suppress_overlap_bleed_for_a_single_saber_job(
     tmp_path, monkeypatch, tiny_video_path
 ):
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade}),
     )
 
     def fail_if_called(*a, **k):
         raise AssertionError("suppress_overlap_bleed should not run for a single-saber job")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.runner.suppress_overlap_bleed", fail_if_called)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1398,7 +1398,7 @@ def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_every_pair_in_a_fou
     # through suppress_overlap_bleed too, not skip it the way an earlier,
     # 2-object-only version of this branch did.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
     )
     calls = []
@@ -1412,7 +1412,7 @@ def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_every_pair_in_a_fou
         return 0
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
+        "glowblade.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
     )
 
     job_dir = tmp_path / "job"
@@ -1454,12 +1454,12 @@ def test_run_pipeline_multi_stabilizes_length_for_every_object_in_a_three_saber_
     # given -- so every object appears in at least one pair and gets
     # stabilized, without any direct stabilize_blade_length call at all.
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.track_objects",
+        "glowblade.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade}),
     )
     direct_calls = []
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.stabilize_blade_length", lambda motion_path: direct_calls.append(motion_path)
+        "glowblade.pipeline.runner.stabilize_blade_length", lambda motion_path: direct_calls.append(motion_path)
     )
     pair_calls = []
 
@@ -1470,7 +1470,7 @@ def test_run_pipeline_multi_stabilizes_length_for_every_object_in_a_three_saber_
         return 0
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
+        "glowblade.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
     )
 
     job_dir = tmp_path / "job"
@@ -1547,9 +1547,9 @@ def test_run_pipeline_multi_recovers_from_a_simulated_crossing_end_to_end(tmp_pa
             mask[10:34, 16:22] = True  # x=16: distinguishable from the frozen reference (x=10) and object 1's target (x=40)
             save_mask(out_masks_dir, i, mask)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object_for_reacquire)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_objects", fake_track_objects)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.track_object", fake_track_object_for_reacquire)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1559,7 +1559,7 @@ def test_run_pipeline_multi_recovers_from_a_simulated_crossing_end_to_end(tmp_pa
         input_video=str(video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
         ],
         output_path=str(output_path),
         job_dir=str(job_dir),
@@ -1641,9 +1641,9 @@ def test_run_pipeline_multi_recovers_from_two_separate_crossings_in_a_three_sabe
             mask[10:34, recovered_x:recovered_x + 6] = True
             save_mask(out_masks_dir, i, mask)
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.track_objects", fake_track_objects)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object_for_reacquire)
+    monkeypatch.setattr("glowblade.pipeline.runner.track_objects", fake_track_objects)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.track_object", fake_track_object_for_reacquire)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1653,7 +1653,7 @@ def test_run_pipeline_multi_recovers_from_two_separate_crossings_in_a_three_sabe
         input_video=str(video_path),
         sabers=[
             {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
-            {"points": [[40, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "sith"},
+            {"points": [[40, 15]], "labels": [1], "color": "blue", "intensity": 0.5, "voice": "deep"},
             {"points": [[70, 15]], "labels": [1], "color": "green", "intensity": 0.35, "voice": "neutral"},
         ],
         output_path=str(output_path),
@@ -1714,7 +1714,7 @@ def test_rerender_pipeline_multi_reuses_cached_masks_for_a_new_color(tmp_path, m
         output_path=str(output_path),
         sabers=[
             {"color": "green", "intensity": 0.6, "voice": "neutral"},
-            {"color": "blue", "intensity": 0.3, "voice": "jedi"},
+            {"color": "blue", "intensity": 0.3, "voice": "bright"},
         ],
     )
 

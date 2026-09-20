@@ -3,8 +3,8 @@ import os
 import cv2
 import numpy as np
 
-from lightsaber_fx.pipeline.blade import BladeGeometry, save_mask, save_motion
-from lightsaber_fx.pipeline.hilt_track import (
+from glowblade.pipeline.blade import BladeGeometry, save_mask, save_motion
+from glowblade.pipeline.hilt_track import (
     BLADE_DIRECTION_SEED_FRAC,
     MIN_SEED_FEATURES,
     _seed_features,

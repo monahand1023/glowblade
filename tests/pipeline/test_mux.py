@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from lightsaber_fx.pipeline.mux import encode
+from glowblade.pipeline.mux import encode
 
 requires_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -88,7 +88,7 @@ def test_encode_raises_actionable_error_on_ffmpeg_failure(tmp_path, monkeypatch)
     def fake_run(cmd, check, capture_output):
         raise subprocess.CalledProcessError(1, cmd, output=b"", stderr=b"ffmpeg: no such file or pattern")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.mux.subprocess.run", fake_run)
+    monkeypatch.setattr("glowblade.pipeline.mux.subprocess.run", fake_run)
 
     with pytest.raises(RuntimeError, match="ffmpeg failed"):
         encode(str(frames_dir), 10.0, str(audio_path), str(output_path))

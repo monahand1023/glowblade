@@ -5,8 +5,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-import lightsaber_fx.paths as paths_module
-import lightsaber_fx.web.server as server_module
+import glowblade.paths as paths_module
+import glowblade.web.server as server_module
 
 
 @pytest.fixture(autouse=True)
@@ -136,7 +136,7 @@ def test_points_rejected_when_sam2_checkpoint_missing(client, tiny_video_bytes, 
     )
 
     assert resp.status_code == 400
-    assert "lightsaber-fx setup" in resp.json()["detail"]
+    assert "glowblade setup" in resp.json()["detail"]
 
 
 def test_second_upload_returns_409_while_a_job_is_running(client, tiny_video_bytes, monkeypatch):
@@ -289,15 +289,15 @@ def test_rerender_endpoint_accepts_multiple_sabers(client, tiny_video_bytes, mon
     resp = client.post(
         f"/api/jobs/{job_id}/rerender",
         json={"sabers": [
-            {"color": "green", "intensity": 0.6, "voice": "jedi"},
-            {"color": "red", "intensity": 0.2, "voice": "sith"},
+            {"color": "green", "intensity": 0.6, "voice": "bright"},
+            {"color": "red", "intensity": 0.2, "voice": "deep"},
         ]},
     )
 
     assert resp.status_code == 200
     server_module.manager.wait(timeout=2)
     assert len(captured["sabers"]) == 2
-    assert captured["sabers"][0]["voice"] == "jedi"
+    assert captured["sabers"][0]["voice"] == "bright"
 
 
 def test_rerender_endpoint_rejects_a_saber_count_mismatch(client, tiny_video_bytes, monkeypatch):
@@ -481,7 +481,7 @@ def test_rerender_endpoint_409_when_a_job_is_already_running(client, tiny_video_
 def _fake_proposal(frame_index=3):  # inside the 5-frame fixture clip
     import numpy as np
 
-    from lightsaber_fx.pipeline.detect import BladeProposal, MotionSeed
+    from glowblade.pipeline.detect import BladeProposal, MotionSeed
 
     mask = np.zeros((48, 64), dtype=bool)
     mask[22:26, 8:56] = True
@@ -773,7 +773,7 @@ def test_points_accepts_multiple_sabers_and_starts_a_multi_object_job(client, ti
         json={
             "sabers": [
                 {"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"},
-                {"points": [[20, 20, 1]], "color": "blue", "intensity": 0.5, "voice": "sith"},
+                {"points": [[20, 20, 1]], "color": "blue", "intensity": 0.5, "voice": "deep"},
             ],
         },
     )
@@ -782,7 +782,7 @@ def test_points_accepts_multiple_sabers_and_starts_a_multi_object_job(client, ti
     server_module.manager.wait(timeout=2)
     assert len(captured["sabers"]) == 2
     assert captured["sabers"][0]["color"] == "red"
-    assert captured["sabers"][1]["voice"] == "sith"
+    assert captured["sabers"][1]["voice"] == "deep"
 
 
 def test_points_rejects_zero_sabers(client, tiny_video_bytes):
@@ -898,7 +898,7 @@ def test_preview_rejects_traversal_style_job_ids(client):
 
 
 def test_parse_saber_specs_defaults_source_to_manual():
-    from lightsaber_fx.web.server import _parse_saber_specs
+    from glowblade.web.server import _parse_saber_specs
 
     parsed = _parse_saber_specs({"sabers": [
         {"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral"},
@@ -908,7 +908,7 @@ def test_parse_saber_specs_defaults_source_to_manual():
 
 
 def test_parse_saber_specs_passes_through_a_given_source():
-    from lightsaber_fx.web.server import _parse_saber_specs
+    from glowblade.web.server import _parse_saber_specs
 
     parsed = _parse_saber_specs({"sabers": [
         {"points": [[10, 10, 1]], "color": "red", "intensity": 0.35, "voice": "neutral", "source": "vlm"},

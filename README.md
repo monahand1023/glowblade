@@ -1,4 +1,4 @@
-# lightsaber_fx
+# Glowblade
 
 Turn a home video of someone swinging a stick — a bat, a broom, a toy sword —
 into a glowing-blade VFX clip with matching sound, usually without clicking
@@ -17,9 +17,9 @@ there is no sampled or copyrighted sound anywhere in the output.
 
 Two ways to use it:
 
-- **A browser app.** `lightsaber-fx serve`, then drag a clip onto the page,
+- **A browser app.** `glowblade serve`, then drag a clip onto the page,
   confirm what it found, watch progress stream, play the result in place.
-- **A command line.** `lightsaber-fx run clip.mp4`, press Enter to accept what
+- **A command line.** `glowblade run clip.mp4`, press Enter to accept what
   it found in a popup window, and the rest runs unattended.
 
 Runs locally on your machine by default. If you set a `GEMINI_API_KEY` (or
@@ -36,7 +36,7 @@ and nothing leaves your machine.
 |---|---|
 | **Python** | 3.10, 3.11, or 3.12. **Not 3.13+** — PyTorch does not publish wheels for it yet. |
 | **ffmpeg** | Required, on your `PATH`. The final step shells out to it by name. |
-| **git + curl** | Required, on your `PATH`. `lightsaber-fx setup` uses them to fetch SAM2 and its model. |
+| **git + curl** | Required, on your `PATH`. `glowblade setup` uses them to fetch SAM2 and its model. |
 | **Disk** | ~400 MB for SAM2 and its model, plus a few GB per render for intermediates (see [Disk usage](#disk-usage)). |
 | **GPU** | Optional but strongly recommended. Apple Silicon (MPS) and NVIDIA (CUDA) are both used automatically; CPU-only works but is *much* slower. |
 | **`GEMINI_API_KEY`** (or `GOOGLE_API_KEY`) | Optional. When set, detection asks [Gemini](https://ai.google.dev/) (via the `google-genai` package, installed automatically) to find every swung object in one frame, so multiple objects can be detected and tracked at once. Without it, detection falls back to the fully local, motion-based search and nothing leaves your machine — only one object is found per clip in that mode. |
@@ -53,17 +53,17 @@ sudo apt install ffmpeg    # Debian / Ubuntu
 ## Install
 
 ```bash
-git clone https://github.com/<your-user>/lightsaber_fx.git
-cd lightsaber_fx
+git clone https://github.com/<your-user>/glowblade.git
+cd glowblade
 
 python3.12 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
 pip install -e ".[dev]"
-lightsaber-fx setup
+glowblade setup
 ```
 
-`lightsaber-fx setup` is a one-time step that clones SAM2, installs it, and
+`glowblade setup` is a one-time step that clones SAM2, installs it, and
 downloads the small model checkpoint (~176 MB). It is safe to re-run — it skips
 whatever it already has. Use `--force` to redo it from scratch.
 
@@ -71,8 +71,8 @@ None of that lands in this repo. It goes in a per-user application-data
 directory, alongside the working files from each render:
 
 ```
-~/Library/Application Support/lightsaber-fx/     # macOS
-~/.local/share/lightsaber-fx/                    # Linux
+~/Library/Application Support/glowblade/     # macOS
+~/.local/share/glowblade/                    # Linux
 ├── sam2-src/         # the SAM2 clone, installed into your venv
 ├── checkpoints/      # sam2.1_hiera_small.pt
 └── jobs/<job-id>/    # per-render working files (see Disk usage)
@@ -81,7 +81,7 @@ directory, alongside the working files from each render:
 Verify the install:
 
 ```bash
-lightsaber-fx --version
+glowblade --version
 pytest -q                # the SAM2 tracking test is skipped if setup hasn't run
 ```
 
@@ -170,7 +170,7 @@ rather than assumed:
 ### Your first render: the browser app
 
 ```bash
-lightsaber-fx serve --open-browser
+glowblade serve --open-browser
 ```
 
 Then, in the page:
@@ -201,7 +201,7 @@ get a "busy" message rather than two jobs fighting over your GPU.
 ### Your first render: the command line
 
 ```bash
-lightsaber-fx run clip.mp4
+glowblade run clip.mp4
 ```
 
 It looks for the swung object first, then opens a window showing what it
@@ -214,11 +214,11 @@ Pass `--no-auto` to skip the search and go straight to clicking the first
 frame.
 
 ```bash
-lightsaber-fx run clip.mp4 \
+glowblade run clip.mp4 \
   --output blue_broom.mp4 \
   --color blue \
   --intensity 0.5 \
-  --voice sith \
+  --voice deep \
   --keep-intermediate
 ```
 
@@ -228,7 +228,7 @@ lightsaber-fx run clip.mp4 \
 | `--color` | `red` | `red`, `blue`, `green`, or any `#RRGGBB` hex value. |
 | `--intensity` | `0.35` | `0.0`–`1.0`. How strongly the blade lights up its surroundings. Values outside the range are rejected immediately. |
 | `--blade-extend` / `--no-blade-extend` | extend on | Rebuilds the blade as a capsule extending past the tracked object's tip (what makes a bat or broom read as a blade rather than a glowing prop). `--no-blade-extend` falls back to tracing the raw tracked silhouette instead — useful for an object that isn't elongated. |
-| `--voice` | `neutral` | `neutral`, `jedi`, or `sith`. Changes the hum/swing character only — independent of `--color`, so picking red never silently changes the soundtrack. |
+| `--voice` | `neutral` | `neutral`, `bright`, or `deep`. Changes the hum/swing character only — independent of `--color`, so picking red never silently changes the soundtrack. |
 | `--keep-intermediate` | off | Also keep the extracted `frames/` after rendering (useful for debugging a bad track). The tracking masks are kept either way — they are tiny and `rerender` needs them. The rendered PNG sequence used for the final encode is always deleted after a successful run; it has no debugging value once encoded. |
 | `--auto` / `--no-auto` | auto on | Look for the swung object before asking you to click. `--no-auto` skips the search (a couple of seconds) and shows you the first frame straight away. |
 
@@ -243,8 +243,8 @@ or blade shape can change the mask — so changing your mind about any of those
 shouldn't cost you another full render. It doesn't:
 
 ```bash
-lightsaber-fx jobs                          # which past jobs can be reused, and why others can't
-lightsaber-fx rerender a1b2c3d4 --color green --voice sith
+glowblade jobs                          # which past jobs can be reused, and why others can't
+glowblade rerender a1b2c3d4 --color green --voice deep
 ```
 
 `rerender` reuses the cached masks and re-runs only extract, glow, audio and the
@@ -305,7 +305,7 @@ back.
 
 ## How it works
 
-`lightsaber-fx run` and the web app both call the same pipeline. Six stages:
+`glowblade run` and the web app both call the same pipeline. Six stages:
 
 1. **extract** — the clip is exploded into per-frame, near-lossless JPEGs
    (quality ~100). Everything downstream composites on these, so this stage
@@ -349,7 +349,7 @@ Exposed directly:
   the checkbox in the web UI. On (default) rebuilds the blade as an extended
   capsule; off traces the raw tracked mask, which suits an object that isn't
   elongated.
-- **Voice** — `--voice neutral|jedi|sith` on the CLI, or the dropdown in the
+- **Voice** — `--voice neutral|bright|deep` on the CLI, or the dropdown in the
   web UI. Changes only the hum/swing character (pitch, distortion, buzz
   level); colour and voice are independent, so switching colour never changes
   the sound.
@@ -361,7 +361,7 @@ high-quality `libx264 -crf 16` pass rather than a fast intermediate. The glow
 and encode stages are the ones that got slower on purpose in exchange for a
 visibly cleaner result — there's no `--fast` escape hatch.
 
-Code-level, in `src/lightsaber_fx/pipeline/`:
+Code-level, in `src/glowblade/pipeline/`:
 
 - **Glow shape** — `render_glow()` in `glow.py` exposes tuning knobs for every
   layer (capsule extension/taper, core/colour-band blur, the three-scale glow
@@ -389,7 +389,7 @@ Code-level, in `src/lightsaber_fx/pipeline/`:
 
 ## Troubleshooting
 
-**`SAM2 is not installed yet — run 'lightsaber-fx setup' first.`**
+**`SAM2 is not installed yet — run 'glowblade setup' first.`**
 Exactly what it says. This is checked before any work happens.
 
 **`FileNotFoundError: 'ffmpeg'`, at the very end of a long render**
@@ -435,11 +435,11 @@ clip when it needs them. The browser app currently keeps them until you run
 `clean`.
 
 ```bash
-lightsaber-fx clean     # delete all job directories
+glowblade clean     # delete all job directories
 ```
 
 `clean` leaves the SAM2 install and the model checkpoint alone — rerun
-`lightsaber-fx setup --force` if you need to replace those. It has no
+`glowblade setup --force` if you need to replace those. It has no
 cross-process lock, so don't run it while a render is in progress. Note that
 cleaning a job also makes it un-re-renderable, since it removes the masks.
 
@@ -461,7 +461,7 @@ measured for the ignition and power-down transients, real `ffprobe` checks on
 the muxed output.
 
 ```
-src/lightsaber_fx/
+src/glowblade/
 ├── cli.py              # click CLI: setup / run / serve / clean / rerender / jobs
 ├── paths.py            # where SAM2, the checkpoint, and job dirs live
 ├── device.py           # mps -> cuda -> cpu selection
@@ -505,7 +505,7 @@ something this app is built for, and it warns you if you try.
 ## Credits
 
 Object tracking is [SAM 2](https://github.com/facebookresearch/sam2) by Meta
-AI, fetched and installed by `lightsaber-fx setup` under its own license and
+AI, fetched and installed by `glowblade setup` under its own license and
 not redistributed here. Compositing uses OpenCV; audio synthesis uses NumPy and
 SoundFile; the web app is FastAPI.
 

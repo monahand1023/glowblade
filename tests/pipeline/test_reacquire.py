@@ -1,7 +1,7 @@
 import numpy as np
 
-from lightsaber_fx.pipeline.blade import compute_motion, load_mask, save_mask
-from lightsaber_fx.pipeline.reacquire import (
+from glowblade.pipeline.blade import compute_motion, load_mask, save_mask
+from glowblade.pipeline.reacquire import (
     detect_merge,
     find_clean_reference,
     match_detections_to_objects,
@@ -222,7 +222,7 @@ import json
 
 import cv2
 
-from lightsaber_fx.pipeline.reacquire import reacquire_pair
+from glowblade.pipeline.reacquire import reacquire_pair
 
 FRAME_W, FRAME_H = 1280, 720
 
@@ -299,7 +299,7 @@ def test_reacquire_pair_finds_two_separated_detections_on_the_first_checked_fram
 
     client = _FakeGenaiClient(lambda call: _two_separated_boxes_response())
     predictor = _FakePredictor(_line_mask_at)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+    monkeypatch.setattr("glowblade.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
 
     result = reacquire_pair(
         str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
@@ -325,7 +325,7 @@ def test_reacquire_pair_keeps_searching_past_frames_that_are_not_yet_separated(t
     responses = [_no_boxes_response(), _two_overlapping_boxes_response(), _two_separated_boxes_response()]
     client = _FakeGenaiClient(lambda call: responses[call])
     predictor = _FakePredictor(_line_mask_at)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+    monkeypatch.setattr("glowblade.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
 
     result = reacquire_pair(
         str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
@@ -345,7 +345,7 @@ def test_reacquire_pair_returns_none_when_the_search_window_is_exhausted(tmp_pat
 
     client = _FakeGenaiClient(lambda call: _no_boxes_response())
     predictor = _FakePredictor(_line_mask_at)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+    monkeypatch.setattr("glowblade.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
 
     result = reacquire_pair(
         str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
@@ -363,7 +363,7 @@ def test_reacquire_pair_returns_none_when_it_runs_past_the_end_of_the_clip(tmp_p
 
     client = _FakeGenaiClient(lambda call: _no_boxes_response())
     predictor = _FakePredictor(_line_mask_at)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
+    monkeypatch.setattr("glowblade.pipeline.reacquire._build_image_predictor", lambda *a, **k: predictor)
 
     result = reacquire_pair(
         str(frames_dir), search_start_frame=50, checkpoint_path="ckpt", config_name="cfg", device="cpu",
@@ -373,7 +373,7 @@ def test_reacquire_pair_returns_none_when_it_runs_past_the_end_of_the_clip(tmp_p
     assert result is None
 
 
-from lightsaber_fx.pipeline.reacquire import reconcile_pair
+from glowblade.pipeline.reacquire import reconcile_pair
 
 
 def test_reconcile_pair_detects_and_patches_the_lost_object(tmp_path, monkeypatch):
@@ -405,8 +405,8 @@ def test_reconcile_pair_detects_and_patches_the_lost_object(tmp_path, monkeypatc
         for i in range(prompt_frame, n_frames):
             save_mask(out_masks_dir, i, _mask_at(25))
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.track_object", fake_track_object)
 
     patched = reconcile_pair(
         "unused-frames-dir", str(masks_0), str(masks_1), n_frames=50,
@@ -437,7 +437,7 @@ def test_reconcile_pair_returns_false_when_no_merge_is_detected(tmp_path, monkey
 
     called = []
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.reacquire.reacquire_pair",
+        "glowblade.pipeline.reacquire.reacquire_pair",
         lambda *a, **k: called.append(True) or None,
     )
 
@@ -463,7 +463,7 @@ def test_reconcile_pair_returns_false_when_reacquisition_finds_nothing(tmp_path,
         save_mask(str(masks_0), i, _mask_at(80))
         save_mask(str(masks_1), i, _mask_at(80))
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.reacquire_pair", lambda *a, **k: None)
 
     patched = reconcile_pair(
         "unused-frames-dir", str(masks_0), str(masks_1), n_frames=40,
@@ -490,7 +490,7 @@ def test_reconcile_pair_returns_false_instead_of_raising_when_reacquisition_erro
     def raising_reacquire_pair(*a, **k):
         raise RuntimeError("Gemini network error")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", raising_reacquire_pair)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.reacquire_pair", raising_reacquire_pair)
 
     patched = reconcile_pair(
         "unused-frames-dir", str(masks_0), str(masks_1), n_frames=40,
@@ -527,9 +527,9 @@ def test_reconcile_pair_declines_when_the_original_tracks_have_already_separated
         ]
 
     called = []
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.reacquire.track_object",
+        "glowblade.pipeline.reacquire.track_object",
         lambda *a, **k: called.append(True),
     )
 
@@ -573,8 +573,8 @@ def test_reconcile_pair_detects_and_patches_the_lost_object_when_it_is_object_1(
         for i in range(prompt_frame, n_frames):
             save_mask(out_masks_dir, i, _mask_at(25))
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fake_track_object)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.reacquire_pair", fake_reacquire_pair)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.track_object", fake_track_object)
 
     patched = reconcile_pair(
         "unused-frames-dir", str(masks_0), str(masks_1), n_frames=50,
@@ -643,7 +643,7 @@ def test_retrack_overlap_runs_patches_masks_that_validate(tmp_path, monkeypatch)
     compute_motion(str(masks_1), str(motion_path_1))
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.reacquire.track_object", _fake_track_object_threading_object_0,
+        "glowblade.pipeline.reacquire.track_object", _fake_track_object_threading_object_0,
     )
 
     patched, resolved_ranges = retrack_overlap_runs(
@@ -682,7 +682,7 @@ def test_retrack_overlap_runs_leaves_masks_untouched_when_retrack_drifts_too_far
             save_mask(out_masks_dir, i, _mask_at(60))
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.reacquire.track_object", fake_track_object_stuck_at_60,
+        "glowblade.pipeline.reacquire.track_object", fake_track_object_stuck_at_60,
     )
 
     patched, resolved_ranges = retrack_overlap_runs(
@@ -720,7 +720,7 @@ def test_retrack_overlap_runs_skips_a_run_missing_an_anchor(tmp_path, monkeypatc
     def fail_if_called(*a, **k):
         raise AssertionError("track_object should not run for a run with no anchor to validate against")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire.track_object", fail_if_called)
+    monkeypatch.setattr("glowblade.pipeline.reacquire.track_object", fail_if_called)
 
     patched, resolved_ranges = retrack_overlap_runs(
         "unused-frames-dir", str(masks_0), str(masks_1), str(motion_path_0), str(motion_path_1),
@@ -760,7 +760,7 @@ def test_retrack_overlap_runs_declines_a_run_whose_before_anchor_mask_is_empty(t
             save_mask(out_masks_dir, i, _mask_at(60))
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.reacquire.track_object", fail_if_called_for_object_0,
+        "glowblade.pipeline.reacquire.track_object", fail_if_called_for_object_0,
     )
 
     patched, resolved_ranges = retrack_overlap_runs(
@@ -788,7 +788,7 @@ def test_retrack_overlap_runs_never_raises_on_unexpected_failure(tmp_path, monke
     def boom(*a, **k):
         raise RuntimeError("unexpected failure")
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.reacquire._find_overlap_runs", boom)
+    monkeypatch.setattr("glowblade.pipeline.reacquire._find_overlap_runs", boom)
 
     patched, resolved_ranges = retrack_overlap_runs(
         "unused-frames-dir", str(masks_0), str(masks_1), str(motion_path_0), str(motion_path_1),

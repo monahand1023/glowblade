@@ -1,4 +1,4 @@
-from lightsaber_fx.progress import EtaTracker, format_duration
+from glowblade.progress import EtaTracker, format_duration
 
 
 class FakeClock:

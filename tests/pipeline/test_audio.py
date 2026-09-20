@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from lightsaber_fx.pipeline.audio import (
+from glowblade.pipeline.audio import (
     SR,
     synth_hum,
     synth_ignition,
@@ -119,7 +119,7 @@ def _rms(x):
 # ---------------------------------------------------------------------------
 
 def test_synth_whoosh_removed():
-    import lightsaber_fx.pipeline.audio as audio_mod
+    import glowblade.pipeline.audio as audio_mod
     assert not hasattr(audio_mod, "synth_whoosh")
 
 
@@ -324,7 +324,7 @@ def test_synthesize_audio_different_seeds_differ(tmp_path):
     assert not np.array_equal(audio_a, audio_b)
 
 
-@pytest.mark.parametrize("voice", ["jedi", "sith"])
+@pytest.mark.parametrize("voice", ["bright", "deep"])
 def test_synthesize_audio_voices_differ_from_neutral(tmp_path, voice):
     motion_path, meta_path = _translating_fixture(tmp_path, n_frames=90, fps=30.0)
     out_neutral = tmp_path / "neutral.wav"
@@ -338,17 +338,17 @@ def test_synthesize_audio_voices_differ_from_neutral(tmp_path, voice):
     assert not np.allclose(neutral_audio, voice_audio)
 
 
-def test_synthesize_audio_jedi_and_sith_differ_from_each_other(tmp_path):
+def test_synthesize_audio_bright_and_deep_differ_from_each_other(tmp_path):
     motion_path, meta_path = _translating_fixture(tmp_path, n_frames=90, fps=30.0)
-    out_jedi = tmp_path / "jedi.wav"
-    out_sith = tmp_path / "sith.wav"
+    out_bright = tmp_path / "bright.wav"
+    out_deep = tmp_path / "deep.wav"
 
-    synthesize_audio(motion_path, meta_path, str(out_jedi), voice="jedi", seed=4)
-    synthesize_audio(motion_path, meta_path, str(out_sith), voice="sith", seed=4)
+    synthesize_audio(motion_path, meta_path, str(out_bright), voice="bright", seed=4)
+    synthesize_audio(motion_path, meta_path, str(out_deep), voice="deep", seed=4)
 
-    jedi_audio, _ = sf.read(str(out_jedi))
-    sith_audio, _ = sf.read(str(out_sith))
-    assert not np.allclose(jedi_audio, sith_audio)
+    bright_audio, _ = sf.read(str(out_bright))
+    deep_audio, _ = sf.read(str(out_deep))
+    assert not np.allclose(bright_audio, deep_audio)
 
 
 def test_synthesize_audio_rejects_unknown_voice(tmp_path):

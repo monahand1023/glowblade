@@ -4,10 +4,10 @@ import cv2
 import numpy as np
 from click.testing import CliRunner
 
-import lightsaber_fx.paths as paths_module
-from lightsaber_fx.cli import main
-from lightsaber_fx.pipeline.blade import compute_motion, save_mask
-from lightsaber_fx.pipeline.job_meta import JobNotRerenderableError, write_job_meta
+import glowblade.paths as paths_module
+from glowblade.cli import main
+from glowblade.pipeline.blade import compute_motion, save_mask
+from glowblade.pipeline.job_meta import JobNotRerenderableError, write_job_meta
 
 
 def _fake_checkpoint(appdata_dir):
@@ -22,7 +22,7 @@ def test_cli_help_exits_zero():
     runner = CliRunner()
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
-    assert "lightsaber-fx" in result.output or "Usage" in result.output
+    assert "glowblade" in result.output or "Usage" in result.output
 
 
 def test_help_lists_all_subcommands():
@@ -35,7 +35,7 @@ def test_help_lists_all_subcommands():
 
 def test_setup_command_invokes_bootstrap(monkeypatch):
     calls = {}
-    monkeypatch.setattr("lightsaber_fx.cli.bootstrap", lambda force: calls.__setitem__("force", force))
+    monkeypatch.setattr("glowblade.cli.bootstrap", lambda force: calls.__setitem__("force", force))
 
     runner = CliRunner()
     result = runner.invoke(main, ["setup", "--force"])
@@ -45,7 +45,7 @@ def test_setup_command_invokes_bootstrap(monkeypatch):
 
 
 def test_clean_command_reports_removed_count(monkeypatch):
-    monkeypatch.setattr("lightsaber_fx.cli.paths.clean_jobs", lambda: 3)
+    monkeypatch.setattr("glowblade.cli.paths.clean_jobs", lambda: 3)
 
     runner = CliRunner()
     result = runner.invoke(main, ["clean"])
@@ -60,10 +60,10 @@ def test_run_command_parses_options_and_calls_run_pipeline(tmp_path, monkeypatch
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
-    monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
+    monkeypatch.setattr("glowblade.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.detect_blade", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
+    monkeypatch.setattr("glowblade.cli.select_device", lambda: "cpu")
 
     captured = {}
 
@@ -71,7 +71,7 @@ def test_run_command_parses_options_and_calls_run_pipeline(tmp_path, monkeypatch
         captured.update(kwargs)
         return kwargs["output_path"]
 
-    monkeypatch.setattr("lightsaber_fx.cli.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("glowblade.cli.run_pipeline", fake_run_pipeline)
 
     runner = CliRunner()
     result = runner.invoke(main, ["run", str(video), "--color", "blue", "--intensity", "0.5"])
@@ -88,9 +88,9 @@ def test_run_command_aborts_when_no_points_selected(tmp_path, monkeypatch):
     video.write_bytes(b"fake video bytes")
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
-    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([], []))
+    monkeypatch.setattr("glowblade.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.detect_blade", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.pick_points_interactive", lambda *a, **k: ([], []))
 
     runner = CliRunner()
     result = runner.invoke(main, ["run", str(video)])
@@ -108,15 +108,15 @@ def test_run_command_fails_fast_when_sam2_not_set_up(tmp_path, monkeypatch):
     def fail_if_called(*a, **k):
         raise AssertionError("should not be reached when the checkpoint is missing")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", fail_if_called)
-    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", fail_if_called)
-    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", fail_if_called)
+    monkeypatch.setattr("glowblade.cli.extract_frame_at", fail_if_called)
+    monkeypatch.setattr("glowblade.cli.detect_blade", fail_if_called)
+    monkeypatch.setattr("glowblade.cli.pick_points_interactive", fail_if_called)
 
     runner = CliRunner()
     result = runner.invoke(main, ["run", str(video)])
 
     assert result.exit_code != 0
-    assert "lightsaber-fx setup" in result.output
+    assert "glowblade setup" in result.output
 
 
 def test_run_command_rejects_out_of_range_intensity(tmp_path, monkeypatch):
@@ -146,7 +146,7 @@ def test_serve_command_invokes_uvicorn_with_host_and_port(monkeypatch):
     result = runner.invoke(main, ["serve", "--host", "0.0.0.0", "--port", "9000"])
 
     assert result.exit_code == 0
-    assert captured == {"app_path": "lightsaber_fx.web.server:app", "host": "0.0.0.0", "port": 9000}
+    assert captured == {"app_path": "glowblade.web.server:app", "host": "0.0.0.0", "port": 9000}
 
 
 def test_serve_open_browser_flag_does_not_error(monkeypatch):
@@ -172,17 +172,17 @@ def test_run_command_keeps_masks_but_removes_frames_by_default(tmp_path, monkeyp
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
-    monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
+    monkeypatch.setattr("glowblade.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.detect_blade", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
+    monkeypatch.setattr("glowblade.cli.select_device", lambda: "cpu")
 
     def fake_run_pipeline(**kwargs):
         job_dir_path = Path(kwargs["job_dir"])
         _fake_full_render(job_dir_path)
         return kwargs["output_path"]
 
-    monkeypatch.setattr("lightsaber_fx.cli.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("glowblade.cli.run_pipeline", fake_run_pipeline)
 
     runner = CliRunner()
     result = runner.invoke(main, ["run", str(video)])
@@ -202,17 +202,17 @@ def test_run_command_keep_intermediate_also_keeps_frames(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
 
-    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
-    monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
+    monkeypatch.setattr("glowblade.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.detect_blade", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
+    monkeypatch.setattr("glowblade.cli.select_device", lambda: "cpu")
 
     def fake_run_pipeline(**kwargs):
         job_dir_path = Path(kwargs["job_dir"])
         _fake_full_render(job_dir_path)
         return kwargs["output_path"]
 
-    monkeypatch.setattr("lightsaber_fx.cli.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("glowblade.cli.run_pipeline", fake_run_pipeline)
 
     runner = CliRunner()
     result = runner.invoke(main, ["run", str(video), "--keep-intermediate"])
@@ -232,7 +232,7 @@ def test_run_command_keep_intermediate_also_keeps_frames(tmp_path, monkeypatch):
 def test_rerender_command_parses_options_and_calls_rerender_pipeline(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jobs"
     (jobs_dir / "abc123").mkdir(parents=True)
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     captured = {}
 
@@ -240,12 +240,12 @@ def test_rerender_command_parses_options_and_calls_rerender_pipeline(tmp_path, m
         captured.update(kwargs)
         return kwargs["output_path"]
 
-    monkeypatch.setattr("lightsaber_fx.cli.rerender_pipeline", fake_rerender_pipeline)
+    monkeypatch.setattr("glowblade.cli.rerender_pipeline", fake_rerender_pipeline)
 
     runner = CliRunner()
     result = runner.invoke(
         main,
-        ["rerender", "abc123", "--color", "blue", "--intensity", "0.6", "--voice", "sith",
+        ["rerender", "abc123", "--color", "blue", "--intensity", "0.6", "--voice", "deep",
          "--no-blade-extend", "--output", "out.mp4"],
     )
 
@@ -253,7 +253,7 @@ def test_rerender_command_parses_options_and_calls_rerender_pipeline(tmp_path, m
     assert captured["job_dir"] == str(jobs_dir / "abc123")
     assert captured["color"] == "blue"
     assert captured["intensity"] == 0.6
-    assert captured["voice"] == "sith"
+    assert captured["voice"] == "deep"
     assert captured["blade_extend"] is False
     assert captured["output_path"] == "out.mp4"
 
@@ -261,7 +261,7 @@ def test_rerender_command_parses_options_and_calls_rerender_pipeline(tmp_path, m
 def test_rerender_command_rejects_out_of_range_intensity(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jobs"
     (jobs_dir / "abc123").mkdir(parents=True)
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     runner = CliRunner()
     result = runner.invoke(main, ["rerender", "abc123", "--intensity", "5"])
@@ -273,7 +273,7 @@ def test_rerender_command_rejects_out_of_range_intensity(tmp_path, monkeypatch):
 def test_rerender_command_errors_when_job_id_unknown(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir()
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     runner = CliRunner()
     result = runner.invoke(main, ["rerender", "does-not-exist"])
@@ -285,12 +285,12 @@ def test_rerender_command_errors_when_job_id_unknown(tmp_path, monkeypatch):
 def test_rerender_command_reports_clear_error_when_job_not_rerenderable(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jobs"
     (jobs_dir / "abc123").mkdir(parents=True)
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     def fake_rerender_pipeline(**kwargs):
         raise JobNotRerenderableError("Job 'abc123' is not re-renderable: no masks/")
 
-    monkeypatch.setattr("lightsaber_fx.cli.rerender_pipeline", fake_rerender_pipeline)
+    monkeypatch.setattr("glowblade.cli.rerender_pipeline", fake_rerender_pipeline)
 
     runner = CliRunner()
     result = runner.invoke(main, ["rerender", "abc123"])
@@ -306,7 +306,7 @@ def test_rerender_command_reports_clear_error_when_job_not_rerenderable(tmp_path
 
 def test_jobs_command_lists_rerenderable_and_annotates_broken_job(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jobs"
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     good = jobs_dir / "good123"
     good.mkdir(parents=True)
@@ -336,7 +336,7 @@ def test_jobs_command_shows_the_object_count_for_a_multi_object_job(tmp_path, mo
     # `rerender` can't touch a multi-object job, so a listing that shows it
     # identically to a single-object one is lying about what it is offering.
     jobs_dir = tmp_path / "jobs"
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake")
@@ -370,7 +370,7 @@ def test_jobs_command_shows_the_object_count_for_a_multi_object_job(tmp_path, mo
 def test_jobs_command_reports_no_jobs_found(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir()
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     runner = CliRunner()
     result = runner.invoke(main, ["jobs"])
@@ -384,7 +384,7 @@ def _proposal(frame_index=135, points=None):
     what the picker would be shown."""
     import numpy as np
 
-    from lightsaber_fx.pipeline.detect import BladeProposal, MotionSeed
+    from glowblade.pipeline.detect import BladeProposal, MotionSeed
 
     points = points or [[377, 541], [483, 557], [588, 563]]
     mask = np.zeros((24, 32), dtype=bool)
@@ -403,12 +403,12 @@ def _auto_run_harness(tmp_path, monkeypatch, proposal):
     video.write_bytes(b"fake video bytes")
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
-    monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
-    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", lambda *a, **k: proposal)
+    monkeypatch.setattr("glowblade.cli.select_device", lambda: "cpu")
+    monkeypatch.setattr("glowblade.cli.detect_blade", lambda *a, **k: proposal)
 
     seen = {}
     monkeypatch.setattr(
-        "lightsaber_fx.cli.extract_frame_at",
+        "glowblade.cli.extract_frame_at",
         lambda video_path, index, out_path: seen.update(extracted_index=index),
     )
 
@@ -416,13 +416,13 @@ def _auto_run_harness(tmp_path, monkeypatch, proposal):
         seen["picker_proposal"] = proposal
         return (proposal.points, proposal.labels) if proposal else ([[1, 2]], [1])
 
-    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", fake_picker)
+    monkeypatch.setattr("glowblade.cli.pick_points_interactive", fake_picker)
 
     def fake_run_pipeline(**kwargs):
         seen.update(kwargs)
         return kwargs["output_path"]
 
-    monkeypatch.setattr("lightsaber_fx.cli.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("glowblade.cli.run_pipeline", fake_run_pipeline)
     return video, seen
 
 
@@ -466,18 +466,18 @@ def test_run_command_no_auto_skips_detection_entirely(tmp_path, monkeypatch):
     video.write_bytes(b"fake video bytes")
     monkeypatch.setattr(paths_module.platformdirs, "user_data_dir", lambda name: str(tmp_path / "appdata"))
     _fake_checkpoint(tmp_path / "appdata")
-    monkeypatch.setattr("lightsaber_fx.cli.select_device", lambda: "cpu")
+    monkeypatch.setattr("glowblade.cli.select_device", lambda: "cpu")
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("detect_blade ran despite --no-auto")
 
-    monkeypatch.setattr("lightsaber_fx.cli.detect_blade", fail_if_called)
-    monkeypatch.setattr("lightsaber_fx.cli.extract_frame_at", lambda *a, **k: None)
-    monkeypatch.setattr("lightsaber_fx.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
+    monkeypatch.setattr("glowblade.cli.detect_blade", fail_if_called)
+    monkeypatch.setattr("glowblade.cli.extract_frame_at", lambda *a, **k: None)
+    monkeypatch.setattr("glowblade.cli.pick_points_interactive", lambda *a, **k: ([[1, 2]], [1]))
 
     captured = {}
     monkeypatch.setattr(
-        "lightsaber_fx.cli.run_pipeline",
+        "glowblade.cli.run_pipeline",
         lambda **kwargs: (captured.update(kwargs), kwargs["output_path"])[1],
     )
 
@@ -501,7 +501,7 @@ def test_run_command_falls_back_to_clicking_when_detection_finds_nothing(tmp_pat
 
 def test_inspect_command_prints_each_sabers_source(tmp_path, monkeypatch, capsys):
     jobs_dir = tmp_path / "jobs"
-    monkeypatch.setattr("lightsaber_fx.cli.paths.get_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr("glowblade.cli.paths.get_jobs_dir", lambda: jobs_dir)
 
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake")

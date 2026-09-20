@@ -56,7 +56,7 @@ of the original sound rather than an imitation of any recording.
 | **B2.6** | Ignition and power-down as filter/pitch sweeps | Both are the hum under a swept pitch and a swept resonant low-pass, up for ignition and down for retraction, rather than separate one-shot samples. |
 | **B2.7** | Gain-staging and a soft limiter | Layers are mixed at deliberate levels and the sum passes through a `tanh` limiter with a 0.95 ceiling. A hard peak-normalize divide would let one transient set the level for the whole clip. |
 | **B2.8** | Stereo panning from the blade's position | The blade's horizontal position across the frame, normalized to the clip's own observed range, drives an equal-power pan. |
-| **B2.9** | Voices | `neutral`, `jedi`, `sith` change base pitch, detune and waveshaper drive. Deliberately independent of `--color`, so choosing red does not silently change the soundtrack. |
+| **B2.9** | Voices | `neutral`, `bright`, `deep` change base pitch, detune and waveshaper drive. Deliberately independent of `--color`, so choosing red does not silently change the soundtrack. |
 
 ## The swing loudness bug (B-fix)
 
@@ -130,7 +130,7 @@ So `rerender` keeps the masks and `motion.npz` and re-extracts the frames
 from the source clip. The cost of that choice is a real failure mode: a job
 stops being re-renderable if its source clip is moved or deleted, which is
 why the source path is recorded per job (`pipeline/job_meta.py`) and why
-`lightsaber-fx jobs` reports *why* a job cannot be reused.
+`glowblade jobs` reports *why* a job cannot be reused.
 
 `motion.npz` is not recomputed either, and not because it is slow — it is
 cheap. It depends only on the masks, and no `rerender` parameter can change

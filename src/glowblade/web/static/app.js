@@ -99,7 +99,7 @@ let previewGeneration = 0;
 let lastPreviewFetch = 0;
 const PREVIEW_MIN_INTERVAL_MS = 800;
 
-// Mirrors format_duration() in lightsaber_fx/progress.py.
+// Mirrors format_duration() in glowblade/progress.py.
 function formatDuration(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   if (s < 60) return `${s}s`;

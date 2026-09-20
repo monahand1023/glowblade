@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline.blade import (
+from glowblade.pipeline.blade import (
     BEND_SIGNIFICANCE_PX,
     MIN_ELONGATION,
     BladeGeometry,
@@ -843,7 +843,7 @@ def test_compute_motion_uses_reference_point_continuity_to_reject_a_growing_seco
     _write_masks(masks_dir, masks)
     motion_path = tmp_path / "motion.npz"
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         compute_motion(str(masks_dir), str(motion_path))
 
     motion = load_motion(str(motion_path))
@@ -859,7 +859,7 @@ def test_compute_motion_debug_logs_per_frame_geometry(tmp_path, caplog):
     _write_masks(masks_dir, [_bar_mask(200)])
     motion_path = tmp_path / "motion.npz"
 
-    with caplog.at_level("DEBUG", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("DEBUG", logger="glowblade.pipeline.blade"):
         compute_motion(str(masks_dir), str(motion_path))
 
     assert "length=" in caplog.text
@@ -948,7 +948,7 @@ def test_compute_motion_logs_a_warning_for_a_position_glitch(tmp_path, caplog):
     _write_masks(masks_dir, masks)
     motion_path = tmp_path / "motion.npz"
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         compute_motion(str(masks_dir), str(motion_path))
 
     assert "tracking glitch" in caplog.text
@@ -974,7 +974,7 @@ def test_compute_motion_logs_a_warning_for_an_unresolved_multi_frame_jump(tmp_pa
     _write_masks(masks_dir, masks)
     motion_path = tmp_path / "motion.npz"
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         compute_motion(str(masks_dir), str(motion_path))
 
     assert "doesn't match the bracketed single-frame-glitch pattern" in caplog.text
@@ -1005,7 +1005,7 @@ def test_compute_motion_logs_a_warning_for_a_length_jump(tmp_path, caplog):
     _write_masks(masks_dir, masks)
     motion_path = tmp_path / "motion.npz"
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         compute_motion(str(masks_dir), str(motion_path))
 
     assert "fitted length jumped" in caplog.text
@@ -1026,7 +1026,7 @@ def test_compute_motion_does_not_warn_for_an_ordinary_length_change(tmp_path, ca
     _write_masks(masks_dir, masks)
     motion_path = tmp_path / "motion.npz"
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         compute_motion(str(masks_dir), str(motion_path))
 
     assert "fitted length jumped" not in caplog.text
@@ -1917,7 +1917,7 @@ def test_suppress_overlap_bleed_logs_a_warning_for_a_held_run(tmp_path, caplog):
     _write_lengths(motion_a, [100, 500, 600, 150])
     _write_lengths(motion_b, [200, 500, 600, 250])
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
 
     assert "overlapped" in caplog.text
@@ -1937,7 +1937,7 @@ def test_suppress_overlap_bleed_logs_an_extra_warning_for_a_long_interpolated_sp
     _write_lengths(motion_a, [100] * n)
     _write_lengths(motion_b, [200] * n)
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
 
     assert "long enough that a straight line" in caplog.text
@@ -1953,7 +1953,7 @@ def test_suppress_overlap_bleed_does_not_log_the_long_span_warning_for_a_short_r
     _write_lengths(motion_a, [100, 500, 600, 150])
     _write_lengths(motion_b, [200, 500, 600, 250])
 
-    with caplog.at_level("WARNING", logger="lightsaber_fx.pipeline.blade"):
+    with caplog.at_level("WARNING", logger="glowblade.pipeline.blade"):
         suppress_overlap_bleed(str(motion_a), str(masks_a), str(motion_b), str(masks_b))
 
     assert "long enough that a straight line" not in caplog.text

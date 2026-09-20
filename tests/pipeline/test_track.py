@@ -4,10 +4,10 @@ import cv2
 import numpy as np
 import pytest
 
-from lightsaber_fx import paths
-from lightsaber_fx.pipeline.blade import load_mask
-from lightsaber_fx.pipeline.detect import BladeProposal, MotionSeed
-from lightsaber_fx.pipeline.track import (
+from glowblade import paths
+from glowblade.pipeline.blade import load_mask
+from glowblade.pipeline.detect import BladeProposal, MotionSeed
+from glowblade.pipeline.track import (
     overlay_proposal,
     pick_points_interactive,
     track_object,
@@ -16,7 +16,7 @@ from lightsaber_fx.pipeline.track import (
 
 requires_sam2_checkpoint = pytest.mark.skipif(
     not paths.get_checkpoint_path().exists(),
-    reason="SAM2 checkpoint not installed; run `lightsaber-fx setup` first",
+    reason="SAM2 checkpoint not installed; run `glowblade setup` first",
 )
 
 

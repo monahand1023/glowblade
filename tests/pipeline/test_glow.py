@@ -4,8 +4,8 @@ import cv2
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline import blade
-from lightsaber_fx.pipeline.glow import (
+from glowblade.pipeline import blade
+from glowblade.pipeline.glow import (
     _capsule_mask,
     ignition_fraction,
     knoll_darken,
@@ -609,7 +609,7 @@ def test_render_glow_multi_composites_two_independently_colored_blades(tmp_path)
     clip_b = _build_blade_clip(tmp_path, "objB", n_frames=5, blade_x0=150, dx=2, blade_len=30, blade_height=8, width=220)
 
     output_frames_dir = tmp_path / "glow_frames"
-    from lightsaber_fx.pipeline.glow import render_glow_multi
+    from glowblade.pipeline.glow import render_glow_multi
 
     render_glow_multi(
         clip_a["frames_dir"],
@@ -671,7 +671,7 @@ def test_render_glow_multi_with_one_object_matches_render_glow(tmp_path):
         out_single, clip["motion_path"], color=(40, 40, 255), spill_strength=0.35,
         ignition_ramp_seconds=0,
     )
-    from lightsaber_fx.pipeline.glow import render_glow_multi
+    from glowblade.pipeline.glow import render_glow_multi
     render_glow_multi(
         clip["frames_dir"],
         [{"masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"], "color": (40, 40, 255), "intensity": 0.35}],
@@ -701,7 +701,7 @@ def test_render_glow_multi_light_wrap_uses_each_objects_own_color(tmp_path):
     clip_b = _build_blade_clip(tmp_path, "wrapB", n_frames=2, blade_x0=150, dx=2, blade_len=30, blade_height=8, width=220)
 
     output_frames_dir = tmp_path / "glow_frames"
-    from lightsaber_fx.pipeline.glow import render_glow_multi
+    from glowblade.pipeline.glow import render_glow_multi
 
     render_glow_multi(
         clip_a["frames_dir"],
@@ -738,7 +738,7 @@ def test_render_glow_multi_light_wrap_uses_each_objects_own_color(tmp_path):
 def test_render_glow_multi_rejects_an_unsupported_object_count(tmp_path):
     # Zero objects used to render an untouched plate -- a silently wrong
     # result rather than an error.
-    from lightsaber_fx.pipeline.glow import render_glow_multi
+    from glowblade.pipeline.glow import render_glow_multi
 
     clip = _build_blade_clip(tmp_path, "guard", n_frames=1)
     one = {
@@ -764,7 +764,7 @@ def test_stabilize_tip_hilt_leaves_bend_completely_unchanged_on_a_flip():
     # tip/hilt continuity flip has nothing to swap it with. This locks
     # in that finding as a test, correcting an assumption in the design
     # spec that turned out to be unnecessary once worked through.
-    from lightsaber_fx.pipeline.glow import _stabilize_tip_hilt
+    from glowblade.pipeline.glow import _stabilize_tip_hilt
     tip = np.array([[10.0, 0.0], [-10.0, 0.0]])   # axis flips sign at frame 1
     hilt = np.array([[0.0, 0.0], [0.0, 0.0]])
     axis = np.array([[1.0, 0.0], [-1.0, 0.0]])
@@ -796,7 +796,7 @@ def test_render_glow_multi_never_renders_a_curved_blade_even_when_bend_is_presen
     np.savez(clip["motion_path"], **motion)
 
     out_dir = str(tmp_path / "out")
-    from lightsaber_fx.pipeline.glow import render_glow_multi
+    from glowblade.pipeline.glow import render_glow_multi
     render_glow_multi(
         clip["frames_dir"],
         [{"masks_dir": clip["masks_dir"], "motion_path": clip["motion_path"],

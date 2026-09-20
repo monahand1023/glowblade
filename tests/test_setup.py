@@ -1,4 +1,4 @@
-import lightsaber_fx.setup as lfx_setup
+import glowblade.setup as lfx_setup
 
 
 def test_bootstrap_clones_installs_and_downloads_when_nothing_present(tmp_path, monkeypatch):

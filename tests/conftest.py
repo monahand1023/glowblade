@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline.blade import compute_motion, save_mask
-from lightsaber_fx.pipeline.job_meta import write_job_meta
+from glowblade.pipeline.blade import compute_motion, save_mask
+from glowblade.pipeline.job_meta import write_job_meta
 
 
 def _write_tiny_video(path, n_frames=5, width=64, height=48, fps=10.0):

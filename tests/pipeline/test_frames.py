@@ -1,6 +1,6 @@
 import os
 
-from lightsaber_fx.pipeline.frames import extract_first_frame, extract_frames
+from glowblade.pipeline.frames import extract_first_frame, extract_frames
 
 
 def test_extract_frames_writes_one_jpg_per_frame(tmp_path, tiny_video_path):

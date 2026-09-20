@@ -511,7 +511,7 @@ def rerender_pipeline(
     # then die on a bare FileNotFoundError for motion.npz. Say so instead.
     if info.object_ids is not None:
         raise job_meta.JobNotRerenderableError(
-            f"This job tracked {len(info.object_ids)} objects; `lightsaber-fx rerender` "
+            f"This job tracked {len(info.object_ids)} objects; `glowblade rerender` "
             "only handles single-object jobs. Re-render it from the web app."
         )
 

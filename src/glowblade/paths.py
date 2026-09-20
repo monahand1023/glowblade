@@ -3,7 +3,7 @@ from pathlib import Path
 
 import platformdirs
 
-APP_NAME = "lightsaber-fx"
+APP_NAME = "glowblade"
 
 
 def get_data_dir() -> Path:

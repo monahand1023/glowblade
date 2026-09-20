@@ -4,8 +4,8 @@ import time
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline.blade import compute_motion, save_mask
-from lightsaber_fx.pipeline.job_meta import (
+from glowblade.pipeline.blade import compute_motion, save_mask
+from glowblade.pipeline.job_meta import (
     JobNotRerenderableError,
     describe_job,
     read_job_meta,

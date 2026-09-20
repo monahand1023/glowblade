@@ -1,7 +1,7 @@
 """Lightsaber glow compositing (Phase B1 of the fidelity upgrade).
 
 Rewritten around Phase A's ``BladeGeometry`` contract
-(``lightsaber_fx.pipeline.blade``) and the VFX practices catalogued in
+(``glowblade.pipeline.blade``) and the VFX practices catalogued in
 docs/design-notes.md's "B1 -- the glow renderer" table. Each helper below
 is labelled with the item it implements.
 
@@ -579,7 +579,7 @@ def render_glow(
     (B1.10) into `output_frames_dir`, named ``{idx:05d}.png``.
 
     Reads blade geometry from `motion_path` (see
-    ``lightsaber_fx.pipeline.blade.load_motion``) instead of writing a
+    ``glowblade.pipeline.blade.load_motion``) instead of writing a
     centroid track -- motion is now produced upstream by the "motion"
     pipeline stage. Each numbered step below is documented against
     docs/design-notes.md's B1 table.

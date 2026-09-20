@@ -1,4 +1,4 @@
-import lightsaber_fx.paths as paths_module
+import glowblade.paths as paths_module
 
 
 def test_get_data_dir_creates_directory(tmp_path, monkeypatch):

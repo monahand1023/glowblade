@@ -88,14 +88,14 @@ SR = 44100
 # ---------------------------------------------------------------------------
 # Voicing (B2.9): `voice` is a parameter to the synthesis functions below,
 # not a forked code path. `neutral` must sound like the current-but-improved
-# saber; `jedi` is higher/smoother/less distorted; `sith` is deeper/heavier/
+# saber; `bright` is higher/smoother/less distorted; `deep` is deeper/heavier/
 # more distorted.
 # ---------------------------------------------------------------------------
 
 _VOICE_PARAMS = {
     "neutral": {"pitch_mult": 1.00, "drive": 1.4, "buzz_gain": 1.00, "brightness": 1.00},
-    "jedi":    {"pitch_mult": 1.09, "drive": 0.7, "buzz_gain": 0.65, "brightness": 1.15},
-    "sith":    {"pitch_mult": 0.82, "drive": 2.6, "buzz_gain": 1.45, "brightness": 0.80},
+    "bright":  {"pitch_mult": 1.09, "drive": 0.7, "buzz_gain": 0.65, "brightness": 1.15},
+    "deep":    {"pitch_mult": 0.82, "drive": 2.6, "buzz_gain": 1.45, "brightness": 0.80},
 }
 
 
@@ -103,7 +103,7 @@ def _voice_params(voice):
     try:
         return _VOICE_PARAMS[voice]
     except KeyError:
-        raise ValueError(f"Unrecognized voice: {voice!r}. Use neutral, jedi, or sith.")
+        raise ValueError(f"Unrecognized voice: {voice!r}. Use neutral, bright, or deep.")
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ def _time_varying_lowpass(x, fc_t, sr=SR):
 
 def _waveshape(x, drive):
     """Soft-clip waveshaper distortion, unity-gain-normalized at |x|=1 so
-    `drive` purely controls harmonic content, not level. Used for the `sith`
+    `drive` purely controls harmonic content, not level. Used for the `deep`
     voice's heavier distortion (B2.9), and (B-fix, dynamic-range/HF rewrite)
     for tying a swing's harmonic brightness to its instantaneous speed:
     `drive` may be a per-sample array as well as a scalar, so distortion
@@ -618,7 +618,7 @@ def synthesize_audio(
     `blade.save_motion`, read via `blade.load_motion`; swings are driven by
     `blade.tip_speed`/`blade.angular_speed`, not the mask centroid.
     `progress_cb(pct, message)` reports step-level progress. `voice`
-    ("neutral" | "jedi" | "sith") and `seed` (for reproducible renders) are
+    ("neutral" | "bright" | "deep") and `seed` (for reproducible renders) are
     forwarded to every synthesis layer.
     """
     def report(pct, message):

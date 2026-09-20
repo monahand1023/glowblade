@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline.vision_detect import _parse_gemini_response, _validate_box_mask
+from glowblade.pipeline.vision_detect import _parse_gemini_response, _validate_box_mask
 
 FRAME_W, FRAME_H = 1280, 720
 
@@ -131,7 +131,7 @@ def test_validate_box_mask_rejects_a_speckled_mask():
     assert _validate_box_mask(mask, MAX_MASK_AREA) is None
 
 
-from lightsaber_fx.pipeline.vision_detect import detect_blades_vlm
+from glowblade.pipeline.vision_detect import detect_blades_vlm
 
 
 class _FakeGenaiResponse:
@@ -196,7 +196,7 @@ def test_detect_blades_vlm_returns_one_proposal_per_validated_box(
     client = _FakeGenaiClient(text)
     predictor = _FakePredictor(lambda box: _bar_mask_at(*box))
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        "glowblade.pipeline.vision_detect._build_image_predictor",
         lambda *a, **k: predictor,
     )
 
@@ -219,7 +219,7 @@ def test_detect_blades_vlm_calls_predict_once_per_box_on_one_predictor(
     client = _FakeGenaiClient(text)
     predictor = _FakePredictor(lambda box: _bar_mask_at(*box))
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        "glowblade.pipeline.vision_detect._build_image_predictor",
         lambda *a, **k: predictor,
     )
 
@@ -250,7 +250,7 @@ def test_detect_blades_vlm_drops_a_box_that_fails_validation(
 
     predictor = _FakePredictor(masks_for_box)
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        "glowblade.pipeline.vision_detect._build_image_predictor",
         lambda *a, **k: predictor,
     )
 
@@ -291,7 +291,7 @@ def test_detect_blades_vlm_raises_when_the_selected_frame_cannot_be_read(
     # Gemini is ever called -- it is a real technical failure, not "Gemini
     # searched and found nothing", so it must raise rather than return [].
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.vision_detect._read_frame", lambda cap, index: None,
+        "glowblade.pipeline.vision_detect._read_frame", lambda cap, index: None,
     )
     client = _FakeGenaiClient(json.dumps({"objects": []}))
 
@@ -325,7 +325,7 @@ def test_detect_blades_vlm_all_proposals_share_one_frame_index(
     client = _FakeGenaiClient(text)
     predictor = _FakePredictor(lambda box: _bar_mask_at(*box))
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        "glowblade.pipeline.vision_detect._build_image_predictor",
         lambda *a, **k: predictor,
     )
 
@@ -336,8 +336,8 @@ def test_detect_blades_vlm_all_proposals_share_one_frame_index(
     assert len({p.frame_index for p in proposals}) == 1
 
 
-from lightsaber_fx.pipeline.detect import BladeProposal
-from lightsaber_fx.pipeline.vision_detect import _dedupe_by_mask_iou
+from glowblade.pipeline.detect import BladeProposal
+from glowblade.pipeline.vision_detect import _dedupe_by_mask_iou
 
 
 def _proposal(mask, elongation):
@@ -388,7 +388,7 @@ def test_detect_blades_vlm_dedupes_two_gemini_boxes_that_segment_the_same_blade(
     shared_mask = _bar_mask_at(32, 24, 288, 36)
     predictor = _FakePredictor(lambda box: shared_mask)
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.vision_detect._build_image_predictor",
+        "glowblade.pipeline.vision_detect._build_image_predictor",
         lambda *a, **k: predictor,
     )
 
@@ -413,8 +413,8 @@ def test_detect_blades_vlm_finds_multiple_swords_in_a_real_clip():
     # SAM2 inference -- skipped everywhere except a machine with both a
     # Gemini key and the SAM2 checkpoint installed, matching how
     # test_track.py already skips its own real-SAM2 tests.
-    from lightsaber_fx import paths
-    from lightsaber_fx.device import select_device
+    from glowblade import paths
+    from glowblade.device import select_device
 
     clip = "/Users/danm/Desktop/lightsaber/test-clips-mixkit/trimmed/01_knights_battling.mp4"
     if not os.path.exists(clip):

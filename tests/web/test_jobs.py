@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from lightsaber_fx.web.jobs import JobManager
+from glowblade.web.jobs import JobManager
 
 
 def test_start_runs_pipeline_and_records_done_state():

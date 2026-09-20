@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
-from lightsaber_fx.pipeline.detect import (
+from glowblade.pipeline.detect import (
     MIN_ELONGATION,
     BladeProposal,
     MotionSeed,
@@ -152,7 +152,7 @@ def _blob_mask(point, radius=22):
 def _install_fake_sam2(monkeypatch, masks_for):
     calls = []
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.detect._build_image_predictor",
+        "glowblade.pipeline.detect._build_image_predictor",
         lambda checkpoint_path, config_name, device: _FakePredictor(masks_for, calls),
     )
     return calls
@@ -279,7 +279,7 @@ def test_detect_blade_returns_none_for_a_clip_too_short_to_have_motion(
         raise AssertionError("built a SAM2 predictor for a clip with no motion")
 
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.detect._build_image_predictor", fail_if_called
+        "glowblade.pipeline.detect._build_image_predictor", fail_if_called
     )
     path = tmp_path / "one-frame.mp4"
     _write_video(path, lambda frame, i: _rotating_bar(frame, i), n_frames=1)
@@ -442,7 +442,7 @@ def test_min_elongation_is_above_what_a_standing_person_measures():
     # Pins the reason the floor was raised. A standing human body fitted 3.7
     # on the sword clip, which the old 3.5 floor accepted -- so the floor has
     # to sit above the range a person can reach, not merely above a hand.
-    from lightsaber_fx.pipeline.detect import MIN_ELONGATION as floor
+    from glowblade.pipeline.detect import MIN_ELONGATION as floor
 
     assert floor > 4.0, "a standing person fits at ~3.7; the floor must clear it"
 
@@ -450,7 +450,7 @@ def test_min_elongation_is_above_what_a_standing_person_measures():
 def test_moving_fraction_is_permissive_when_no_flow_map_is_available():
     # A MotionSeed built by hand (by a caller or a test) has no flow map, and
     # must not be silently rejected by a check it cannot feed.
-    from lightsaber_fx.pipeline.detect import _moving_fraction
+    from glowblade.pipeline.detect import _moving_fraction
 
     mask = np.zeros((10, 10), dtype=bool)
     mask[2:8, 4] = True
@@ -462,7 +462,7 @@ def test_moving_fraction_rescales_a_flow_map_of_a_different_size():
     # The flow runs at FLOW_LONG_EDGE while masks are at source resolution, so
     # these two are routinely different shapes. Comparing them without a
     # resize would raise, or worse, index the wrong pixels.
-    from lightsaber_fx.pipeline.detect import _moving_fraction
+    from glowblade.pipeline.detect import _moving_fraction
 
     mask = np.zeros((40, 40), dtype=bool)
     mask[10:30, 20] = True
@@ -473,7 +473,7 @@ def test_moving_fraction_rescales_a_flow_map_of_a_different_size():
 
 
 def test_speckle_count_ignores_the_largest_component():
-    from lightsaber_fx.pipeline.detect import _speckle_count
+    from glowblade.pipeline.detect import _speckle_count
 
     mask = np.zeros((40, 40), dtype=bool)
     mask[5:35, 20] = True          # the object
@@ -496,7 +496,7 @@ def test_speckle_count_ignores_the_largest_component():
 # --------------------------------------------------------------------------
 
 def _candidates_for(mask, *, point=(50, 50), motion_area=400.0, max_mask_area=1e9):
-    from lightsaber_fx.pipeline.detect import MotionSeed, _candidate_masks
+    from glowblade.pipeline.detect import MotionSeed, _candidate_masks
 
     seed = MotionSeed(
         frame_index=0, point=list(point), speed=5.0, area=int(motion_area),

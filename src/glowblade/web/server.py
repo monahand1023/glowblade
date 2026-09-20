@@ -23,7 +23,7 @@ from .jobs import JobManager
 
 STATIC_DIR = Path(__file__).parent / "static"
 JOB_ID_RE = re.compile(r"[0-9a-zA-Z_-]{1,64}")
-VALID_VOICES = ("neutral", "jedi", "sith")
+VALID_VOICES = ("neutral", "bright", "deep")
 VALID_SOURCES = ("manual", "vlm", "motion")
 
 app = FastAPI()
@@ -167,7 +167,7 @@ def detect(job_id: str):
     if not paths.get_checkpoint_path().exists():
         raise HTTPException(
             status_code=400,
-            detail="SAM2 is not installed yet — run `lightsaber-fx setup` first.",
+            detail="SAM2 is not installed yet — run `glowblade setup` first.",
         )
 
     proposals, source = _detect_proposals(str(input_path), select_device())
@@ -249,7 +249,7 @@ def preview_mask(job_id: str, body: dict):
     if not paths.get_checkpoint_path().exists():
         raise HTTPException(
             status_code=400,
-            detail="SAM2 is not installed yet — run `lightsaber-fx setup` first.",
+            detail="SAM2 is not installed yet — run `glowblade setup` first.",
         )
 
     points_and_labels = body.get("points", [])
@@ -369,7 +369,7 @@ async def submit_points(job_id: str, body: dict):
     if not paths.get_checkpoint_path().exists():
         raise HTTPException(
             status_code=400,
-            detail="SAM2 is not installed yet — run `lightsaber-fx setup` first.",
+            detail="SAM2 is not installed yet — run `glowblade setup` first.",
         )
     job_dir = paths.get_jobs_dir() / job_id
     input_path = job_dir / "input.mp4"

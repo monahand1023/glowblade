@@ -22,7 +22,7 @@ from .setup import bootstrap
 @click.group()
 @click.version_option()
 def main():
-    """lightsaber-fx: turn a home video into a lightsaber VFX clip."""
+    """glowblade: turn a home video into a lightsaber VFX clip."""
 
 
 @main.command()
@@ -48,7 +48,7 @@ def _render_options(f):
         help="Rebuild the blade as an extended capsule (default), or fall back to tracing the raw mask.",
     )(f)
     f = click.option(
-        "--voice", default="neutral", type=click.Choice(["jedi", "sith", "neutral"]),
+        "--voice", default="neutral", type=click.Choice(["bright", "deep", "neutral"]),
         help="Hum/swing character. Independent of --color.",
     )(f)
     return f
@@ -70,7 +70,7 @@ def _echo_progress(eta):
 @click.option(
     "--keep-intermediate", is_flag=True,
     help="Also keep the job's frames/ after rendering. masks/ is always kept now "
-         "(W1 made it small) so `lightsaber-fx rerender` can reuse this job later "
+         "(W1 made it small) so `glowblade rerender` can reuse this job later "
          "without re-tracking; frames/ is still the disk hog, so it stays opt-in.",
 )
 @click.option(
@@ -87,7 +87,7 @@ def run(input_video, output, color, intensity, blade_extend, voice, keep_interme
     found to accept or override. Pass --no-auto to go straight to clicking.
     """
     if not paths.get_checkpoint_path().exists():
-        raise click.ClickException("SAM2 is not installed yet — run `lightsaber-fx setup` first.")
+        raise click.ClickException("SAM2 is not installed yet — run `glowblade setup` first.")
 
     device = select_device()
     click.echo(f"Using device: {device}")
@@ -145,7 +145,7 @@ def run(input_video, output, color, intensity, blade_extend, voice, keep_interme
     )
     click.echo(
         f"Wrote {result}. Job {job_id} kept at {job_dir} -- "
-        f"`lightsaber-fx rerender {job_id}` re-renders it with a new "
+        f"`glowblade rerender {job_id}` re-renders it with a new "
         "color/intensity/voice without re-tracking."
     )
 
@@ -171,12 +171,12 @@ def rerender(job_id, output, color, intensity, blade_extend, voice):
     required, they are re-extracted from the source clip. If that source
     clip has since been moved, renamed, or deleted, this fails with a clear
     error naming it instead of a traceback -- that is the expected price of
-    not keeping frames/ around for every job. Run `lightsaber-fx jobs` to
+    not keeping frames/ around for every job. Run `glowblade jobs` to
     see which jobs still qualify, and why others don't.
     """
     job_dir = paths.get_jobs_dir() / job_id
     if not job_dir.is_dir():
-        raise click.ClickException(f"No such job: {job_id!r}. Run `lightsaber-fx jobs` to see what's available.")
+        raise click.ClickException(f"No such job: {job_id!r}. Run `glowblade jobs` to see what's available.")
 
     try:
         result = rerender_pipeline(
@@ -237,7 +237,7 @@ def inspect(job_id, frames):
     """
     job_dir = paths.get_jobs_dir() / job_id
     if not job_dir.is_dir():
-        raise click.ClickException(f"No such job: {job_id!r}. Run `lightsaber-fx jobs` to see what's available.")
+        raise click.ClickException(f"No such job: {job_id!r}. Run `glowblade jobs` to see what's available.")
 
     out_dir = job_dir / "debug"
     result = inspect_job(str(job_dir), str(out_dir), n_samples=frames)
@@ -295,7 +295,7 @@ def serve(host, port, open_browser):
 
         threading.Thread(target=opener, daemon=True).start()
 
-    uvicorn.run("lightsaber_fx.web.server:app", host=host, port=port)
+    uvicorn.run("glowblade.web.server:app", host=host, port=port)
 
 
 @main.command()
@@ -304,7 +304,7 @@ def clean():
 
     This removes every job's frames/masks/intermediate files, including any
     render currently in progress -- there is no cross-process lock, so don't
-    run this while another `lightsaber-fx run` or `serve` job is rendering.
+    run this while another `glowblade run` or `serve` job is rendering.
     """
     count = paths.clean_jobs()
     click.echo(f"Removed {count} job director{'y' if count == 1 else 'ies'}.")
