@@ -413,9 +413,13 @@ def run_pipeline_multi(
         # The 2-object case gets this same correction from inside
         # suppress_overlap_bleed above (it needs to run against those
         # in-memory arrays, not a fresh load -- see that function's call
-        # to it). A single-object job has no suppress_overlap_bleed call
-        # at all, so it needs its own entry point here.
-        stabilize_blade_length(paths["motion_paths"][object_ids[0]])
+        # to it). A 1-, 3-, or 4-object job has no suppress_overlap_bleed
+        # call at all (that function only ever compares a pair), so every
+        # object here needs its own entry point call -- not just the
+        # first, which an earlier version of this branch wrongly assumed
+        # was the only case reaching here.
+        for oid in object_ids:
+            stabilize_blade_length(paths["motion_paths"][oid])
 
     for oid in object_ids:
         n_tracked, n_with_blade = track_counts[oid]

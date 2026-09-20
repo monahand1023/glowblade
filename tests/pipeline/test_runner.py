@@ -1321,6 +1321,47 @@ def test_run_pipeline_multi_skips_suppress_overlap_bleed_for_a_four_saber_job(
     )
 
 
+def test_run_pipeline_multi_calls_stabilize_blade_length_for_every_object_in_a_three_saber_job(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # Regression guard: an earlier version of this branch called
+    # stabilize_blade_length(paths["motion_paths"][object_ids[0]]) --
+    # correct for a single-saber job (object_ids has exactly one entry),
+    # but silently only stabilized the *first* of three or four objects
+    # otherwise, since suppress_overlap_bleed (which handles this for the
+    # two-saber case) only ever compares a single pair and never runs for
+    # three or more.
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade}),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.stabilize_blade_length", lambda motion_path: calls.append(motion_path)
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "green", "intensity": 0.35, "voice": "neutral"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    assert len(calls) == 3
+    assert set(calls) == {
+        str(job_dir / "motion" / "0.npz"), str(job_dir / "motion" / "1.npz"), str(job_dir / "motion" / "2.npz"),
+    }
+
+
 def _write_longer_video(path, n_frames, width=64, height=48, fps=10.0):
     """Like the top-level `tiny_video_path` fixture's clip, but with a
     frame count this file controls -- merge detection needs 15+ sustained
