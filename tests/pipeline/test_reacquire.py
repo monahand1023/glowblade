@@ -733,6 +733,47 @@ def test_retrack_overlap_runs_skips_a_run_missing_an_anchor(tmp_path, monkeypatc
         assert np.array_equal(load_mask(str(masks_0), i), _mask_at(60))
 
 
+def test_retrack_overlap_runs_declines_a_run_whose_before_anchor_mask_is_empty(tmp_path, monkeypatch):
+    # Confirmed on real footage (job 0eb4fda2, pair (1, 2)): an empty mask
+    # at the "before" anchor frame reached `_points_on_axis`, whose PCA
+    # over zero points raised an uncaught IndexError, only survived
+    # because retrack_overlap_runs' outer try/except happened to catch it.
+    # This declines the retrack the same clean way an empty after_mask
+    # already does, before track_object (SAM2) ever runs.
+    masks_0 = tmp_path / "masks" / "0"
+    masks_1 = tmp_path / "masks" / "1"
+    n_frames = 30
+    _write_bleed_masks(masks_0, masks_1, n_frames)
+    # Object 0's before-anchor frame (9, the last frame before the run
+    # starts at 10) has no foreground pixels at all.
+    save_mask(str(masks_0), 9, np.zeros((80, 120), dtype=bool))
+
+    motion_path_0 = tmp_path / "0.npz"
+    motion_path_1 = tmp_path / "1.npz"
+    compute_motion(str(masks_0), str(motion_path_0))
+    compute_motion(str(masks_1), str(motion_path_1))
+
+    def fail_if_called_for_object_0(frames_dir, out_masks_dir, points, labels, checkpoint_path,
+                                     config_name, device, n_frames, prompt_frame=0, progress_cb=None):
+        assert points[0][0] >= 40, "track_object should not run for object 0 -- its before anchor is empty"
+        for i in range(prompt_frame, n_frames):
+            save_mask(out_masks_dir, i, _mask_at(60))
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.reacquire.track_object", fail_if_called_for_object_0,
+    )
+
+    patched, resolved_ranges = retrack_overlap_runs(
+        "unused-frames-dir", str(masks_0), str(masks_1), str(motion_path_0), str(motion_path_1),
+        n_frames, checkpoint_path="ckpt", config_name="cfg", device="cpu",
+    )
+
+    assert 0 not in patched
+    assert resolved_ranges == []  # object 0 never validated, so the run isn't fully resolved
+    for i in range(10, 20):
+        assert np.array_equal(load_mask(str(masks_0), i), _mask_at(60))  # unchanged: still the raw bleed
+
+
 def test_retrack_overlap_runs_never_raises_on_unexpected_failure(tmp_path, monkeypatch):
     masks_0 = tmp_path / "masks" / "0"
     masks_1 = tmp_path / "masks" / "1"

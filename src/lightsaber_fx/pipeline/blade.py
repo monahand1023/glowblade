@@ -1504,8 +1504,10 @@ def suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_
     patches, not produces, so it needs their finished output), after
     `reacquire.retrack_overlap_runs` has had a chance to replace a run with
     real independently-tracked masks instead (this is the fallback for
-    whatever that couldn't fix), and only for a 2-object job -- see
-    `runner.run_pipeline_multi`. Both objects are corrected together, not
+    whatever that couldn't fix). Only ever compares one pair at a time --
+    `runner.run_pipeline_multi` calls it once per pair of tracked objects,
+    which for a 3- or 4-saber job means every combination of two, not just
+    a single (0, 1) pair. Both objects are corrected together, not
     just whichever one looks more corrupted -- with the masks actually
     overlapping, neither per-frame fit can be trusted, and guessing which
     one is "more wrong" isn't necessary when correcting both is cheap and

@@ -1,4 +1,5 @@
 import inspect
+import itertools
 import os
 import shutil
 
@@ -890,16 +891,27 @@ def test_run_pipeline_multi_skips_reconcile_pair_for_a_single_saber_job(tmp_path
     )
 
 
-def test_run_pipeline_multi_skips_reconcile_pair_for_a_four_saber_job(tmp_path, monkeypatch, tiny_video_path):
+def test_run_pipeline_multi_calls_reconcile_pair_for_every_pair_in_a_four_saber_job(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # Regression guard: an earlier version of this branch only ever called
+    # reconcile_pair for `len(object_ids) == 2`, skipping it entirely for
+    # a 3- or 4-saber job -- confirmed on a real 3-saber job to let a real
+    # cross-object identity swap (object 0 fully swapping onto object 1's
+    # blade) go completely uncorrected. A 4-saber job has comb(4, 2) = 6
+    # distinct pairs; every one of them must get its own call.
     monkeypatch.setattr(
         "lightsaber_fx.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
     )
+    calls = []
 
-    def fail_if_called(*a, **k):
-        raise AssertionError("reconcile_pair should not run for a four-saber job")
+    def fake_reconcile_pair(frames_dir, masks_dir_0, masks_dir_1, n_frames, checkpoint_path, config_name, device,
+                             client=None):
+        calls.append((masks_dir_0, masks_dir_1))
+        return False
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fail_if_called)
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.reconcile_pair", fake_reconcile_pair)
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -917,6 +929,13 @@ def test_run_pipeline_multi_skips_reconcile_pair_for_a_four_saber_job(tmp_path, 
         checkpoint_path="unused",
         device="cpu",
     )
+
+    expected = {
+        (str(job_dir / "masks" / str(a)), str(job_dir / "masks" / str(b)))
+        for a, b in itertools.combinations(range(4), 2)
+    }
+    assert set(calls) == expected
+    assert len(calls) == 6
 
 
 def test_run_pipeline_multi_calls_retrack_overlap_runs_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
@@ -987,18 +1006,29 @@ def test_run_pipeline_multi_skips_retrack_overlap_runs_for_a_single_saber_job(
     )
 
 
-def test_run_pipeline_multi_skips_retrack_overlap_runs_for_a_four_saber_job(
+def test_run_pipeline_multi_calls_retrack_overlap_runs_for_every_pair_in_a_four_saber_job(
     tmp_path, monkeypatch, tiny_video_path
 ):
+    # Same regression this file guards for reconcile_pair above: a 4-saber
+    # job must run every one of its comb(4, 2) = 6 pairs through
+    # retrack_overlap_runs, not skip it the way an earlier, 2-object-only
+    # version of this branch did.
     monkeypatch.setattr(
         "lightsaber_fx.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
     )
+    calls = []
 
-    def fail_if_called(*a, **k):
-        raise AssertionError("retrack_overlap_runs should not run for a four-saber job")
+    def fake_retrack_overlap_runs(frames_dir, masks_dir_0, masks_dir_1, motion_path_0, motion_path_1,
+                                   n_frames, checkpoint_path, config_name, device):
+        assert os.path.exists(motion_path_0)
+        assert os.path.exists(motion_path_1)
+        calls.append((masks_dir_0, masks_dir_1))
+        return set(), []
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", fail_if_called)
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs
+    )
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1016,6 +1046,13 @@ def test_run_pipeline_multi_skips_retrack_overlap_runs_for_a_four_saber_job(
         checkpoint_path="unused",
         device="cpu",
     )
+
+    expected = {
+        (str(job_dir / "masks" / str(a)), str(job_dir / "masks" / str(b)))
+        for a, b in itertools.combinations(range(4), 2)
+    }
+    assert set(calls) == expected
+    assert len(calls) == 6
 
 
 def test_run_pipeline_multi_calls_compute_hilt_overrides_for_a_two_saber_job(tmp_path, monkeypatch, tiny_video_path):
@@ -1133,6 +1170,69 @@ def test_run_pipeline_multi_reruns_compute_motion_for_objects_retrack_overlap_ru
     obj0_dir = str(job_dir / "masks" / "0")
     obj1_dir = str(job_dir / "masks" / "1")
     assert calls.count(obj0_dir) == 2  # initial pass + re-run after retrack patched it
+    assert calls.count(obj1_dir) == 1  # untouched, so no re-run needed
+
+
+def test_run_pipeline_multi_translates_retrack_overlap_runs_positional_indices_for_a_non_01_pair(
+    tmp_path, monkeypatch, tiny_video_path
+):
+    # retrack_overlap_runs' `patched` return is a subset of the positional
+    # {0, 1} -- 0 meaning whichever masks_dir/motion_path it received as
+    # its own FIRST argument, 1 meaning its second -- never real
+    # object_ids. For the pair (0, 1) these happen to coincide, which is
+    # why this bug survived undetected in the 2-object-only version of
+    # this branch. A 3-saber job's pair (0, 2) does not coincide: real
+    # object 2 is retrack_overlap_runs' positional "1". Confirmed against
+    # real footage (job 0eb4fda2): without the translation, a validated
+    # patch to object 2's masks silently triggered a redundant
+    # compute_motion re-run for object 1 instead, leaving object 2's own
+    # patched masks un-recomputed.
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.track_objects",
+        _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade}),
+    )
+
+    real_compute_motion = compute_motion
+    calls = []
+
+    def counting_compute_motion(masks_dir, motion_out_path, progress_cb=None):
+        calls.append(masks_dir)
+        return real_compute_motion(masks_dir, motion_out_path, progress_cb=progress_cb)
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.compute_motion", counting_compute_motion)
+
+    def fake_retrack_overlap_runs(frames_dir, masks_dir_0, masks_dir_1, motion_path_0, motion_path_1,
+                                   n_frames, checkpoint_path, config_name, device):
+        obj0_dir = str(tmp_path / "job" / "masks" / "0")
+        obj2_dir = str(tmp_path / "job" / "masks" / "2")
+        if masks_dir_0 == obj0_dir and masks_dir_1 == obj2_dir:
+            # Called for pair (0, 2) specifically: claims its own
+            # positional "1" (real object 2) validated.
+            return {1}, []
+        return set(), []
+
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.retrack_overlap_runs", fake_retrack_overlap_runs)
+    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", lambda *a, **k: 0)
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    run_pipeline_multi(
+        input_video=str(tiny_video_path),
+        sabers=[
+            {"points": [[10, 15]], "labels": [1], "color": "red", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "blue", "intensity": 0.35, "voice": "neutral"},
+            {"points": [[10, 15]], "labels": [1], "color": "green", "intensity": 0.35, "voice": "neutral"},
+        ],
+        output_path=str(tmp_path / "final.mp4"),
+        job_dir=str(job_dir),
+        checkpoint_path="unused",
+        device="cpu",
+    )
+
+    obj1_dir = str(job_dir / "masks" / "1")
+    obj2_dir = str(job_dir / "masks" / "2")
+    assert calls.count(obj2_dir) == 2  # initial pass + re-run after the (0, 2) pair patched it
     assert calls.count(obj1_dir) == 1  # untouched, so no re-run needed
 
 
@@ -1290,18 +1390,30 @@ def test_run_pipeline_multi_skips_suppress_overlap_bleed_for_a_single_saber_job(
     )
 
 
-def test_run_pipeline_multi_skips_suppress_overlap_bleed_for_a_four_saber_job(
+def test_run_pipeline_multi_calls_suppress_overlap_bleed_for_every_pair_in_a_four_saber_job(
     tmp_path, monkeypatch, tiny_video_path
 ):
+    # Same regression this file guards for reconcile_pair/retrack_overlap_runs
+    # above: a 4-saber job must run every one of its comb(4, 2) = 6 pairs
+    # through suppress_overlap_bleed too, not skip it the way an earlier,
+    # 2-object-only version of this branch did.
     monkeypatch.setattr(
         "lightsaber_fx.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade, 3: _blade}),
     )
+    calls = []
 
-    def fail_if_called(*a, **k):
-        raise AssertionError("suppress_overlap_bleed should not run for a four-saber job")
+    def fake_suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
+                                     exclude_frame_ranges=(), hilt_overrides_a=None, hilt_overrides_b=None,
+                                     direction_overrides_a=None, direction_overrides_b=None):
+        assert os.path.exists(motion_path_a)
+        assert os.path.exists(motion_path_b)
+        calls.append((masks_dir_a, masks_dir_b))
+        return 0
 
-    monkeypatch.setattr("lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fail_if_called)
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
+    )
 
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1320,24 +1432,45 @@ def test_run_pipeline_multi_skips_suppress_overlap_bleed_for_a_four_saber_job(
         device="cpu",
     )
 
+    expected = {
+        (str(job_dir / "masks" / str(a)), str(job_dir / "masks" / str(b)))
+        for a, b in itertools.combinations(range(4), 2)
+    }
+    assert set(calls) == expected
+    assert len(calls) == 6
 
-def test_run_pipeline_multi_calls_stabilize_blade_length_for_every_object_in_a_three_saber_job(
+
+def test_run_pipeline_multi_stabilizes_length_for_every_object_in_a_three_saber_job(
     tmp_path, monkeypatch, tiny_video_path
 ):
     # Regression guard: an earlier version of this branch called
-    # stabilize_blade_length(paths["motion_paths"][object_ids[0]]) --
-    # correct for a single-saber job (object_ids has exactly one entry),
+    # stabilize_blade_length(paths["motion_paths"][object_ids[0]]) directly
+    # -- correct for a single-saber job (object_ids has exactly one entry),
     # but silently only stabilized the *first* of three or four objects
     # otherwise, since suppress_overlap_bleed (which handles this for the
-    # two-saber case) only ever compares a single pair and never runs for
-    # three or more.
+    # two-saber case) only ever compared a single pair and never ran for
+    # three or more. It now runs once per pair (comb(3, 2) = 3 pairs for a
+    # three-saber job), and each pair's call stabilizes both objects it's
+    # given -- so every object appears in at least one pair and gets
+    # stabilized, without any direct stabilize_blade_length call at all.
     monkeypatch.setattr(
         "lightsaber_fx.pipeline.runner.track_objects",
         _fake_track_objects_writing({0: _blade, 1: _blade, 2: _blade}),
     )
-    calls = []
+    direct_calls = []
     monkeypatch.setattr(
-        "lightsaber_fx.pipeline.runner.stabilize_blade_length", lambda motion_path: calls.append(motion_path)
+        "lightsaber_fx.pipeline.runner.stabilize_blade_length", lambda motion_path: direct_calls.append(motion_path)
+    )
+    pair_calls = []
+
+    def fake_suppress_overlap_bleed(motion_path_a, masks_dir_a, motion_path_b, masks_dir_b,
+                                     exclude_frame_ranges=(), hilt_overrides_a=None, hilt_overrides_b=None,
+                                     direction_overrides_a=None, direction_overrides_b=None):
+        pair_calls.append((masks_dir_a, masks_dir_b))
+        return 0
+
+    monkeypatch.setattr(
+        "lightsaber_fx.pipeline.runner.suppress_overlap_bleed", fake_suppress_overlap_bleed
     )
 
     job_dir = tmp_path / "job"
@@ -1356,10 +1489,14 @@ def test_run_pipeline_multi_calls_stabilize_blade_length_for_every_object_in_a_t
         device="cpu",
     )
 
-    assert len(calls) == 3
-    assert set(calls) == {
-        str(job_dir / "motion" / "0.npz"), str(job_dir / "motion" / "1.npz"), str(job_dir / "motion" / "2.npz"),
+    assert direct_calls == []  # no per-object entry point call for a 3+ object job
+    expected = {
+        (str(job_dir / "masks" / str(a)), str(job_dir / "masks" / str(b)))
+        for a, b in itertools.combinations(range(3), 2)
     }
+    assert set(pair_calls) == expected
+    covered_objects = {oid for pair in pair_calls for oid in pair}
+    assert covered_objects == {str(job_dir / "masks" / str(oid)) for oid in range(3)}
 
 
 def _write_longer_video(path, n_frames, width=64, height=48, fps=10.0):

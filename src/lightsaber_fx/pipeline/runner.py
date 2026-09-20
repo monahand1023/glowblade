@@ -1,3 +1,4 @@
+import itertools
 import os
 import shutil
 
@@ -323,7 +324,24 @@ def run_pipeline_multi(
         progress_cb=stage_cb("track"),
     )
 
-    if len(object_ids) == 2:
+    # Every PAIR of tracked objects can independently suffer the same
+    # cross-object mask bleed/identity-swap this correction pipeline exists
+    # to catch -- it is not specific to there being exactly two tracked
+    # objects. An earlier version of this function only ever ran it for
+    # `len(object_ids) == 2`, on the assumption that a 1-, 3-, or 4-saber
+    # job had no single "the other object" to reconcile against. Confirmed
+    # wrong on a real 3-saber job (job 0eb4fda2): object 0's mask fully
+    # swapped identity onto object 1's blade for 63 of 100 frames, with
+    # zero correction applied, because this whole block never ran for a
+    # 3-object job. A job with N objects has comb(N, 2) pairs (1 for N=2,
+    # 3 for N=3, 6 for N=4) -- looping over all of them reuses the exact
+    # same pairwise functions the old 2-saber-only branch called once,
+    # just once per pair. A single-object job has zero pairs (there is no
+    # "other" object to compare against), so it falls through to its own
+    # `stabilize_blade_length` call below instead.
+    object_pairs = list(itertools.combinations(object_ids, 2))
+
+    for a, b in object_pairs:
         # reconcile_pair's own return value isn't used here: its
         # real_tracked_range means "genuinely computed via SAM2
         # propagation," not "verified accurate for its entire span," and
@@ -339,7 +357,7 @@ def run_pipeline_multi(
         # accuracy check (drift against known-good geometry) and are
         # trusted enough to exclude.
         reconcile_pair(
-            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
+            paths["frames_dir"], paths["masks_dirs"][a], paths["masks_dirs"][b],
             n_frames, checkpoint_path, config_name, device,
         )
 
@@ -349,7 +367,17 @@ def run_pipeline_multi(
             paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
         )
 
-    if len(object_ids) == 2:
+    if not object_pairs:
+        # No second tracked object exists for a single-saber job, so none
+        # of the cross-object correction above applies -- length
+        # stabilization is the only per-object correction it still needs,
+        # and every N>=2 object gets the equivalent of this for free from
+        # suppress_overlap_bleed below (each pair's call stabilizes both
+        # objects it's given, and every object appears in at least one
+        # pair).
+        stabilize_blade_length(paths["motion_paths"][object_ids[0]])
+
+    for a, b in object_pairs:
         # Try a real independent re-track through each cross-object
         # overlap run first -- strictly more accurate than
         # suppress_overlap_bleed's geometry interpolation when it
@@ -357,11 +385,25 @@ def run_pipeline_multi(
         # re-run (it rewrites mask files, not motion.npz) before anything
         # downstream, including suppress_overlap_bleed itself, sees them.
         retracked, resolved_ranges = retrack_overlap_runs(
-            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
-            paths["motion_paths"][0], paths["motion_paths"][1],
+            paths["frames_dir"], paths["masks_dirs"][a], paths["masks_dirs"][b],
+            paths["motion_paths"][a], paths["motion_paths"][b],
             n_frames, checkpoint_path, config_name, device,
         )
-        for oid in retracked:
+        # retrack_overlap_runs' `patched` return is a subset of the
+        # positional `{0, 1}` -- 0 meaning whichever object was passed as
+        # its own first masks_dir/motion_path argument, 1 meaning its
+        # second -- not real object_ids. The original 2-object-only branch
+        # this loop replaced always called it with (a, b) == (0, 1), so
+        # indexing straight into it happened to be correct by coincidence.
+        # Any other pair (e.g. (0, 2) or (1, 2), both possible once 3+
+        # objects are looped over) needs this translated back through the
+        # pair actually passed in, or a patch to object 2 silently
+        # recomputes motion for object 1 instead -- confirmed by running
+        # this loop for real against job 0eb4fda2's 3-saber footage, where
+        # pair (0, 2) returned `{1}` meaning "its own second object" (2),
+        # not real object 1.
+        pair = (a, b)
+        for oid in {pair[i] for i in retracked}:
             track_counts[oid] = compute_motion(
                 paths["masks_dirs"][oid], paths["motion_paths"][oid], progress_cb=stage_cb("motion"),
             )
@@ -374,9 +416,9 @@ def run_pipeline_multi(
         # approaches got confused. Same exclude_frame_ranges as
         # suppress_overlap_bleed below -- a run retrack_overlap_runs
         # already resolved needs nothing further.
-        hilt_overrides_0, hilt_overrides_1 = compute_hilt_overrides(
-            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
-            paths["motion_paths"][0], paths["motion_paths"][1],
+        hilt_overrides_a, hilt_overrides_b = compute_hilt_overrides(
+            paths["frames_dir"], paths["masks_dirs"][a], paths["masks_dirs"][b],
+            paths["motion_paths"][a], paths["motion_paths"][b],
             exclude_frame_ranges=resolved_ranges,
         )
 
@@ -388,9 +430,9 @@ def run_pipeline_multi(
         # interpolate, which visibly missed the real blade's angle. Same
         # optical-flow technique as compute_hilt_overrides, tracking a
         # point further out along the blade instead of the hilt itself.
-        direction_overrides_0, direction_overrides_1 = compute_direction_overrides(
-            paths["frames_dir"], paths["masks_dirs"][0], paths["masks_dirs"][1],
-            paths["motion_paths"][0], paths["motion_paths"][1],
+        direction_overrides_a, direction_overrides_b = compute_direction_overrides(
+            paths["frames_dir"], paths["masks_dirs"][a], paths["masks_dirs"][b],
+            paths["motion_paths"][a], paths["motion_paths"][b],
             exclude_frame_ranges=resolved_ranges,
         )
 
@@ -401,25 +443,16 @@ def run_pipeline_multi(
         # fallback for whatever retrack_overlap_runs above couldn't fix;
         # exclude_frame_ranges excludes only what it already fixed and
         # validated -- see the reconcile_pair comment above for why
-        # reconcile_pair's own output isn't included here too.
+        # reconcile_pair's own output isn't included here too. Also the
+        # only place a 3+ object job's length stabilization comes from --
+        # see the `if not object_pairs` comment above.
         suppress_overlap_bleed(
-            paths["motion_paths"][0], paths["masks_dirs"][0],
-            paths["motion_paths"][1], paths["masks_dirs"][1],
+            paths["motion_paths"][a], paths["masks_dirs"][a],
+            paths["motion_paths"][b], paths["masks_dirs"][b],
             exclude_frame_ranges=resolved_ranges,
-            hilt_overrides_a=hilt_overrides_0, hilt_overrides_b=hilt_overrides_1,
-            direction_overrides_a=direction_overrides_0, direction_overrides_b=direction_overrides_1,
+            hilt_overrides_a=hilt_overrides_a, hilt_overrides_b=hilt_overrides_b,
+            direction_overrides_a=direction_overrides_a, direction_overrides_b=direction_overrides_b,
         )
-    else:
-        # The 2-object case gets this same correction from inside
-        # suppress_overlap_bleed above (it needs to run against those
-        # in-memory arrays, not a fresh load -- see that function's call
-        # to it). A 1-, 3-, or 4-object job has no suppress_overlap_bleed
-        # call at all (that function only ever compares a pair), so every
-        # object here needs its own entry point call -- not just the
-        # first, which an earlier version of this branch wrongly assumed
-        # was the only case reaching here.
-        for oid in object_ids:
-            stabilize_blade_length(paths["motion_paths"][oid])
 
     for oid in object_ids:
         n_tracked, n_with_blade = track_counts[oid]

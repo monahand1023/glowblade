@@ -500,6 +500,17 @@ def _retrack_one_object(frames_dir, masks_dir, obj_idx, before_frame, after_fram
         return False
 
     before_mask = load_mask(masks_dir, before_frame)
+    if not before_mask.any():
+        # No foreground pixels to seed a re-track from -- confirmed on
+        # real footage (job 0eb4fda2, pair (1, 2)): an empty before_mask
+        # reached `_points_on_axis`, whose PCA over zero points raised an
+        # uncaught IndexError. The outer try/except in
+        # `retrack_overlap_runs` swallowed it and fell back to
+        # interpolation anyway, so this returns the same False this
+        # function already returns for the equally-untrackable empty
+        # after_mask case above, without relying on an unrelated crash to
+        # get there.
+        return False
     points = _points_on_axis(before_mask)
 
     with tempfile.TemporaryDirectory() as fresh_masks_dir:
