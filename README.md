@@ -1,5 +1,8 @@
 # Glowblade
 
+<img src="images/glowblade-baseball.gif" width="480" alt="Split screen: a raw home-video baseball swing on the left, the same clip on the right with the bat replaced by a glowing energy blade, matching light spill, and synthesized hum">
+<img src="images/glowblade-thrust.gif" width="480" alt="Split screen: a raw fencing thrust on the left, the same clip on the right with the foil replaced by a glowing blue blade against a black background">
+
 Turn a home video of someone swinging a stick — a bat, a broom, a toy sword —
 into a glowing-blade VFX clip with matching sound, usually without clicking
 anything.
